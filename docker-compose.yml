@@ -1,0 +1,23 @@
+# Fusion Schema MCP server — run in the CloudBeaver WSL Docker host.
+#   docker compose build
+#   docker compose up -d
+#   curl http://localhost:8979/health
+services:
+  fusion-schema-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gnimsys/fusion-schema-mcp:latest
+    container_name: fusion-schema-mcp
+    ports:
+      - "8979:8979"
+    environment:
+      MCP_PORT: "8979"
+      MCP_HOST: "0.0.0.0"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8979/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

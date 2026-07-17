@@ -1,0 +1,9 @@
+node_modules
+dist
+catalog.sqlite
+catalog.sqlite-*
+*.log
+npm-debug.log*
+.git
+# keep data/ (needed by the build stage compile) but drop the human-readable report
+data/goal2_relationships_report.md

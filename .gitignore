@@ -1,0 +1,8 @@
+node_modules/
+dist/
+catalog.sqlite
+catalog.sqlite-*
+*.log
+# data CSVs are large (~250MB); regenerate via scripts/copy-data.sh from DB_SCHEMA
+data/*.csv
+data/*.json
