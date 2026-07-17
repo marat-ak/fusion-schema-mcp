@@ -117,5 +117,25 @@ export function buildServer(): McpServer {
     async ({ table }) => reply("getRelatedTables", { table }, catalog.getRelatedTables(table)),
   );
 
+  server.registerTool(
+    "findSimilarQueries",
+    {
+      title: "Find similar real report SQL by intent",
+      description:
+        "Semantic search over ~100K real Fusion report/view/OTBI SQLs. Given a natural-language " +
+        "intent, returns the closest real queries as clean SQL few-shot templates, each with its " +
+        "tables, joins, filters and lookup types. Use FIRST when generating SQL from NL, then " +
+        "ground the result with validateTable/getColumns/getRelatedTables.",
+      inputSchema: {
+        intent: z.string().describe("Natural-language description of the query you want"),
+        source: z.enum(["otbi", "catalog", "view"]).optional().describe("Restrict to one corpus"),
+        limit: z.number().int().min(1).max(20).optional().describe("Max examples (default 5)"),
+      },
+    },
+    async ({ intent, source, limit }) =>
+      reply("findSimilarQueries", { intent, source, limit },
+        await catalog.findSimilarQueries(intent, { source, limit: limit ?? 5 })),
+  );
+
   return server;
 }
