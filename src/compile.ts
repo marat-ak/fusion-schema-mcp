@@ -13,7 +13,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "csv-parse";
 import Database from "better-sqlite3";
+import { load as loadVec } from "sqlite-vec";
 import { nn, toInt } from "./util.js";
+import { openEnrichStore } from "./corpus/enrichStore.js";
+import { embed, EMBED_DIM } from "./corpus/embed.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -98,7 +101,9 @@ async function main() {
       to_col TEXT,
       evidence TEXT,
       occurrences INTEGER,
-      confidence TEXT
+      confidence TEXT,
+      predicate TEXT,
+      source TEXT
     );
   `);
 
@@ -235,8 +240,8 @@ async function main() {
     confidence?: string;
   }>;
   const insRel = db.prepare(
-    `INSERT INTO relationships (from_table, from_col, to_table, to_col, evidence, occurrences, confidence)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO relationships (from_table, from_col, to_table, to_col, evidence, occurrences, confidence, source)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'mined')`,
   );
   db.exec("BEGIN");
   let relKept = 0;
@@ -255,6 +260,26 @@ async function main() {
   }
   db.exec("COMMIT");
   log(`mined_relationships: kept ${relKept}`);
+
+  // ---- OTBI relations (with predicate / outer join) ----
+  const otbiRelPath = path.join(DATA_DIR, "otbi_relations.json");
+  if (fs.existsSync(otbiRelPath)) {
+    const arr = JSON.parse(fs.readFileSync(otbiRelPath, "utf8")) as Array<{
+      fromTable: string; fromColumn: string; toTable: string; toColumn: string; predicate?: string;
+    }>;
+    const insOtbi = db.prepare(
+      `INSERT INTO relationships (from_table, from_col, to_table, to_col, predicate, source)
+       VALUES (?, ?, ?, ?, ?, 'otbi')`);
+    db.exec("BEGIN");
+    let n = 0;
+    for (const r of arr) {
+      if (!r.fromTable || !r.toTable) continue;
+      insOtbi.run(r.fromTable, r.fromColumn ?? null, r.toTable, r.toColumn ?? null, r.predicate || null);
+      n++;
+    }
+    db.exec("COMMIT");
+    log(`otbi_relations: kept ${n}`);
+  }
 
   // ---- indexes for lookup ----
   log("building lookup indexes...");
@@ -287,6 +312,52 @@ async function main() {
   insMeta.run("columns", String(colKept));
   insMeta.run("fkeys", String(fkKept));
   insMeta.run("relationships", String(relKept));
+
+  // ---- report_queries corpus (from enrich.sqlite) ----
+  loadVec(db);
+  db.exec(`
+    CREATE TABLE report_queries (
+      id TEXT PRIMARY KEY, source TEXT, title TEXT,
+      original_sql TEXT, clean_sql TEXT, description TEXT,
+      tables_used TEXT, joins TEXT, filters TEXT, lookup_types TEXT,
+      security_predicate TEXT, approved INTEGER
+    );
+    CREATE VIRTUAL TABLE report_queries_fts USING fts5(title, description, tables_used, content='');
+    CREATE VIRTUAL TABLE report_queries_vec USING vec0(rowid INTEGER PRIMARY KEY, embedding FLOAT[${EMBED_DIM}]);
+  `);
+  const enrich = openEnrichStore();
+  const rows = enrich.all().filter((r) => r.description); // only enriched rows
+  // rowid is set explicitly on ALL three tables so the vec/FTS JOIN back to
+  // report_queries by rowid is guaranteed aligned. rowid is bound as BigInt and
+  // the embedding as a Node Buffer of the Float32 bytes — sqlite-vec rejects a
+  // plain JS number PK ("Only integers are allowed") and a Uint8Array blob.
+  const insRq = db.prepare(`
+    INSERT INTO report_queries (rowid, id, source, title, original_sql, clean_sql, description,
+      tables_used, joins, filters, lookup_types, security_predicate, approved)
+    VALUES (@rowid,@id,@source,@title,@original_sql,@clean_sql,@description,@tables_used,@joins,@filters,@lookup_types,@security_predicate,@approved)`);
+  const insFts = db.prepare("INSERT INTO report_queries_fts (rowid, title, description, tables_used) VALUES (?,?,?,?)");
+  const insVec = db.prepare("INSERT INTO report_queries_vec (rowid, embedding) VALUES (?, ?)");
+  log(`embedding ${rows.length} descriptions...`);
+  let rid = 0;
+  const BATCH = 256;
+  for (let i = 0; i < rows.length; i += BATCH) {
+    const chunk = rows.slice(i, i + BATCH);
+    const vecs = await embed(chunk.map((r) => r.description!));
+    const tx = db.transaction(() => {
+      chunk.forEach((r, k) => {
+        rid++;
+        insRq.run({ rowid: BigInt(rid), id: r.id, source: r.source, title: r.title, original_sql: r.originalSql,
+          clean_sql: r.cleanSql, description: r.description,
+          tables_used: JSON.stringify(r.tablesUsed), joins: JSON.stringify(r.joins),
+          filters: JSON.stringify(r.filters), lookup_types: JSON.stringify(r.lookupTypes),
+          security_predicate: r.securityPredicate, approved: r.approved });
+        insFts.run(BigInt(rid), r.title, r.description, r.tablesUsed.join(" "));
+        insVec.run(BigInt(rid), Buffer.from(vecs[k].buffer));
+      });
+    });
+    tx();
+  }
+  log(`report_queries: ${rid}`);
 
   db.pragma("journal_mode = DELETE");
   db.exec("VACUUM");
