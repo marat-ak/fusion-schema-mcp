@@ -32,7 +32,7 @@ export function openEnrichStore(dbPath: string = DEFAULT) {
       security_predicate TEXT, approved INTEGER DEFAULT 0
     );`);
 
-  const qHash = db.prepare("SELECT source_hash FROM enrich WHERE id = ?");
+  const qHash = db.prepare("SELECT source_hash, description FROM enrich WHERE id = ?");
   const insSrc = db.prepare(`
     INSERT INTO enrich (id, source, title, source_hash, original_sql)
     VALUES (@id, @source, @title, @sourceHash, @originalSql)
@@ -58,8 +58,8 @@ export function openEnrichStore(dbPath: string = DEFAULT) {
   return {
     pendingIds(sources: SqlSource[]): SqlSource[] {
       return sources.filter((s) => {
-        const row = qHash.get(s.id) as { source_hash: string } | undefined;
-        return !row || row.source_hash !== s.sourceHash;
+        const row = qHash.get(s.id) as { source_hash: string; description: string | null } | undefined;
+        return !row || row.source_hash !== s.sourceHash || row.description == null;
       });
     },
     upsertSource(s: SqlSource) { insSrc.run(s); },
@@ -70,6 +70,10 @@ export function openEnrichStore(dbPath: string = DEFAULT) {
     },
     get(id: string) { return toRow(qGet.get(id)); },
     all(): EnrichRow[] { return (qAll.all() as any[]).map(toRow); },
+    *iterateEnriched(): Generator<EnrichRow> {
+      const stmt = db.prepare("SELECT * FROM enrich WHERE description IS NOT NULL");
+      for (const r of stmt.iterate() as any) yield toRow(r);
+    },
     db,
   };
 }

@@ -326,7 +326,6 @@ async function main() {
     CREATE VIRTUAL TABLE report_queries_vec USING vec0(rowid INTEGER PRIMARY KEY, embedding FLOAT[${EMBED_DIM}]);
   `);
   const enrich = openEnrichStore();
-  const rows = enrich.all().filter((r) => r.description); // only enriched rows
   // rowid is set explicitly on ALL three tables so the vec/FTS JOIN back to
   // report_queries by rowid is guaranteed aligned. rowid is bound as BigInt and
   // the embedding as a Node Buffer of the Float32 bytes — sqlite-vec rejects a
@@ -337,12 +336,13 @@ async function main() {
     VALUES (@rowid,@id,@source,@title,@original_sql,@clean_sql,@description,@tables_used,@joins,@filters,@lookup_types,@security_predicate,@approved)`);
   const insFts = db.prepare("INSERT INTO report_queries_fts (rowid, title, description, tables_used) VALUES (?,?,?,?)");
   const insVec = db.prepare("INSERT INTO report_queries_vec (rowid, embedding) VALUES (?, ?)");
-  log(`embedding ${rows.length} descriptions...`);
+  log(`embedding report_queries descriptions...`);
   let rid = 0;
-  const BATCH = 256;
-  for (let i = 0; i < rows.length; i += BATCH) {
-    const chunk = rows.slice(i, i + BATCH);
-    const vecs = await embed(chunk.map((r) => r.description!));
+  let buf: any[] = [];
+  const flush = async () => {
+    if (!buf.length) return;
+    const vecs = await embed(buf.map((r) => r.description!));
+    const chunk = buf; buf = [];
     const tx = db.transaction(() => {
       chunk.forEach((r, k) => {
         rid++;
@@ -356,7 +356,9 @@ async function main() {
       });
     });
     tx();
-  }
+  };
+  for (const r of enrich.iterateEnriched()) { buf.push(r); if (buf.length >= 256) await flush(); }
+  await flush();
   log(`report_queries: ${rid}`);
 
   db.pragma("journal_mode = DELETE");

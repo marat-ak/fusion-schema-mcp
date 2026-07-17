@@ -19,7 +19,6 @@ if (!fs.existsSync(DB_PATH)) {
 
 const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
 db.pragma("query_only = true");
-loadVec(db);
 
 // In-memory table-name list for fuzzy did-you-mean (~30k strings, cheap).
 const ALL_NAMES: string[] = db
@@ -249,22 +248,33 @@ export function getRelatedTables(table: string) {
   return { tableExists: true, related: out };
 }
 
-const qVec = db.prepare(
-  `SELECT rq.id, rq.source, rq.title, rq.description, rq.clean_sql,
-          rq.tables_used, rq.joins, rq.filters, rq.lookup_types,
-          v.distance AS distance
-   FROM report_queries_vec v
-   JOIN report_queries rq ON rq.rowid = v.rowid
-   WHERE v.embedding MATCH ? AND k = ?
-   ORDER BY v.distance`);
-const qVecSrc = db.prepare(
-  `SELECT rq.id, rq.source, rq.title, rq.description, rq.clean_sql,
-          rq.tables_used, rq.joins, rq.filters, rq.lookup_types,
-          v.distance AS distance
-   FROM report_queries_vec v
-   JOIN report_queries rq ON rq.rowid = v.rowid
-   WHERE v.embedding MATCH ? AND k = ? AND rq.source = ?
-   ORDER BY v.distance`);
+const SRC_OVERFETCH = 40;
+let _vecStmts: { qVec: any; qVecSrc: any } | null = null;
+function vecStmts() {
+  if (!_vecStmts) {
+    loadVec(db);
+    _vecStmts = {
+      qVec: db.prepare(
+        `SELECT rq.id, rq.source, rq.title, rq.description, rq.clean_sql,
+                rq.tables_used, rq.joins, rq.filters, rq.lookup_types,
+                v.distance AS distance
+         FROM report_queries_vec v
+         JOIN report_queries rq ON rq.rowid = v.rowid
+         WHERE v.embedding MATCH ? AND k = ?
+         ORDER BY v.distance`),
+      qVecSrc: db.prepare(
+        `SELECT rq.id, rq.source, rq.title, rq.description, rq.clean_sql,
+                rq.tables_used, rq.joins, rq.filters, rq.lookup_types,
+                v.distance AS distance
+         FROM report_queries_vec v
+         JOIN report_queries rq ON rq.rowid = v.rowid
+         WHERE v.embedding MATCH ? AND k = ? AND rq.source = ?
+         ORDER BY v.distance
+         LIMIT ?`),
+    };
+  }
+  return _vecStmts;
+}
 
 export async function findSimilarQueries(
   intent: string, opts: { source?: string; limit?: number } = {},
@@ -272,8 +282,9 @@ export async function findSimilarQueries(
   const limit = opts.limit ?? 5;
   const [vec] = await embed([intent]);
   const blob = Buffer.from(vec.buffer);
+  const { qVec, qVecSrc } = vecStmts();
   const rows = (opts.source
-    ? qVecSrc.all(blob, limit, opts.source)
+    ? qVecSrc.all(blob, limit * SRC_OVERFETCH, opts.source, limit)
     : qVec.all(blob, limit)) as any[];
   return rows.map((r) => ({
     id: r.id, source: r.source, title: r.title, description: r.description,
@@ -282,6 +293,6 @@ export async function findSimilarQueries(
     joins: JSON.parse(r.joins ?? "[]"),
     filters: JSON.parse(r.filters ?? "[]"),
     lookupTypes: JSON.parse(r.lookup_types ?? "[]"),
-    score: 1 - r.distance,
+    score: 1 - (r.distance * r.distance) / 2,
   }));
 }

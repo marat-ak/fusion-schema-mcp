@@ -16,8 +16,18 @@ test("pendingIds reports new and hash-changed rows only", () => {
   const store = openEnrichStore(db);
   assert.equal(store.pendingIds([src()]).length, 1);           // new
   store.upsertSource(src());
-  assert.equal(store.pendingIds([src()]).length, 0);           // same hash
+  store.setEnrichment("otbi:X", { cleanSql: "x", description: "d", tablesUsed: [], lookupTypes: [], joins: [], filters: [], securityPredicate: null });
+  assert.equal(store.pendingIds([src()]).length, 0);           // same hash, enriched
   assert.equal(store.pendingIds([src({ sourceHash: "h2" })]).length, 1); // changed
+});
+
+test("pendingIds re-selects a row that was upserted but never enriched", () => {
+  const db = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "en-")), "e.sqlite");
+  const store = openEnrichStore(db);
+  store.upsertSource(src());                 // source row, description still NULL
+  assert.equal(store.pendingIds([src()]).length, 1, "un-enriched row stays pending");
+  store.setEnrichment("otbi:X", { cleanSql: "x", description: "d", tablesUsed: [], lookupTypes: [], joins: [], filters: [], securityPredicate: null });
+  assert.equal(store.pendingIds([src()]).length, 0, "enriched row no longer pending");
 });
 
 test("setEnrichment persists and is readable", () => {
