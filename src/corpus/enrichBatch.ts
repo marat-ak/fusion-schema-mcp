@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import { scanSources } from "./sources.js";
@@ -25,12 +26,15 @@ async function main() {
   console.error(`[enrich] ${sources.length} sources scanned, ${pending.length} pending, budget=$${BUDGET === Infinity ? "∞" : BUDGET}`);
   if (pending.length === 0) { console.error("[enrich] nothing to do"); return; }
 
-  const byId = new Map(pending.map((s) => [s.id, s]));
+  // Batch API caps custom_id at 64 chars; our source ids (full OTBI filenames) exceed it.
+  // Use a stable 40-hex-char hash of the id as custom_id and map it back.
+  const cid = (id: string) => crypto.createHash("sha256").update(id).digest("hex").slice(0, 40);
+  const byCustom = new Map(pending.map((s) => [cid(s.id), s]));
   const client = new Anthropic();
   const requests = pending.map((s) => {
     const p = buildEnrichPrompt(s);
     return {
-      custom_id: s.id,
+      custom_id: cid(s.id),
       params: {
         model: "claude-haiku-4-5", max_tokens: s.source === "otbi" ? 8000 : 3000,
         system: p.system,
@@ -67,9 +71,9 @@ async function main() {
 
     let cIn = 0, cOut = 0, cOk = 0, cBad = 0;
     for await (const res of await client.messages.batches.results(batch.id)) {
-      const s = byId.get(res.custom_id);
+      const s = byCustom.get(res.custom_id);
       if (!s) continue;
-      if (res.result.type !== "succeeded") { console.error(`[enrich] result ${res.result.type} for ${res.custom_id}`); bad++; cBad++; badIds.push(res.custom_id); continue; }
+      if (res.result.type !== "succeeded") { console.error(`[enrich] result ${res.result.type} for ${s.id}`); bad++; cBad++; badIds.push(s.id); continue; }
       const usage = res.result.message.usage as any;
       cIn += usage?.input_tokens ?? 0;
       cOut += usage?.output_tokens ?? 0;
