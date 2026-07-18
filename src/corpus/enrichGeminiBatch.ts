@@ -50,7 +50,7 @@ async function main() {
       const p = buildEnrichPrompt(s);
       return {
         contents: p.user,
-        config: { systemInstruction: p.system, responseMimeType: "application/json", thinkingConfig: { thinkingBudget: 0 } },
+        config: { systemInstruction: p.system, responseMimeType: "application/json", thinkingConfig: { thinkingBudget: 0 }, maxOutputTokens: 8192 },
         metadata: { key: cid(s.id) },
       };
     });
