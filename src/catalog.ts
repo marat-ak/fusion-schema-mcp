@@ -296,3 +296,51 @@ export async function findSimilarQueries(
     score: 1 - (r.distance * r.distance) / 2,
   }));
 }
+
+// ---- exact report-query lookup (by title / subject area) ----
+// Lazily prepared so an un-migrated catalog.sqlite (no report_queries) doesn't crash
+// the whole server at import — same pattern as vecStmts().
+let _rqStmts: { byTitle: any; byArea: any; near: any } | null = null;
+function rqStmts() {
+  if (!_rqStmts) {
+    _rqStmts = {
+      byTitle: db.prepare(
+        `SELECT id, source, title, original_sql, clean_sql, description,
+                tables_used, joins, filters, lookup_types, security_predicate
+         FROM report_queries WHERE title = ?`),
+      byArea: db.prepare(
+        `SELECT id, source, title, description FROM report_queries
+         WHERE title LIKE ? ORDER BY title LIMIT ?`),
+      near: db.prepare(
+        `SELECT title FROM report_queries WHERE title LIKE ? ORDER BY title LIMIT 8`),
+    };
+  }
+  return _rqStmts;
+}
+
+/** Exact query behind a title (OTBI title = "subjectArea.table"). Returns original + clean SQL. */
+export function getReportQuery(title: string) {
+  const { byTitle, near } = rqStmts();
+  const r = byTitle.get(title) as any;
+  if (!r) {
+    const suggestions = (near.all(`%${title}%`) as any[]).map((x) => x.title);
+    return { found: false, suggestions };
+  }
+  return {
+    found: true, id: r.id, source: r.source, title: r.title,
+    originalSql: r.original_sql, cleanSql: r.clean_sql, description: r.description,
+    tablesUsed: JSON.parse(r.tables_used ?? "[]"),
+    joins: JSON.parse(r.joins ?? "[]"),
+    filters: JSON.parse(r.filters ?? "[]"),
+    lookupTypes: JSON.parse(r.lookup_types ?? "[]"),
+    securityPredicate: r.security_predicate,
+  };
+}
+
+/** All report queries under a subject area (OTBI). Matches "<area>.*" then falls back to "<area>%". */
+export function listQueriesForSubjectArea(area: string, limit = 100) {
+  const { byArea } = rqStmts();
+  let rows = byArea.all(`${area}.%`, limit) as any[];
+  if (rows.length === 0) rows = byArea.all(`${area}%`, limit) as any[];
+  return rows.map((r) => ({ id: r.id, source: r.source, title: r.title, description: r.description }));
+}

@@ -137,5 +137,39 @@ export function buildServer(): McpServer {
         await catalog.findSimilarQueries(intent, { source, limit: limit ?? 5 })),
   );
 
+  server.registerTool(
+    "getReportQuery",
+    {
+      title: "Get the exact SQL behind a report / subject-area table",
+      description:
+        "Exact lookup of a real query by its title. For OTBI the title is 'SubjectArea.Table' " +
+        "(e.g. 'Absence Management - Leave Donations Real Time.Contracts'); for catalog/view it is " +
+        "the report path / view name. Returns the ORIGINAL SQL (raw OTBI physical or human SQL) plus " +
+        "the clean rewrite, description, tables, joins, filters and lookups. If the title isn't found, " +
+        "returns fuzzy suggestions. Use when the user asks 'what is the SELECT behind <subject area> <table>'.",
+      inputSchema: {
+        title: z.string().describe("Exact title, e.g. 'SubjectArea.Table' or a report path / view name"),
+      },
+    },
+    async ({ title }) => reply("getReportQuery", { title }, catalog.getReportQuery(title)),
+  );
+
+  server.registerTool(
+    "listQueriesForSubjectArea",
+    {
+      title: "List all report queries under a subject area",
+      description:
+        "Lists every real query whose title falls under the given OTBI subject area (or any title " +
+        "prefix), returning id/source/title/description for each. Use to discover which tables a " +
+        "subject area exposes, then fetch one with getReportQuery.",
+      inputSchema: {
+        area: z.string().describe("Subject-area name or title prefix, e.g. 'Absence Management - Leave Donations Real Time'"),
+        limit: z.number().int().min(1).max(500).optional().describe("Max results (default 100)"),
+      },
+    },
+    async ({ area, limit }) =>
+      reply("listQueriesForSubjectArea", { area, limit }, catalog.listQueriesForSubjectArea(area, limit ?? 100)),
+  );
+
   return server;
 }
