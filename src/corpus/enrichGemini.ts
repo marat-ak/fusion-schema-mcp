@@ -7,8 +7,11 @@ import { buildEnrichPrompt, parseEnrichReply } from "./enrichPrompt.js";
 
 // Gemini Flash-Lite. Rates are env-overridable; defaults are a conservative non-batch
 // estimate — the TRUE cost is your Google console. We log exact token counts so you can reconcile.
-const IN_RATE = Number(process.env.GIN_RATE ?? 0.10) / 1_000_000;
-const OUT_RATE = Number(process.env.GOUT_RATE ?? 0.40) / 1_000_000;
+// Defaults = Gemini 3.1 Flash-Lite STANDARD ($0.25 in / $1.50 out per 1M) — the cheapest
+// flash-lite a new AI Studio key can use (2.5/2.0 flash-lite are blocked for new users).
+// Override for batch (0.125/0.75) or another model via GIN_RATE/GOUT_RATE.
+const IN_RATE = Number(process.env.GIN_RATE ?? 0.25) / 1_000_000;
+const OUT_RATE = Number(process.env.GOUT_RATE ?? 1.50) / 1_000_000;
 const MODEL = process.env.GMODEL ?? "gemini-flash-lite-latest";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
