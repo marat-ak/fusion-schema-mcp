@@ -9,3 +9,5 @@ data/*.json
 _scratch/
 data/enrich.sqlite*
 .superpowers/
+.env
+samples_*.sql
