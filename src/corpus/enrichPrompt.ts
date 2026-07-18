@@ -44,8 +44,30 @@ export function buildEnrichPrompt(s: SqlSource): { system: string; user: string;
   return { system: SYSTEM_DESC, user, schema: ENRICH_SCHEMA };
 }
 
+/**
+ * Lenient JSON extraction — models occasionally wrap the object in ```json fences or append
+ * prose after it ("Unexpected non-whitespace character after JSON"). Strip fences, then
+ * balance-match the first complete {...} object. Truncated JSON (never balances) still throws.
+ */
+function extractJson(text: string): any {
+  const t = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  try { return JSON.parse(t); } catch {}
+  const start = t.indexOf("{");
+  if (start >= 0) {
+    let depth = 0, inStr = false, esc = false;
+    for (let i = start; i < t.length; i++) {
+      const c = t[i];
+      if (inStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') inStr = false; }
+      else if (c === '"') inStr = true;
+      else if (c === "{") depth++;
+      else if (c === "}") { if (--depth === 0) return JSON.parse(t.slice(start, i + 1)); }
+    }
+  }
+  throw new Error("no parseable JSON object");
+}
+
 export function parseEnrichReply(text: string, s: SqlSource): Enrichment {
-  const j = JSON.parse(text);
+  const j = extractJson(text);
   if (typeof j.description !== "string") throw new Error(`enrich reply missing description for ${s.id}`);
   const m = s.source === "otbi" ? otbiMeta(s.raw) : { lookupTypes: [], joins: [], filters: [], securityPredicate: null, tablesUsed: [] };
   return {
