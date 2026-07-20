@@ -120,21 +120,35 @@ export function buildServer(): McpServer {
   server.registerTool(
     "findSimilarQueries",
     {
-      title: "Find similar real report SQL by intent",
+      title: "Find similar real report SQL by intent (domain-aware)",
       description:
-        "Semantic search over ~100K real Fusion report/view/OTBI SQLs. Given a natural-language " +
-        "intent, returns the closest real queries as clean SQL few-shot templates, each with its " +
-        "tables, joins, filters and lookup types. Use FIRST when generating SQL from NL, then " +
-        "ground the result with validateTable/getColumns/getRelatedTables.",
+        "Semantic search over ~100K real Fusion report/view/OTBI SQLs. Use FIRST when generating " +
+        "SQL from NL. DOMAIN-AWARE: it classifies the closest real reports into business-domain " +
+        "keys by each table's Fusion application module — top level (HCM / Procurement / SCM / " +
+        "Payroll / Projects / CRM...) and, within Financials, sub-ledger level (Financials/AP, " +
+        "Financials/AR, Financials/GL, Financials/Budgetary, Financials/FA, Financials/Cash...). \n" +
+        "- If the matches split across >=2 near-tied domains — cross-domain ('department' = HCM " +
+        "org unit vs Financials COA segment) OR sub-ledger ('invoice' = Financials/AP supplier " +
+        "invoice vs Financials/AR customer invoice) — it returns {ambiguous:true, domainBreakdown, " +
+        "guidance, candidates} WITH NO SQL. You MUST resolve the domain before you can get example " +
+        "SQL: if it is the SAME term read two ways, ASK the user which domain and emit no SQL this " +
+        "turn; if the request genuinely spans domains, call this tool once per domain (see `domain`). \n" +
+        "- Otherwise returns {ambiguous:false, domain, matches} where each match has clean SQL, " +
+        "tables, joins, filters, lookups — ground it with validateTable/getColumns/getRelatedTables.",
       inputSchema: {
         intent: z.string().describe("Natural-language description of the query you want"),
         source: z.enum(["otbi", "catalog", "view"]).optional().describe("Restrict to one corpus"),
+        domain: z.string().optional().describe(
+          "Resolve to ONE business domain to get full example SQL for that domain only. Accepts a " +
+          "top level ('Financials', 'HCM'), a sub-domain ('AP', 'AR'), or a full key " +
+          "('Financials/AP'). Use after an ambiguous result — pass a domain from its " +
+          "domainBreakdown — or on the first call when the user's words already pin the domain."),
         limit: z.number().int().min(1).max(20).optional().describe("Max examples (default 5)"),
       },
     },
-    async ({ intent, source, limit }) =>
-      reply("findSimilarQueries", { intent, source, limit },
-        await catalog.findSimilarQueries(intent, { source, limit: limit ?? 5 })),
+    async ({ intent, source, domain, limit }) =>
+      reply("findSimilarQueries", { intent, source, domain, limit },
+        await catalog.findSimilarQueries(intent, { source, domain, limit: limit ?? 5 })),
   );
 
   server.registerTool(

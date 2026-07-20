@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
 import { embed } from "./corpus/embed.js";
+import { classifyDomain, topDomain } from "./corpus/domain.js";
 import { normName, suggestNames } from "./util.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -276,25 +277,132 @@ function vecStmts() {
   return _vecStmts;
 }
 
+// If the top matches split across >=2 business domains whose best scores are within this margin,
+// the request is treated as domain-ambiguous and full SQL is WITHHELD until a domain is chosen.
+const DOMAIN_AMBIGUITY_MARGIN = 0.10;
+
+// Table -> Fusion application module (tables.module = META_TABLES.APPLICATION_SHORT_NAME).
+// Authoritative signal for classifyDomain; cached per process.
+let _qModule: any = null;
+const _moduleCache = new Map<string, string | undefined>();
+function moduleOf(table: string): string | undefined {
+  if (_moduleCache.has(table)) return _moduleCache.get(table);
+  _qModule ??= db.prepare("SELECT module FROM tables WHERE name = ?");
+  const mod = (_qModule.get(normName(table)) as any)?.module ?? undefined;
+  _moduleCache.set(table, mod);
+  return mod;
+}
+
+// domain-filter matching: want "Financials" hits all Financials/*, want "AP" or
+// "Financials/AP" hits only that sub-domain.
+function domainMatches(key: string, want: string): boolean {
+  const k = key.toLowerCase(), w = want.toLowerCase();
+  const [kTop, kSub] = k.split("/");
+  return k === w || kTop === w || (kSub !== undefined && kSub === w);
+}
+
+function buildBreakdown(items: { domain: string; score: number }[], keyFn: (d: string) => string) {
+  const agg: Record<string, { count: number; topScore: number }> = {};
+  for (const m of items) {
+    const key = keyFn(m.domain);
+    const d = (agg[key] ??= { count: 0, topScore: 0 });
+    d.count++; d.topScore = Math.max(d.topScore, m.score);
+  }
+  return Object.entries(agg)
+    .map(([domain, v]) => ({ domain, count: v.count, topScore: +v.topScore.toFixed(3) }))
+    .sort((a, b) => b.topScore - a.topScore);
+}
+
+const isTied = (b: { topScore: number }[]) =>
+  b.length >= 2 && b[0].topScore - b[1].topScore <= DOMAIN_AMBIGUITY_MARGIN;
+
+/**
+ * Domain-aware few-shot retrieval. Classifies each match into a business-domain key
+ * (`HCM`, `Procurement`, ... or `Financials/<sub-ledger>` e.g. Financials/AP vs Financials/AR).
+ * Behaviour:
+ *  - `domain` given  -> return that domain's matches WITH full cleanSql (targeted second call).
+ *    Accepts a top level ("Financials"), a sub-domain ("AP"), or the full key ("Financials/AP").
+ *  - matches agree on one domain key -> return matches WITH cleanSql (unambiguous).
+ *  - matches split across >=2 near-tied TOP-LEVEL domains (department: HCM vs Financials), or
+ *    across >=2 near-tied SUB-domains within one domain (invoice: Financials/AP vs Financials/AR)
+ *    -> return { ambiguous:true, domainBreakdown, candidates } with NO cleanSql, forcing the
+ *    agent to disambiguate before it can copy any SQL.
+ */
 export async function findSimilarQueries(
-  intent: string, opts: { source?: string; limit?: number } = {},
+  intent: string, opts: { source?: string; domain?: string; limit?: number } = {},
 ) {
   const limit = opts.limit ?? 5;
   const [vec] = await embed([intent]);
   const blob = Buffer.from(vec.buffer);
   const { qVec, qVecSrc } = vecStmts();
+  const K = Math.max(limit * 6, 24); // overfetch so we can classify + domain-filter
   const rows = (opts.source
-    ? qVecSrc.all(blob, limit * SRC_OVERFETCH, opts.source, limit)
-    : qVec.all(blob, limit)) as any[];
-  return rows.map((r) => ({
-    id: r.id, source: r.source, title: r.title, description: r.description,
-    cleanSql: r.clean_sql,
-    tablesUsed: JSON.parse(r.tables_used ?? "[]"),
-    joins: JSON.parse(r.joins ?? "[]"),
-    filters: JSON.parse(r.filters ?? "[]"),
-    lookupTypes: JSON.parse(r.lookup_types ?? "[]"),
-    score: 1 - (r.distance * r.distance) / 2,
-  }));
+    ? qVecSrc.all(blob, K, opts.source, K)
+    : qVec.all(blob, K)) as any[];
+
+  const enriched = rows.map((r) => {
+    const tablesUsed = JSON.parse(r.tables_used ?? "[]");
+    return {
+      id: r.id, source: r.source, title: r.title, description: r.description,
+      cleanSql: r.clean_sql, tablesUsed,
+      joins: JSON.parse(r.joins ?? "[]"),
+      filters: JSON.parse(r.filters ?? "[]"),
+      lookupTypes: JSON.parse(r.lookup_types ?? "[]"),
+      score: 1 - (r.distance * r.distance) / 2,
+      domain: classifyDomain(tablesUsed, r.title, moduleOf),
+    };
+  });
+
+  // Targeted second call: caller already resolved the domain -> full examples for that domain.
+  if (opts.domain) {
+    const matches = enriched.filter((m) => domainMatches(m.domain, opts.domain!)).slice(0, limit);
+    return { ambiguous: false, domain: opts.domain, matches };
+  }
+
+  const window = enriched.slice(0, Math.max(limit + 3, 8));
+
+  // Stage 1: top-level split (cross-domain ambiguity, e.g. HCM vs Financials).
+  let domainBreakdown = buildBreakdown(window, topDomain);
+  let ambiguous = isTied(domainBreakdown);
+
+  // Stage 2: single top-level domain, but sub-domains split (e.g. Financials/AP vs Financials/AR).
+  // Bare keys without a sub (title-fallback classifications) don't create a split.
+  if (!ambiguous) {
+    const subBreakdown = buildBreakdown(
+      window.filter((m) => m.domain.includes("/") && topDomain(m.domain) === domainBreakdown[0]?.domain),
+      (d) => d);
+    if (isTied(subBreakdown)) { ambiguous = true; domainBreakdown = subBreakdown; }
+  }
+
+  if (ambiguous) {
+    return {
+      ambiguous: true,
+      domainBreakdown,
+      guidance:
+        `Closest real reports span ${domainBreakdown.length} business domains — ` +
+        domainBreakdown.map((b) => `${b.domain} (${b.topScore})`).join(", ") + ". " +
+        "SQL is withheld until you resolve this. If these are two readings of the SAME term " +
+        "(e.g. 'invoice' = AP supplier invoice vs AR customer invoice), ASK the user which domain " +
+        "and DO NOT emit SQL this turn. If different parts of the request genuinely need different " +
+        "domains, call findSimilarQueries once per domain and combine. To get the full example SQL, " +
+        "call findSimilarQueries again with domain=<one of the domains above>.",
+      // candidates carry titles/tables but NO cleanSql — nothing to copy until a domain is chosen
+      candidates: window.map((m) => ({
+        domain: m.domain, source: m.source, title: m.title,
+        description: m.description, tablesUsed: m.tablesUsed, score: +m.score.toFixed(3),
+      })),
+    };
+  }
+
+  return {
+    ambiguous: false,
+    domain: domainBreakdown[0]?.domain,
+    matches: enriched.slice(0, limit).map((m) => ({
+      id: m.id, source: m.source, title: m.title, description: m.description,
+      cleanSql: m.cleanSql, tablesUsed: m.tablesUsed, joins: m.joins, filters: m.filters,
+      lookupTypes: m.lookupTypes, domain: m.domain, score: +m.score.toFixed(3),
+    })),
+  };
 }
 
 // ---- exact report-query lookup (by title / subject area) ----

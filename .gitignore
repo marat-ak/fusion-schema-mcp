@@ -11,3 +11,7 @@ data/enrich.sqlite*
 .superpowers/
 .env
 samples_*.sql
+
+# enrichment run artifacts / scratch
+_gem_compare.json
+data/*.jsonl
