@@ -2,6 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as catalog from "./catalog.js";
+import { registerDataModelTools } from "./datamodel/tools.js";
 
 const DEBUG = process.env.MCP_DEBUG === "1" || process.env.MCP_DEBUG === "true";
 
@@ -184,6 +185,9 @@ export function buildServer(): McpServer {
     async ({ area, limit }) =>
       reply("listQueriesForSubjectArea", { area, limit }, catalog.listQueriesForSubjectArea(area, limit ?? 100)),
   );
+
+  // Data-model authoring tools (createDataModel / updateDataModel).
+  registerDataModelTools(server);
 
   return server;
 }
