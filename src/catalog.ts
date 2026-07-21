@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
 import { embed } from "./corpus/embed.js";
+import { textHash, getVecs, putVecs } from "./corpus/colCache.js";
 import { classifyDomain, topDomain } from "./corpus/domain.js";
 import { normName, suggestNames } from "./util.js";
 
@@ -167,11 +168,21 @@ export async function searchColumns(table: string, query: string, limit = 20) {
   const pk = new Set((qPk.all(n) as any[]).map((r) => r.column_name));
   const rows = qColumns.all(n) as any[];
   if (!rows.length) return { tableExists: true, totalColumns: 0, columns: [] };
+
+  // Column text is static → cache its embedding by content hash; only embed cache misses + the query.
   const texts = rows.map((r) => `${r.name}: ${r.remarks ?? ""}`.replace(/\s+/g, " ").trim().slice(0, 220));
-  const vecs = await embed([query, ...texts]);
-  const qv = vecs[0];
+  const hashes = texts.map(textHash);
+  const cached = getVecs(hashes);
+  const missIdx = hashes.map((h, i) => (cached.has(h) ? -1 : i)).filter((i) => i >= 0);
+  if (missIdx.length) {
+    const fresh = await embed(missIdx.map((i) => texts[i]));
+    const toStore: { hash: string; vec: Float32Array }[] = [];
+    missIdx.forEach((i, k) => { cached.set(hashes[i], fresh[k]); toStore.push({ hash: hashes[i], vec: fresh[k] }); });
+    putVecs(toStore);
+  }
+  const qv = (await embed([query]))[0];
   const scored = rows
-    .map((r, i) => ({ r, s: cosine(qv, vecs[i + 1]) }))
+    .map((r, i) => ({ r, s: cosine(qv, cached.get(hashes[i])!) }))
     .sort((a, b) => b.s - a.s)
     .slice(0, Math.max(1, Math.min(limit, 100)));
   const columns = scored.map(({ r, s }) => ({
