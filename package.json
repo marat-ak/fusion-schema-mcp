@@ -26,6 +26,7 @@
     "better-sqlite3": "^11.8.0",
     "csv-parse": "^5.5.6",
     "express": "^4.21.2",
+    "fflate": "^0.8.2",
     "sqlite-vec": "^0.1.9",
     "zod": "^3.24.1"
   },

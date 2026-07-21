@@ -14,6 +14,11 @@ services:
     environment:
       MCP_PORT: "8979"
       MCP_HOST: "0.0.0.0"
+      # Shared bearer token for the /ingest/* endpoints (unset => dev mode, unauthenticated).
+      INGEST_TOKEN: "${INGEST_TOKEN:-}"
+    volumes:
+      # catalog is mounted from the host; must be writable for the runtime ingest API to persist.
+      - ./catalog.sqlite:/app/catalog.sqlite
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8979/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

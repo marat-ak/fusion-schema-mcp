@@ -7,16 +7,22 @@ import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer } from "./tools.js";
 import { stats } from "./catalog.js";
+import { createIngestRouter, ingestAuthWarning } from "./ingest.js";
 
 const PORT = Number(process.env.MCP_PORT ?? 8979);
 const HOST = process.env.MCP_HOST ?? "0.0.0.0";
 
 const app = express();
-app.use(express.json({ limit: "4mb" }));
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", catalog: stats() });
 });
+
+// Runtime corpus ingest API (own body parsers per route so large uploads aren't capped here).
+app.use(createIngestRouter());
+
+// MCP transport gets its own JSON parser (kept small — MCP requests are tiny).
+app.use("/mcp", express.json({ limit: "4mb" }));
 
 // Stateless: a fresh server + transport per request (no session persistence needed).
 app.post("/mcp", async (req, res) => {
@@ -56,6 +62,7 @@ app.delete("/mcp", methodNotAllowed);
 
 app.listen(PORT, HOST, () => {
   const s = stats();
+  ingestAuthWarning();
   console.error(
     `[mcp] fusion-schema-mcp listening on http://${HOST}:${PORT}/mcp ` +
       `(tables=${s.tables} columns=${s.columns} fkeys=${s.fkeys} relationships=${s.relationships})`,
