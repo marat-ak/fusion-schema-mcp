@@ -9,8 +9,14 @@ const SYSTEM_OTBI =
   "LEFT JOIN), same filters, same lookup decodes (NVL(lookup.MEANING, code) on LOOKUP_TYPE/" +
   "LOOKUP_CODE). Keep any row-level security predicate in the SQL. Return ONLY JSON.";
 const SYSTEM_DESC =
-  "You describe an Oracle SQL query for retrieval: what business question it answers and its key " +
-  "tables, joins, filters, and lookups, in 1-3 sentences. Return ONLY JSON.";
+  "You write a SHORT retrieval description of what business data an Oracle Fusion SQL query returns, " +
+  "so it can be matched to a user's natural-language request. Focus on INTENT: the business entities " +
+  "and domain it reports on (e.g. supplier invoices, employee absences, sales opportunities), the key " +
+  "output facts, and any BUSINESS filter that narrows the result in business terms (e.g. unpaid, " +
+  "active, for a given supplier or period). Do NOT describe SQL mechanics — no joins, subqueries, " +
+  "unions, aggregation methods, or column-fetch plumbing — and do NOT mention technical/ETL filters " +
+  "such as last-update timestamps, rownum, or incremental-extract watermarks. Write 1-2 sentences of " +
+  "plain business language, phrased the way a user would ask for this data. Return ONLY JSON.";
 
 export const ENRICH_SCHEMA = {
   type: "object",
