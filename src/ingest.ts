@@ -38,7 +38,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import express from "express";
-import { corpusCount, materialize, materializedIds, type MaterializeRow } from "./corpus/ingestStore.js";
+import { corpusCount, materialize, materializedIds, exportCorpus, importCorpus, type MaterializeRow, type ImportRow } from "./corpus/ingestStore.js";
 import { extractModels } from "./corpus/extractArchive.js";
 import { openEnrichStore, type EnrichStore } from "./corpus/enrichStore.js";
 import { hashSql, type SqlSource } from "./corpus/sources.js";
@@ -267,6 +267,45 @@ export function createIngestRouter(): express.Router {
       res.json({ ok: true, ...r, materialized: safeCorpusCount() });
     } catch (e: any) {
       console.error("[ingest] /materialize error", e);
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
+  // ---- portable corpus export / import ----
+  //   GET  /ingest/export?scope=data|full[&source=bip-report]  -> streams NDJSON (one row/line)
+  //   POST /ingest/import   (NDJSON or JSON array body)          -> insert/replace, re-embed if needed
+  // scope=data omits embeddings (import re-embeds locally, no Gemini); full carries them verbatim.
+  router.get("/ingest/export", requireAuth, (req, res) => {
+    const scope = req.query.scope === "full" ? "full" : "data";
+    const source = typeof req.query.source === "string" ? req.query.source : undefined;
+    res.setHeader("content-type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("content-disposition", `attachment; filename="corpus-${scope}${source ? "-" + source : ""}.ndjson"`);
+    try {
+      let n = 0;
+      for (const row of exportCorpus(scope, source)) { res.write(JSON.stringify(row) + "\n"); n++; }
+      if (process.env.MCP_DEBUG) console.error(`[ingest] export scope=${scope} source=${source ?? "*"} rows=${n}`);
+      res.end();
+    } catch (e: any) {
+      console.error("[ingest] /export error", e);
+      if (!res.headersSent) res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+      else res.end();
+    }
+  });
+
+  router.post("/ingest/import", requireAuth, express.text({ type: () => true, limit: "1024mb" }), async (req, res) => {
+    try {
+      const body = typeof req.body === "string" ? req.body : "";
+      const rows: ImportRow[] = body.trim().startsWith("[")
+        ? JSON.parse(body)
+        : body.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
+      let imported = 0, replaced = 0, embedded = 0;
+      for (let i = 0; i < rows.length; i += 500) {          // batch to bound embed() memory
+        const r = await importCorpus(rows.slice(i, i + 500));
+        imported += r.imported; replaced += r.replaced; embedded += r.embedded;
+      }
+      res.json({ ok: true, imported, replaced, embedded, materialized: safeCorpusCount() });
+    } catch (e: any) {
+      console.error("[ingest] /import error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
     }
   });

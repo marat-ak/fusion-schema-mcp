@@ -242,3 +242,86 @@ export async function materialize(rows: MaterializeRow[]): Promise<{ inserted: n
   tx();
   return { inserted, replaced };
 }
+
+// ---- portable export / import -----------------------------------------------------------------
+// Move a corpus between environments. `data` = the report_queries rows (SQL + enrichment: description,
+// tables_used, ...) WITHOUT embeddings — import re-embeds locally (cheap, no Gemini). `full` also
+// carries the bge-small embedding (base64), so import restores it verbatim with no re-embed.
+
+export type ExportScope = "data" | "full";
+
+/** Stream corpus rows (optionally filtered by `source`, e.g. "bip-report"). Generator = O(1) memory. */
+export function* exportCorpus(scope: ExportScope, source?: string): Generator<Record<string, unknown>> {
+  const d = db();
+  const where = source ? "WHERE q.source = ?" : "";
+  const sql = scope === "full"
+    ? `SELECT q.*, v.embedding AS _emb FROM report_queries q
+         LEFT JOIN report_queries_vec v ON v.rowid = q.rowid ${where} ORDER BY q.rowid`
+    : `SELECT q.* FROM report_queries q ${where} ORDER BY q.rowid`;
+  const stmt = d.prepare(sql);
+  const iter = (source ? stmt.iterate(source) : stmt.iterate()) as Iterable<any>;
+  for (const r of iter) {
+    const row: Record<string, unknown> = {
+      id: r.id, source: r.source, title: r.title,
+      original_sql: r.original_sql, clean_sql: r.clean_sql, description: r.description,
+      tables_used: r.tables_used, joins: r.joins, filters: r.filters,
+      lookup_types: r.lookup_types, security_predicate: r.security_predicate, approved: r.approved,
+    };
+    if (scope === "full" && r._emb) row.embedding = Buffer.from(r._emb).toString("base64");
+    yield row;
+  }
+}
+
+export interface ImportRow {
+  id: string; source?: string; title: string;
+  original_sql: string; clean_sql?: string | null; description: string;
+  tables_used?: string; joins?: string; filters?: string; lookup_types?: string;
+  security_predicate?: string | null;
+  embedding?: string; // base64 float32 (present on a "full" export)
+}
+
+/** Insert/replace corpus rows. Rows without an `embedding` are re-embedded locally (bge-small). */
+export async function importCorpus(rows: ImportRow[]): Promise<{ imported: number; replaced: number; embedded: number }> {
+  const clean = rows.filter((r) => r && r.id && typeof r.description === "string");
+  if (clean.length === 0) return { imported: 0, replaced: 0, embedded: 0 };
+  const d = db();
+
+  // Re-embed only rows that arrived without an embedding.
+  const needEmbed = clean.filter((r) => !r.embedding);
+  const embVecs = needEmbed.length ? await embed(needEmbed.map((r) => r.description)) : [];
+  const embMap = new Map<string, Float32Array>();
+  needEmbed.forEach((r, i) => embMap.set(r.id, embVecs[i]));
+
+  const qById = d.prepare("SELECT rowid FROM report_queries WHERE id = ?");
+  const delRq = d.prepare("DELETE FROM report_queries WHERE rowid = ?");
+  const delVec = d.prepare("DELETE FROM report_queries_vec WHERE rowid = ?");
+  const insRq = d.prepare(
+    `INSERT INTO report_queries
+       (rowid, id, source, title, original_sql, clean_sql, description,
+        tables_used, joins, filters, lookup_types, security_predicate, approved)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)`,
+  );
+  const insVec = d.prepare("INSERT INTO report_queries_vec (rowid, embedding) VALUES (?, ?)");
+  const maxRowid = d.prepare("SELECT COALESCE(MAX(rowid), 0) AS m FROM report_queries");
+
+  let imported = 0, replaced = 0, embedded = 0;
+  const tx = d.transaction(() => {
+    let next = (maxRowid.get() as any).m as number;
+    for (const r of clean) {
+      const prev = qById.get(r.id) as { rowid: number } | undefined;
+      if (prev) { delVec.run(prev.rowid); delRq.run(prev.rowid); replaced++; }
+      const rowid = BigInt(++next);
+      insRq.run(
+        rowid, r.id, r.source ?? "bip-report", r.title, r.original_sql, r.clean_sql ?? r.original_sql, r.description,
+        r.tables_used ?? "[]", r.joins ?? "[]", r.filters ?? "[]", r.lookup_types ?? "[]", r.security_predicate ?? null,
+      );
+      let vec: Buffer;
+      if (r.embedding) vec = Buffer.from(r.embedding, "base64");
+      else { vec = Buffer.from(embMap.get(r.id)!.buffer); embedded++; }
+      insVec.run(rowid, vec);
+      imported++;
+    }
+  });
+  tx();
+  return { imported, replaced, embedded };
+}
