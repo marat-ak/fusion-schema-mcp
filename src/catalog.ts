@@ -116,20 +116,37 @@ export function getTable(name: string) {
   };
 }
 
-export function getColumns(table: string) {
+export function getColumns(table: string, opts?: { like?: string; limit?: number }) {
   const n = normName(table);
   if (!NAME_SET.has(n)) return { tableExists: false, columns: [] as any[] };
   const pk = new Set((qPk.all(n) as any[]).map((r) => r.column_name));
-  const cols = (qColumns.all(n) as any[]).map((r) => ({
+  let rows = qColumns.all(n) as any[];
+  const total = rows.length;
+  if (opts?.like) {
+    const p = opts.like.toUpperCase();
+    rows = rows.filter((r) => String(r.name).toUpperCase().includes(p));
+  }
+  // Wide Fusion tables (e.g. AP_INVOICES_ALL ~150 cols) with full remarks produce a huge payload
+  // that can overflow the stream/context — cap the count and truncate remarks.
+  const cap = Math.max(1, Math.min(opts?.limit ?? 120, 400));
+  const shown = rows.length;
+  const truncated = rows.length > cap;
+  if (truncated) rows = rows.slice(0, cap);
+  const cols = rows.map((r) => ({
     name: r.name,
     dataType: r.data_type,
     size: r.size,
     nullable: r.nullable === 1,
-    remarks: r.remarks,
+    remarks: r.remarks ? String(r.remarks).replace(/\s+/g, " ").trim().slice(0, 140) : null,
     ordinal: r.ordinal,
     isPrimaryKey: pk.has(r.name),
   }));
-  return { tableExists: true, columns: cols };
+  const res: any = { tableExists: true, totalColumns: total, returned: cols.length, columns: cols };
+  if (truncated) {
+    res.note = `Showing ${cols.length} of ${shown}${opts?.like ? ` matching '${opts.like}'` : ""} (table has ${total} columns). ` +
+      `Refine with getColumns(table, {like:'...'}) or validate specific ones with validateColumns(table, [...]).`;
+  }
+  return res;
 }
 
 export function validateTable(name: string) {

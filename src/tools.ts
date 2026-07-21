@@ -54,12 +54,17 @@ export function buildServer(): McpServer {
     {
       title: "List columns of a table/view",
       description:
-        "All columns with data type, size, nullability, description and primary-key flag.",
+        "Columns with data type, size, nullability, a short description and primary-key flag. Wide " +
+        "Fusion tables have 100+ columns — pass `like` to get only columns whose name contains a " +
+        "substring (e.g. like:'AMOUNT'), which is usually what you want. Results are capped (default " +
+        "120) with a note; remarks are truncated. For a few known columns prefer validateColumns.",
       inputSchema: {
         table: z.string().describe("Exact object name, e.g. AP_INVOICES_ALL"),
+        like: z.string().optional().describe("only columns whose name contains this substring (case-insensitive)"),
+        limit: z.number().int().min(1).max(400).optional().describe("max columns to return (default 120)"),
       },
     },
-    async ({ table }) => reply("getColumns", { table }, catalog.getColumns(table)),
+    async ({ table, like, limit }) => reply("getColumns", { table, like, limit }, catalog.getColumns(table, { like, limit })),
   );
 
   server.registerTool(
