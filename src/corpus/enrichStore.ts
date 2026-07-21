@@ -70,6 +70,17 @@ export function openEnrichStore(dbPath: string = DEFAULT) {
     },
     get(id: string) { return toRow(qGet.get(id)); },
     all(): EnrichRow[] { return (qAll.all() as any[]).map(toRow); },
+    /** Staging rows awaiting enrichment (no description yet) — the enrich worker's queue. */
+    pendingRows(): EnrichRow[] {
+      const stmt = db.prepare("SELECT * FROM enrich WHERE description IS NULL");
+      return (stmt.all() as any[]).map(toRow);
+    },
+    /** Staging counts for /ingest/health: pending (unenriched) vs enriched (has description). */
+    counts(): { pending: number; enriched: number } {
+      const pending = (db.prepare("SELECT COUNT(*) AS n FROM enrich WHERE description IS NULL").get() as any).n as number;
+      const enriched = (db.prepare("SELECT COUNT(*) AS n FROM enrich WHERE description IS NOT NULL").get() as any).n as number;
+      return { pending, enriched };
+    },
     *iterateEnriched(): Generator<EnrichRow> {
       const stmt = db.prepare("SELECT * FROM enrich WHERE description IS NOT NULL");
       for (const r of stmt.iterate() as any) yield toRow(r);

@@ -7,7 +7,7 @@ import express from "express";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { buildServer } from "./tools.js";
 import { stats } from "./catalog.js";
-import { createIngestRouter, ingestAuthWarning } from "./ingest.js";
+import { createIngestRouter, ingestAuthWarning, startIngestScheduler } from "./ingest.js";
 
 const PORT = Number(process.env.MCP_PORT ?? 8979);
 const HOST = process.env.MCP_HOST ?? "0.0.0.0";
@@ -63,6 +63,7 @@ app.delete("/mcp", methodNotAllowed);
 app.listen(PORT, HOST, () => {
   const s = stats();
   ingestAuthWarning();
+  startIngestScheduler();
   console.error(
     `[mcp] fusion-schema-mcp listening on http://${HOST}:${PORT}/mcp ` +
       `(tables=${s.tables} columns=${s.columns} fkeys=${s.fkeys} relationships=${s.relationships})`,

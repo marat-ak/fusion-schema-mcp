@@ -1,19 +1,51 @@
 /**
- * REST ingest API — adds report SQL to the corpus at runtime WITHOUT touching the MCP transport.
+ * REST ingest API — DECOUPLED, STAGED pipeline feeding the report-SQL corpus (report_queries +
+ * report_queries_vec in catalog.sqlite) at runtime, without touching the MCP transport.
  *
- *   POST /ingest/extracted  JSON {items:[...]} (or a bare array) from the bip-catalog-poller:
- *        each item {reportPath, provenance, relPath?, dataModel?, datasets?, sqls:[{hash,text}]}.
- *   POST /ingest/catalog    RAW BIP archive (.xdmz/.xdoz/.zip) as application/zip OR multipart
- *        field `file`; we unzip, extract physical (non-OTBI-logical) SQL, and ingest it.
- *   GET  /ingest/health     -> {ok:true, corpusCount:<n>}.
+ *   [1] STAGE      POST /ingest — accept the EXACT ready_catalog JSON shape and land each SQL as a
+ *                  PENDING staging row (enrich.sqlite). No model call → fast + non-blocking. NOT
+ *                  searchable yet.
+ *   [2] ENRICH     A background worker (periodic + POST /ingest/enrich) picks PENDING rows and calls
+ *                  the provider adapter (enrichAdapters.enrichOne) → { description, tablesUsed,
+ *                  lookupTypes }, sized by ENRICH_CONCURRENCY. Failures stay pending (no regex fallback).
+ *   [3] MATERIALIZE (after enrich, + POST /ingest/materialize) — newly-ENRICHED rows not yet in
+ *                  report_queries are embedded (local bge-small) and inserted → searchable.
  *
- * Auth: Authorization: Bearer <INGEST_TOKEN>. If INGEST_TOKEN is unset, requests are allowed
- * (dev mode) with a startup warning.
+ * ready_catalog JSON shape (matches the "catalog" source in src/corpus/sources.ts). The request body
+ * is EITHER a single report object, an ARRAY of them, or { "items": [ ... ] }. Each report object:
+ *   {
+ *     "path"?:       string,     // report path — preferred title (poller also sends "reportPath")
+ *     "name"?:       string,     // fallback title
+ *     "title"?:      string,     // explicit title (highest precedence)
+ *     "sqls":        (string | { "text": string, "hash"?: string })[]   // REQUIRED, non-empty
+ *   }
+ * Title precedence: title > path > reportPath > name. Each SQL is staged under a stable id
+ * `catalog:<title-or-hash>[#i]`, so re-pushing the same report REPLACES its rows (hash-dedup in
+ * enrichStore invalidates enrichment when the SQL text changes).
+ *
+ * Endpoints (all /ingest/* require Authorization: Bearer <INGEST_TOKEN>; unset ⇒ open + startup warn):
+ *   POST /ingest             stage a ready_catalog payload (PENDING).
+ *   POST /ingest/extracted   alias of /ingest (accepts the poller's {items:[{reportPath,sqls:[{text}]}]}).
+ *   POST /ingest/catalog     RAW .xdmz/.xdoz/.zip archive → extract physical SQL → normalize → stage.
+ *   POST /ingest/enrich      run the enrich worker over PENDING rows now → { enriched, failed, pending }.
+ *   POST /ingest/materialize insert newly-ENRICHED rows into report_queries. ?force=1 re-materializes all.
+ *   GET  /ingest/health      { ok, pending, enriched, materialized }.
+ *
+ * Scheduler: every ENRICH_INTERVAL ms (default 60000) run enrich-then-materialize for anything
+ * outstanding. Provider/creds come from getEnrichConfig() (enrichConfig.ts).
  */
+import path from "node:path";
+import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 import express from "express";
-import { corpusCount, ingestReport } from "./corpus/ingestStore.js";
+import { corpusCount, materialize, materializedIds, type MaterializeRow } from "./corpus/ingestStore.js";
 import { extractModels } from "./corpus/extractArchive.js";
+import { openEnrichStore, type EnrichStore } from "./corpus/enrichStore.js";
+import { hashSql, type SqlSource } from "./corpus/sources.js";
+import { enrichOne } from "./corpus/enrichAdapters.js";
+import { getEnrichConfig } from "./corpus/enrichConfig.js";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN = process.env.INGEST_TOKEN;
 
 /** Bearer-token guard; open (with a warning) when INGEST_TOKEN is unset. */
@@ -25,19 +57,242 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
   res.status(401).json({ ok: false, error: "unauthorized" });
 }
 
-interface ExtractedItem {
-  reportPath?: string;
-  relPath?: string;
-  provenance?: "shared" | "custom" | string;
-  dataModel?: string;
-  datasets?: { name?: string; dataSourceRef?: string; physical?: boolean }[];
-  sqls?: ({ hash?: string; text?: string } | string)[];
+// ---- staging store (singleton) ----------------------------------------------------------------
+let _store: EnrichStore | null = null;
+function getStore(): EnrichStore {
+  if (!_store) {
+    const dbPath = process.env.ENRICH_DB ?? path.resolve(__dirname, "../data/enrich.sqlite");
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true }); // better-sqlite3 needs the dir to exist
+    _store = openEnrichStore(dbPath);
+  }
+  return _store;
 }
 
-function normSqls(sqls: ExtractedItem["sqls"]): { hash?: string; text: string }[] {
-  return (sqls ?? [])
-    .map((s) => (typeof s === "string" ? { text: s } : { hash: s?.hash, text: s?.text ?? "" }))
-    .filter((s) => typeof s.text === "string" && /\S/.test(s.text));
+// ---- ready_catalog parsing + staging ----------------------------------------------------------
+interface ReadyCatalogReport {
+  path?: string;
+  reportPath?: string;
+  name?: string;
+  title?: string;
+  sqls?: (string | { text?: string; hash?: string })[];
+}
+
+function reportTitle(r: ReadyCatalogReport): string {
+  return (r.title ?? r.path ?? r.reportPath ?? r.name ?? "").trim();
+}
+function reportSqls(r: ReadyCatalogReport): string[] {
+  return (r.sqls ?? [])
+    .map((s) => (typeof s === "string" ? s : s?.text ?? ""))
+    .filter((s) => typeof s === "string" && /\S/.test(s));
+}
+
+/** Normalize the request body into a list of report objects. */
+function collectReports(body: any): ReadyCatalogReport[] {
+  if (Array.isArray(body)) return body;
+  if (body && Array.isArray(body.items)) return body.items;
+  if (body && Array.isArray(body.sqls)) return [body]; // single report object
+  return [];
+}
+
+/** Stage one report's SQLs as PENDING rows. Returns how many SQLs were staged. */
+function stageReport(store: EnrichStore, r: ReadyCatalogReport): number {
+  const sqls = reportSqls(r);
+  if (sqls.length === 0) return 0;
+  const title = reportTitle(r);
+  const groupKey = title || `sql-${hashSql(sqls[0]).slice(0, 12)}`;
+  sqls.forEach((sql, i) => {
+    const id = sqls.length > 1 ? `catalog:${groupKey}#${i}` : `catalog:${groupKey}`;
+    const src: SqlSource = {
+      id, source: "catalog", title: title || groupKey,
+      originalSql: sql, sourceHash: hashSql(sql), raw: {},
+    };
+    store.upsertSource(src);
+  });
+  return sqls.length;
+}
+
+// ---- enrich + materialize orchestration -------------------------------------------------------
+let enrichRunning = false;
+
+/** Run the enrich worker over all PENDING staging rows via a concurrency-limited pool. */
+async function runEnrich(store: EnrichStore): Promise<{ enriched: number; failed: number; pending: number; skipped?: string }> {
+  if (enrichRunning) return { enriched: 0, failed: 0, pending: store.counts().pending, skipped: "already running" };
+  enrichRunning = true;
+  try {
+    const cfg = getEnrichConfig();
+    const pend = store.pendingRows();
+    if (pend.length === 0) return { enriched: 0, failed: 0, pending: 0 };
+    if (!cfg.apiKey && cfg.provider !== "custom") {
+      console.error(`[ingest] enrich: no key for provider "${cfg.provider}" — leaving ${pend.length} row(s) pending`);
+      return { enriched: 0, failed: 0, pending: pend.length, skipped: "no key" };
+    }
+    let idx = 0, enriched = 0, failed = 0;
+    const worker = async () => {
+      for (;;) {
+        const i = idx++;
+        if (i >= pend.length) return;
+        const row = pend[i];
+        try {
+          const e = await enrichOne(row.originalSql, row.title);
+          store.setEnrichment(row.id, {
+            cleanSql: row.originalSql, description: e.description,
+            tablesUsed: e.tablesUsed, lookupTypes: e.lookupTypes,
+            joins: [], filters: [], securityPredicate: null,
+          });
+          enriched++;
+        } catch (err) {
+          failed++;
+          console.error(`[ingest] enrich fail ${row.id}: ${(err as Error).message}`);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(cfg.concurrency, pend.length) }, worker));
+    console.error(`[ingest] enrich done: enriched=${enriched} failed=${failed} (provider=${cfg.provider})`);
+    return { enriched, failed, pending: store.counts().pending };
+  } finally {
+    enrichRunning = false;
+  }
+}
+
+/** Materialize enriched staging rows not yet in report_queries (force=true re-does all). */
+async function runMaterialize(store: EnrichStore, force = false): Promise<{ inserted: number; replaced: number }> {
+  const have = force ? new Set<string>() : materializedIds();
+  const rows: MaterializeRow[] = [];
+  for (const r of store.iterateEnriched()) {
+    if (!force && have.has(r.id)) continue;
+    rows.push({
+      id: r.id, title: r.title, originalSql: r.originalSql, cleanSql: r.cleanSql,
+      description: r.description ?? "", tablesUsed: r.tablesUsed, lookupTypes: r.lookupTypes,
+      joins: r.joins, filters: r.filters, securityPredicate: r.securityPredicate,
+      source: "bip-report",
+    });
+  }
+  if (rows.length === 0) return { inserted: 0, replaced: 0 };
+  const res = await materialize(rows);
+  if (res.inserted || res.replaced) console.error(`[ingest] materialize: inserted=${res.inserted} replaced=${res.replaced}`);
+  return res;
+}
+
+function safeCorpusCount(): number | null {
+  try { return corpusCount(); } catch { return null; }
+}
+
+// ---- router -----------------------------------------------------------------------------------
+export function createIngestRouter(): express.Router {
+  const router = express.Router();
+
+  router.get("/ingest/health", async (_req, res) => {
+    try {
+      const c = getStore().counts();
+      res.json({ ok: true, pending: c.pending, enriched: c.enriched, materialized: safeCorpusCount() });
+    } catch (e: any) {
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
+  const stageHandler = async (req: express.Request, res: express.Response) => {
+    try {
+      const reports = collectReports(req.body);
+      if (reports.length === 0) {
+        return res.status(400).json({ ok: false, error: "expected a report {sqls:[...]}, an array of reports, or {items:[...]}" });
+      }
+      const store = getStore();
+      let staged = 0, reportsStaged = 0;
+      for (const r of reports) {
+        const n = stageReport(store, r);
+        if (n > 0) { staged += n; reportsStaged++; }
+      }
+      const c = store.counts();
+      res.json({ ok: true, reports: reportsStaged, staged, pending: c.pending, enriched: c.enriched });
+    } catch (e: any) {
+      console.error("[ingest] stage error", e);
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  };
+
+  // Primary staging endpoint + backward-compatible alias for the poller's extracted shape.
+  router.post("/ingest", requireAuth, express.json({ limit: "64mb" }), stageHandler);
+  router.post("/ingest/extracted", requireAuth, express.json({ limit: "64mb" }), stageHandler);
+
+  // Raw archive upload → extract physical SQL → stage as one report.
+  router.post(
+    "/ingest/catalog",
+    requireAuth,
+    express.raw({ type: () => true, limit: "200mb" }),
+    async (req, res) => {
+      try {
+        let bytes = Buffer.isBuffer(req.body) ? (req.body as Buffer) : Buffer.alloc(0);
+        const ct = req.get("content-type") ?? "";
+        if (/multipart\/form-data/i.test(ct)) {
+          const f = multipartFile(bytes, ct);
+          if (!f) return res.status(400).json({ ok: false, error: "no `file` field in multipart body" });
+          bytes = f;
+        }
+        if (bytes.length === 0) return res.status(400).json({ ok: false, error: "empty body" });
+
+        const groupKey =
+          (req.query.reportPath as string) ||
+          (req.get("x-report-path") as string) ||
+          `upload:${(req.query.name as string) || "catalog-archive"}`;
+
+        const models = extractModels(bytes, "");
+        const sqls = models.flatMap((m) => m.physicalSqls);
+        if (sqls.length === 0) {
+          return res.json({ ok: true, models: models.length, staged: 0, note: "no physical SQL found", ...getStore().counts() });
+        }
+        const staged = stageReport(getStore(), { title: groupKey, sqls });
+        const c = getStore().counts();
+        res.json({ ok: true, models: models.length, staged, pending: c.pending, enriched: c.enriched });
+      } catch (e: any) {
+        console.error("[ingest] /catalog error", e);
+        res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+      }
+    },
+  );
+
+  // Manual triggers.
+  router.post("/ingest/enrich", requireAuth, async (_req, res) => {
+    try { res.json({ ok: true, ...(await runEnrich(getStore())) }); }
+    catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
+  });
+
+  router.post("/ingest/materialize", requireAuth, async (req, res) => {
+    try {
+      const force = req.query.force === "1" || req.query.force === "true";
+      const r = await runMaterialize(getStore(), force);
+      res.json({ ok: true, ...r, materialized: safeCorpusCount() });
+    } catch (e: any) {
+      console.error("[ingest] /materialize error", e);
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
+  return router;
+}
+
+/** Background scheduler: enrich-then-materialize on an interval. Called once at server startup. */
+export function startIngestScheduler(): void {
+  const ms = Number(process.env.ENRICH_INTERVAL ?? 60_000);
+  if (!(ms > 0)) {
+    console.error("[ingest] scheduler disabled (ENRICH_INTERVAL <= 0)");
+    return;
+  }
+  const store = getStore();
+  const tick = async () => {
+    try {
+      if (store.counts().pending > 0) await runEnrich(store);
+      await runMaterialize(store);
+    } catch (e) {
+      console.error("[ingest] scheduler tick error", e);
+    }
+  };
+  const timer = setInterval(tick, ms);
+  timer.unref?.(); // don't keep the event loop alive for the scheduler alone
+  console.error(`[ingest] scheduler on: enrich+materialize every ${ms}ms (provider=${getEnrichConfig().provider})`);
+}
+
+export function ingestAuthWarning(): void {
+  if (!TOKEN) console.error("[ingest] WARNING: INGEST_TOKEN unset — /ingest endpoints are UNAUTHENTICATED (dev mode).");
 }
 
 /** Minimal multipart/form-data parser — pulls the `file` field bytes from a raw body buffer. */
@@ -61,7 +316,6 @@ function multipartFile(body: Buffer, contentType: string): Buffer | undefined {
     if (sep < 0) continue;
     const header = part.subarray(0, sep).toString("utf8");
     if (!/content-disposition:[^\n]*\bname="?file"?/i.test(header)) continue;
-    // body is between the header separator and the trailing CRLF before the next boundary
     let content = part.subarray(sep + 4);
     if (content.length >= 2 && content[content.length - 2] === 0x0d && content[content.length - 1] === 0x0a) {
       content = content.subarray(0, content.length - 2);
@@ -69,104 +323,4 @@ function multipartFile(body: Buffer, contentType: string): Buffer | undefined {
     return content;
   }
   return undefined;
-}
-
-export function createIngestRouter(): express.Router {
-  const router = express.Router();
-
-  router.get("/ingest/health", async (_req, res) => {
-    try {
-      res.json({ ok: true, corpusCount: corpusCount() });
-    } catch (e: any) {
-      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
-    }
-  });
-
-  // JSON push from the poller. Own body parser with a generous limit (SQL can be large).
-  router.post(
-    "/ingest/extracted",
-    requireAuth,
-    express.json({ limit: "64mb" }),
-    async (req, res) => {
-      try {
-        const body = req.body;
-        const items: ExtractedItem[] = Array.isArray(body) ? body : (body?.items ?? []);
-        if (!Array.isArray(items)) {
-          return res.status(400).json({ ok: false, error: "expected an array or {items:[...]}" });
-        }
-        const results = [];
-        for (const it of items) {
-          const groupKey = it.reportPath ?? it.relPath;
-          const sqls = normSqls(it.sqls);
-          if (!groupKey || sqls.length === 0) continue;
-          results.push(
-            await ingestReport({
-              groupKey,
-              title: it.reportPath ?? it.relPath ?? groupKey,
-              provenance: it.provenance,
-              reportPath: it.reportPath,
-              sqls,
-            }),
-          );
-        }
-        const inserted = results.reduce((n, r) => n + r.inserted, 0);
-        const replaced = results.reduce((n, r) => n + r.replaced, 0);
-        res.json({ ok: true, reports: results.length, inserted, replaced, corpusCount: corpusCount(), results });
-      } catch (e: any) {
-        console.error("[ingest] /extracted error", e);
-        res.status(500).json({ ok: false, error: e?.message ?? String(e) });
-      }
-    },
-  );
-
-  // Raw archive upload. `express.raw` gives us the bytes for any content-type.
-  router.post(
-    "/ingest/catalog",
-    requireAuth,
-    express.raw({ type: () => true, limit: "200mb" }),
-    async (req, res) => {
-      try {
-        let bytes = Buffer.isBuffer(req.body) ? (req.body as Buffer) : Buffer.alloc(0);
-        const ct = req.get("content-type") ?? "";
-        if (/multipart\/form-data/i.test(ct)) {
-          const f = multipartFile(bytes, ct);
-          if (!f) return res.status(400).json({ ok: false, error: "no `file` field in multipart body" });
-          bytes = f;
-        }
-        if (bytes.length === 0) {
-          return res.status(400).json({ ok: false, error: "empty body" });
-        }
-        // groupKey identifies this upload so re-uploading the same archive replaces its rows.
-        const groupKey =
-          (req.query.reportPath as string) ||
-          (req.get("x-report-path") as string) ||
-          `upload:${(req.query.name as string) || "catalog-archive"}`;
-
-        const models = extractModels(bytes, "");
-        const sqls = models.flatMap((m) =>
-          m.physicalSqls.map((text) => ({ hash: undefined as string | undefined, text })),
-        );
-        if (sqls.length === 0) {
-          return res.json({ ok: true, models: models.length, inserted: 0, replaced: 0, corpusCount: corpusCount(), note: "no physical SQL found" });
-        }
-        const result = await ingestReport({
-          groupKey,
-          title: groupKey,
-          provenance: (req.query.provenance as string) || "custom",
-          reportPath: groupKey,
-          sqls,
-        });
-        res.json({ ok: true, models: models.length, ...result, corpusCount: corpusCount() });
-      } catch (e: any) {
-        console.error("[ingest] /catalog error", e);
-        res.status(500).json({ ok: false, error: e?.message ?? String(e) });
-      }
-    },
-  );
-
-  return router;
-}
-
-export function ingestAuthWarning(): void {
-  if (!TOKEN) console.error("[ingest] WARNING: INGEST_TOKEN unset — /ingest endpoints are UNAUTHENTICATED (dev mode).");
 }

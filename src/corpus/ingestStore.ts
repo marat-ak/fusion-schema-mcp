@@ -170,3 +170,75 @@ export async function ingestReport(input: IngestReportInput): Promise<IngestRepo
     domains: [...new Set(rows.map((r) => r.domain))],
   };
 }
+
+// ---- staged-pipeline materializer -------------------------------------------------------------
+// The runtime ingest pipeline (ingest.ts) stages SQL in enrich.sqlite and enriches it with a model
+// (model-quality description + tables_used). `materialize` takes those ENRICHED staging rows and
+// makes them searchable by inserting into report_queries + report_queries_vec. Domain is NOT stored
+// (findSimilarQueries recomputes it from tables_used at query time); we embed the model description.
+
+/** An enriched staging row ready to become a searchable corpus entry. */
+export interface MaterializeRow {
+  id: string;
+  title: string;
+  originalSql: string;
+  cleanSql: string | null;
+  description: string;
+  tablesUsed: string[];
+  lookupTypes: string[];
+  joins?: unknown[];
+  filters?: unknown[];
+  securityPredicate?: string | null;
+  source?: string;
+}
+
+/** ids already present in report_queries — lets the materializer skip already-searchable rows. */
+export function materializedIds(): Set<string> {
+  const rows = db().prepare("SELECT id FROM report_queries").all() as { id: string }[];
+  return new Set(rows.map((r) => r.id));
+}
+
+/**
+ * Insert enriched staging rows into report_queries + report_queries_vec. Idempotent by id: a row
+ * whose id already exists is deleted (with its vec) and re-inserted with a fresh rowid. Embeddings
+ * are computed (local bge-small) before the synchronous DB transaction. `approved` is set to 1.
+ */
+export async function materialize(rows: MaterializeRow[]): Promise<{ inserted: number; replaced: number }> {
+  const clean = rows.filter((r) => r && r.id && typeof r.description === "string" && /\S/.test(r.description));
+  if (clean.length === 0) return { inserted: 0, replaced: 0 };
+  const d = db();
+  const vecs = await embed(clean.map((r) => r.description));
+
+  const qById = d.prepare("SELECT rowid FROM report_queries WHERE id = ?");
+  const delRq = d.prepare("DELETE FROM report_queries WHERE rowid = ?");
+  const delVec = d.prepare("DELETE FROM report_queries_vec WHERE rowid = ?");
+  const insRq = d.prepare(
+    `INSERT INTO report_queries
+       (rowid, id, source, title, original_sql, clean_sql, description,
+        tables_used, joins, filters, lookup_types, security_predicate, approved)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)`,
+  );
+  const insVec = d.prepare("INSERT INTO report_queries_vec (rowid, embedding) VALUES (?, ?)");
+  const maxRowid = d.prepare("SELECT COALESCE(MAX(rowid), 0) AS m FROM report_queries");
+
+  let inserted = 0;
+  let replaced = 0;
+  const tx = d.transaction(() => {
+    let next = (maxRowid.get() as any).m as number; // new rowids strictly exceed all existing → no collisions
+    clean.forEach((r, i) => {
+      const prev = qById.get(r.id) as { rowid: number } | undefined;
+      if (prev) { delVec.run(prev.rowid); delRq.run(prev.rowid); replaced++; }
+      const rowid = BigInt(++next);
+      insRq.run(
+        rowid, r.id, r.source ?? "bip-report", r.title, r.originalSql, r.cleanSql ?? r.originalSql, r.description,
+        JSON.stringify(r.tablesUsed ?? []), JSON.stringify(r.joins ?? []),
+        JSON.stringify(r.filters ?? []), JSON.stringify(r.lookupTypes ?? []),
+        r.securityPredicate ?? null,
+      );
+      insVec.run(rowid, Buffer.from(vecs[i].buffer));
+      inserted++;
+    });
+  });
+  tx();
+  return { inserted, replaced };
+}
