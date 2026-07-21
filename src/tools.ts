@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as catalog from "./catalog.js";
 import { registerDataModelTools } from "./datamodel/tools.js";
+import { registerFileTools } from "./files/tools.js";
 
 const DEBUG = process.env.MCP_DEBUG === "1" || process.env.MCP_DEBUG === "true";
 
@@ -188,6 +189,8 @@ export function buildServer(): McpServer {
 
   // Data-model authoring tools (createDataModel / updateDataModel).
   registerDataModelTools(server);
+  // File tools (operate on uploaded/generated archives by fileId).
+  registerFileTools(server);
 
   return server;
 }

@@ -42,7 +42,7 @@ const zBursting = z.object({
   dataSource: z.string().optional(),
   burstQuery: z.string().describe("SQL returning KEY, TEMPLATE, TEMPLATE_FORMAT, OUTPUT_FORMAT, output_name, DEL_CHANNEL, PARAMETER1..N"),
 });
-const zSpec = z.object({
+export const zSpec = z.object({
   name: z.string().describe("data model name (also the file base name)"),
   defaultDataSource: z.string().optional().describe("default JDBC connection, e.g. ApplicationDB_HCM"),
   description: z.string().optional(),
@@ -54,7 +54,7 @@ const zSpec = z.object({
   bursting: zBursting.optional().describe("bursting definition — near-universal in real Fusion models"),
   properties: z.record(z.string()).optional(),
 });
-const zPatch = z.object({
+export const zPatch = z.object({
   setDatasetSql: z.array(z.object({ dataset: z.string(), sql: z.string() })).optional(),
   setDefaultDataSource: z.string().optional(),
   addParameters: z.array(zParameter).optional(),

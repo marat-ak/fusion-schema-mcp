@@ -8,6 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { buildServer } from "./tools.js";
 import { stats } from "./catalog.js";
 import { createIngestRouter, ingestAuthWarning, startIngestScheduler } from "./ingest.js";
+import { createFilesRouter } from "./files/router.js";
 
 const PORT = Number(process.env.MCP_PORT ?? 8979);
 const HOST = process.env.MCP_HOST ?? "0.0.0.0";
@@ -20,6 +21,8 @@ app.get("/health", (_req, res) => {
 
 // Runtime corpus ingest API (own body parsers per route so large uploads aren't capped here).
 app.use(createIngestRouter());
+// File API: upload/analyze/download BIP archives the agent operates on by fileId.
+app.use(createFilesRouter());
 
 // MCP transport gets its own JSON parser (kept small — MCP requests are tiny).
 app.use("/mcp", express.json({ limit: "4mb" }));
