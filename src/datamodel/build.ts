@@ -34,6 +34,21 @@ export interface DmParameter {
   defaultValue?: string;
   label?: string;
 }
+export interface DmEventTrigger {
+  name: string;
+  type: "before-data" | "after-data";  // BIP trigger event
+  language?: "PLSQL" | "Java";         // defaults to PLSQL
+  source: string;                      // PLSQL: PACKAGE.FUNCTION ; Java: fully-qualified class
+}
+export interface DmBursting {
+  name: string;
+  splitBy: string;         // BURSTING_NODE xpath, e.g. /DATA/LIST_G1/G1/CUSTOMER_ID
+  deliveryKey?: string;    // DELIVERY_KEY xpath (defaults to splitBy)
+  consolidated?: boolean;  // IS_CONSOLIDATED_OUTPUT
+  ucmDataSource?: string;  // UCM_DS
+  dataSource?: string;     // JDBC for the burst query (defaults to defaultDataSource)
+  burstQuery: string;      // SQL returning KEY, TEMPLATE, TEMPLATE_FORMAT, OUTPUT_FORMAT, output_name, DEL_CHANNEL, PARAMETER1..N
+}
 export interface DataModelSpec {
   name: string;
   defaultDataSource?: string;
@@ -42,6 +57,8 @@ export interface DataModelSpec {
   rootName?: string;                   // output root tag, default DATA_DS
   datasets: DmDataset[];
   parameters?: DmParameter[];
+  triggers?: DmEventTrigger[];         // event triggers (~universal in real Fusion models)
+  bursting?: DmBursting;               // bursting definition (~universal in real Fusion models)
   properties?: Record<string, string>; // dataProperties overrides
 }
 
@@ -99,6 +116,32 @@ export function parseSelectColumns(sql: string): DmColumn[] {
 
 // ---- build _datamodel.xdm ---------------------------------------------------------------------
 
+/** `<eventTriggers>` block (or the self-closing empty tag). */
+export function genTriggers(triggers?: DmEventTrigger[]): string {
+  if (!triggers?.length) return "<eventTriggers/>";
+  const items = triggers.map((t) =>
+    `      <eventTrigger name="${xesc(t.name)}" type="${xesc(t.type)}" language="${xesc(t.language ?? "PLSQL")}">\n` +
+    `         <source>${xesc(t.source)}</source>\n      </eventTrigger>`).join("\n");
+  return `<eventTriggers>\n${items}\n   </eventTriggers>`;
+}
+
+/** `<bursting>` block (or the self-closing empty tag). */
+export function genBursting(bursting: DmBursting | undefined, defDs: string): string {
+  if (!bursting) return "<bursting/>";
+  const b = bursting;
+  const dk = b.deliveryKey ?? b.splitBy;
+  const props = [
+    `<property name="BURSTING_NODE" value="${xesc(b.splitBy)}"/>`,
+    `<property name="DELIVERY_KEY" value="${xesc(dk)}"/>`,
+    ...(b.consolidated ? [`<property name="IS_CONSOLIDATED_OUTPUT" value="true"/>`] : []),
+    ...(b.ucmDataSource ? [`<property name="UCM_DS" value="${xesc(b.ucmDataSource)}"/>`] : []),
+  ].map((p) => `         ${p}`).join("\n");
+  const ds = b.dataSource ?? defDs;
+  return `<bursting>\n      <burst name="${xesc(b.name)}" enabled="true">\n${props}\n` +
+    `         <dataSet>\n            <sql dataSourceRef="${xesc(ds)}">\n               ${cdata(b.burstQuery.trim())}\n            </sql>\n         </dataSet>\n` +
+    `      </burst>\n   </bursting>`;
+}
+
 export function buildXdm(spec: DataModelSpec): string {
   const defDs = spec.defaultDataSource ?? spec.datasets[0]?.dataSource ?? "demo";
   const rootName = spec.rootName ?? "DATA_DS";
@@ -153,13 +196,13 @@ ${groups}
          </dataStructure>
       </nodeList>
    </output>
-   <eventTriggers/>
+   ${genTriggers(spec.triggers)}
    <lexicals/>
    <parameters>
 ${params}
    </parameters>
    <valueSets/>
-   <bursting/>
+   ${genBursting(spec.bursting, defDs)}
    <validations>
       <validation>N</validation>
    </validations>
@@ -240,6 +283,8 @@ export interface DmPatch {
   setDatasetSql?: { dataset: string; sql: string }[];
   setDefaultDataSource?: string;
   addParameters?: DmParameter[];
+  addTriggers?: DmEventTrigger[];
+  setBursting?: DmBursting | null; // object = set/replace; null = clear
   rename?: string;
 }
 
@@ -274,6 +319,19 @@ export function updateXdmzWithPatch(baseBytes: Uint8Array, patch: DmPatch): { by
     if (/<parameters\s*\/>/i.test(xdm)) xdm = xdm.replace(/<parameters\s*\/>/i, `<parameters>\n${params}\n   </parameters>`);
     else xdm = xdm.replace(/(<parameters>)/i, `$1\n${params}`);
     applied.push(`addParameters:${patch.addParameters.length}`);
+  }
+  if (patch.addTriggers?.length) {
+    const items = patch.addTriggers.map((t) =>
+      `      <eventTrigger name="${xesc(t.name)}" type="${xesc(t.type)}" language="${xesc(t.language ?? "PLSQL")}">\n         <source>${xesc(t.source)}</source>\n      </eventTrigger>`).join("\n");
+    if (/<eventTriggers\s*\/>/i.test(xdm)) xdm = xdm.replace(/<eventTriggers\s*\/>/i, `<eventTriggers>\n${items}\n   </eventTriggers>`);
+    else xdm = xdm.replace(/(<eventTriggers>)/i, `$1\n${items}`);
+    applied.push(`addTriggers:${patch.addTriggers.length}`);
+  }
+  if (patch.setBursting !== undefined) {
+    const defDs = xdm.match(/<dataModel\b[^>]*\bdefaultDataSourceRef="([^"]*)"/i)?.[1] ?? "demo";
+    const block = patch.setBursting ? genBursting(patch.setBursting, defDs) : "<bursting/>";
+    xdm = xdm.replace(/<bursting\s*\/>|<bursting>[\s\S]*?<\/bursting>/i, block);
+    applied.push(patch.setBursting ? "setBursting" : "clearBursting");
   }
 
   entries[key] = strToU8(xdm);

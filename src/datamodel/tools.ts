@@ -27,6 +27,21 @@ const zDataset = z.object({
 const zParameter = z.object({
   name: z.string(), dataType: zType.optional(), defaultValue: z.string().optional(), label: z.string().optional(),
 });
+const zTrigger = z.object({
+  name: z.string(),
+  type: z.enum(["before-data", "after-data"]),
+  language: z.enum(["PLSQL", "Java"]).optional(),
+  source: z.string().describe("PLSQL: PACKAGE.FUNCTION ; Java: fully-qualified class"),
+});
+const zBursting = z.object({
+  name: z.string(),
+  splitBy: z.string().describe("BURSTING_NODE xpath, e.g. /DATA/LIST_G1/G1/CUSTOMER_ID"),
+  deliveryKey: z.string().optional().describe("DELIVERY_KEY xpath (defaults to splitBy)"),
+  consolidated: z.boolean().optional(),
+  ucmDataSource: z.string().optional(),
+  dataSource: z.string().optional(),
+  burstQuery: z.string().describe("SQL returning KEY, TEMPLATE, TEMPLATE_FORMAT, OUTPUT_FORMAT, output_name, DEL_CHANNEL, PARAMETER1..N"),
+});
 const zSpec = z.object({
   name: z.string().describe("data model name (also the file base name)"),
   defaultDataSource: z.string().optional().describe("default JDBC connection, e.g. ApplicationDB_HCM"),
@@ -35,12 +50,16 @@ const zSpec = z.object({
   rootName: z.string().optional().describe("output root tag (default DATA_DS)"),
   datasets: z.array(zDataset).min(1),
   parameters: z.array(zParameter).optional(),
+  triggers: z.array(zTrigger).optional().describe("event triggers (before-data/after-data PLSQL) — near-universal in real Fusion models"),
+  bursting: zBursting.optional().describe("bursting definition — near-universal in real Fusion models"),
   properties: z.record(z.string()).optional(),
 });
 const zPatch = z.object({
   setDatasetSql: z.array(z.object({ dataset: z.string(), sql: z.string() })).optional(),
   setDefaultDataSource: z.string().optional(),
   addParameters: z.array(zParameter).optional(),
+  addTriggers: z.array(zTrigger).optional(),
+  setBursting: zBursting.nullable().optional().describe("object = set/replace; null = clear"),
   rename: z.string().optional(),
 });
 
@@ -72,8 +91,9 @@ export function registerDataModelTools(server: McpServer): void {
       title: "Create a BI Publisher data model (.xdmz)",
       description:
         "Build a NEW Fusion BI Publisher data model from a spec and return a downloadable .xdmz " +
-        "(base64). v1 covers SQL datasets, parameters, and the output data structure. Ground every " +
-        "table/column with the fusion-schema tools first; validation runs before returning.",
+        "(base64). Covers SQL datasets, parameters, output data structure, event triggers " +
+        "(before-data/after-data PLSQL) and bursting. Ground every table/column with the " +
+        "fusion-schema tools first; validation runs before returning.",
       inputSchema: { spec: zSpec },
     },
     async ({ spec }) => {
