@@ -114,13 +114,15 @@ function stageReport(store: EnrichStore, r: ReadyCatalogReport): number {
 // ---- enrich + materialize orchestration -------------------------------------------------------
 let enrichRunning = false;
 
-/** Run the enrich worker over all PENDING staging rows via a concurrency-limited pool. */
-async function runEnrich(store: EnrichStore): Promise<{ enriched: number; failed: number; pending: number; skipped?: string }> {
+/** Run the enrich worker over PENDING staging rows via a concurrency-limited pool.
+ *  `limit` (>0) caps how many pending rows this run processes — used for controlled test batches. */
+async function runEnrich(store: EnrichStore, limit?: number): Promise<{ enriched: number; failed: number; pending: number; skipped?: string }> {
   if (enrichRunning) return { enriched: 0, failed: 0, pending: store.counts().pending, skipped: "already running" };
   enrichRunning = true;
   try {
     const cfg = getEnrichConfig();
-    const pend = store.pendingRows();
+    let pend = store.pendingRows();
+    if (limit && limit > 0) pend = pend.slice(0, limit);
     if (pend.length === 0) return { enriched: 0, failed: 0, pending: 0 };
     if (!cfg.apiKey && cfg.provider !== "custom") {
       console.error(`[ingest] enrich: no key for provider "${cfg.provider}" — leaving ${pend.length} row(s) pending`);
@@ -251,9 +253,11 @@ export function createIngestRouter(): express.Router {
   );
 
   // Manual triggers.
-  router.post("/ingest/enrich", requireAuth, async (_req, res) => {
-    try { res.json({ ok: true, ...(await runEnrich(getStore())) }); }
-    catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
+  router.post("/ingest/enrich", requireAuth, async (req, res) => {
+    try {
+      const limit = Number(req.query.limit) || undefined;
+      res.json({ ok: true, ...(await runEnrich(getStore(), limit)) });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
   });
 
   router.post("/ingest/materialize", requireAuth, async (req, res) => {
