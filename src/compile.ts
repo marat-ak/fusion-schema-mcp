@@ -325,7 +325,22 @@ async function main() {
     CREATE VIRTUAL TABLE report_queries_fts USING fts5(title, description, tables_used, content='');
     CREATE VIRTUAL TABLE report_queries_vec USING vec0(rowid INTEGER PRIMARY KEY, embedding FLOAT[${EMBED_DIM}]);
   `);
-  const enrich = openEnrichStore();
+  // SHIP-SAFETY: the enrich store (Oracle-catalog-extracted SQL corpus) is excluded from the
+  // Docker build context (.dockerignore). The 3 report_queries* tables above are ALWAYS created
+  // so runtime ingest (poller -> /ingest) can populate them. Only POPULATE from enrich.sqlite
+  // when the file is actually present (local dev builds); otherwise ship an empty report corpus.
+  const ENRICH_DB = process.env.ENRICH_DB ?? path.join(DATA_DIR, "enrich.sqlite");
+  if (!fs.existsSync(ENRICH_DB)) {
+    log(`no enrich.sqlite (${ENRICH_DB}) — empty report corpus; poller/ingest will populate`);
+    db.pragma("journal_mode = DELETE");
+    db.exec("VACUUM");
+    db.exec("ANALYZE");
+    db.close();
+    const szEmpty = (fs.statSync(OUT_DB).size / (1024 * 1024)).toFixed(1);
+    log(`DONE -> ${OUT_DB} (${szEmpty} MB, report_queries=0)`);
+    return;
+  }
+  const enrich = openEnrichStore(ENRICH_DB);
   // rowid is set explicitly on ALL three tables so the vec/FTS JOIN back to
   // report_queries by rowid is guaranteed aligned. rowid is bound as BigInt and
   // the embedding as a Node Buffer of the Float32 bytes — sqlite-vec rejects a

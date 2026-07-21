@@ -7,3 +7,13 @@ npm-debug.log*
 .git
 # keep data/ (needed by the build stage compile) but drop the human-readable report
 data/goal2_relationships_report.md
+
+# SHIP-SAFETY: never bake the Oracle-catalog-extracted SQL corpus (~1.1GB) into the image.
+# The runtime report_queries corpus is populated at runtime via the /ingest API (poller),
+# so the enrich store and its intermediate artifacts must stay out of the build context.
+# NOTE: data/*.csv (META_*.csv) and data/*.json (mined_relationships.json, otbi_relations.json)
+# are intentionally NOT excluded — the schema-catalog compile step needs them.
+data/enrich.sqlite*
+data/*.jsonl
+_gem_compare.json
+**/*_gem_compare.json
