@@ -86,7 +86,11 @@ export function registerFileTools(server: McpServer): void {
       description:
         "Build a NEW BI Publisher data model (.xdmz) from a DataModelSpec (SQL datasets, parameters, " +
         "structure, event triggers, bursting) and store it — returns a fileId to download. Ground " +
-        "every table/column with the schema tools and findSimilarQueries first.",
+        "every table/column with the schema tools and findSimilarQueries first. BEFORE calling, " +
+        "confirm with the user: (1) review the SQL first vs build directly, and (2) for any 'group " +
+        "by', a flat summary vs a grouped hierarchy. For a grouped hierarchy set dataset.groupBy " +
+        "(one dataset, nested output) — do NOT split into two datasets when ranking/filtering the " +
+        "group needs the detail rows anyway (e.g. top-N suppliers by invoice amount).",
       inputSchema: { spec: zSpec },
     },
     async ({ spec }) => {

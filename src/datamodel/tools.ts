@@ -23,6 +23,10 @@ const zDataset = z.object({
   sql: z.string().describe("physical SQL SELECT"),
   dataSource: z.string().optional().describe("JDBC connection name (defaults to defaultDataSource)"),
   columns: z.array(zColumn).optional().describe("output elements; if omitted, parsed from the SELECT list"),
+  groupBy: z.array(z.string()).optional().describe(
+    "break the flat rows into a HIERARCHY: these columns become an outer group (one node per " +
+    "distinct value, e.g. SUPPLIER_ID/SUPPLIER_NAME) and the rest become a nested detail group " +
+    "(e.g. that supplier's invoices). One dataset, grouped output. ORDER BY these columns in the SQL."),
 });
 const zParameter = z.object({
   name: z.string(), dataType: zType.optional(), defaultValue: z.string().optional(), label: z.string().optional(),

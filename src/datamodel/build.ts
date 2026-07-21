@@ -27,6 +27,13 @@ export interface DmDataset {
   sql: string;
   dataSource?: string;     // JDBC connection name; defaults to spec.defaultDataSource
   columns?: DmColumn[];    // output elements; if omitted, parsed from the SELECT list
+  /**
+   * Break/group the flat rows into a HIERARCHY in the output XML: the named columns become an outer
+   * group (one node per distinct value, e.g. per supplier) and the remaining columns become a nested
+   * detail group (e.g. that supplier's invoices). One dataset, grouped output — no second dataset.
+   * The SQL should ORDER BY these columns.
+   */
+  groupBy?: string[];
 }
 export interface DmParameter {
   name: string;
@@ -157,14 +164,26 @@ export function buildXdm(spec: DataModelSpec): string {
       `      </dataSet>`;
   }).join("\n");
 
+  const elEl = (c: DmColumn, i: number) =>
+    `               <element name="${xesc(tag(c.name))}" value="${xesc(c.value ?? c.name)}" ` +
+    `label="${xesc(c.label ?? c.name)}" dataType="${XSD[c.dataType ?? "string"]}" breakOrder="" fieldOrder="${i + 1}"/>`;
   const groups = spec.datasets.map((d) => {
     const cols = (d.columns && d.columns.length ? d.columns : parseSelectColumns(d.sql));
-    const els = cols.map((c, i) =>
-      `               <element name="${xesc(tag(c.name))}" value="${xesc(c.value ?? c.name)}" ` +
-      `label="${xesc(c.label ?? c.name)}" dataType="${XSD[c.dataType ?? "string"]}" breakOrder="" fieldOrder="${i + 1}"/>`
-    ).join("\n");
     const gname = tag("G_" + d.name);
-    return `            <group name="${xesc(gname)}" label="${xesc(gname)}" source="${xesc(d.name)}">\n${els}\n            </group>`;
+    if (d.groupBy && d.groupBy.length) {
+      // Nested grouped output: outer group = the break columns, inner group = the detail rows.
+      const gset = new Set(d.groupBy.map((s) => tag(s).toUpperCase()));
+      const breakCols = cols.filter((c) => gset.has(tag(c.name).toUpperCase()));
+      const detailCols = cols.filter((c) => !gset.has(tag(c.name).toUpperCase()));
+      const dname = tag("G_" + d.name + "_DETAIL");
+      return `            <group name="${xesc(gname)}" label="${xesc(gname)}" source="${xesc(d.name)}">\n` +
+        `${breakCols.map(elEl).join("\n")}\n` +
+        `               <group name="${xesc(dname)}" label="${xesc(dname)}" source="${xesc(d.name)}">\n` +
+        `${detailCols.map(elEl).join("\n")}\n` +
+        `               </group>\n` +
+        `            </group>`;
+    }
+    return `            <group name="${xesc(gname)}" label="${xesc(gname)}" source="${xesc(d.name)}">\n${cols.map(elEl).join("\n")}\n            </group>`;
   }).join("\n");
 
   const params = (spec.parameters ?? []).map((p) =>
