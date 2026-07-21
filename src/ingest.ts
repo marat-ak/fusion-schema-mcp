@@ -44,6 +44,9 @@ import { openEnrichStore, type EnrichStore } from "./corpus/enrichStore.js";
 import { hashSql, hashSqlNormalized, type SqlSource } from "./corpus/sources.js";
 import { enrichOne } from "./corpus/enrichAdapters.js";
 import { getEnrichConfig } from "./corpus/enrichConfig.js";
+import { runGeminiBatches } from "./corpus/geminiBatch.js";
+import { buildEnrichPrompt, parseEnrichReply } from "./corpus/enrichPrompt.js";
+import type { EnrichRow } from "./corpus/enrichStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN = process.env.INGEST_TOKEN;
@@ -158,6 +161,61 @@ async function runEnrich(store: EnrichStore, limit?: number): Promise<{ enriched
     return { enriched, failed, pending: store.counts().pending };
   } finally {
     enrichRunning = false;
+  }
+}
+
+// ---- native Gemini batch drain (ENRICH_MODE=batch) --------------------------------------------
+function rowSource(r: EnrichRow): SqlSource {
+  return { id: r.id, source: "catalog", title: r.title, originalSql: r.originalSql, sourceHash: r.sourceHash, raw: {} };
+}
+
+let batchDraining = false;
+/**
+ * Enrich ALL pending rows via the native Gemini Batch API (concurrent batch jobs). Loops until the
+ * backlog is empty; materializes after each round. Single-flight (the scheduler re-kicks it, but an
+ * in-progress drain is a no-op). Only supported for the gemini provider.
+ */
+async function drainViaBatches(store: EnrichStore): Promise<void> {
+  if (batchDraining) return;
+  const cfg = getEnrichConfig();
+  if (cfg.provider !== "gemini") { console.error(`[batch] ENRICH_MODE=batch requires provider=gemini (have ${cfg.provider})`); return; }
+  if (!cfg.apiKey) { console.error("[batch] no ENRICH_API_KEY — skipping"); return; }
+  batchDraining = true;
+  try {
+    const batchSize = Number(process.env.ENRICH_BATCH_SIZE ?? 100) || 100;
+    const concurrency = Number(process.env.ENRICH_BATCH_CONCURRENCY ?? 4) || 4;
+    for (;;) {
+      const pend = store.pendingRows();
+      if (!pend.length) break;
+      const rows = new Map(pend.map((r) => [r.id, r] as const));
+      const items = pend.map((r) => { const p = buildEnrichPrompt(rowSource(r)); return { key: r.id, system: p.system, user: p.user }; });
+      console.error(`[batch] draining ${items.length} pending (batchSize=${batchSize} concurrency=${concurrency})`);
+      const results = await runGeminiBatches(items, cfg, {
+        batchSize, concurrency, onProgress: (m) => console.error("[batch] " + m),
+      });
+      let ok = 0, fail = 0;
+      for (const [key, res] of results) {
+        const row = rows.get(key);
+        if (!row) continue;
+        if (res.text) {
+          try {
+            const e = parseEnrichReply(res.text, rowSource(row));
+            store.setEnrichment(key, {
+              cleanSql: e.cleanSql, description: e.description, tablesUsed: e.tablesUsed,
+              lookupTypes: e.lookupTypes, joins: e.joins, filters: e.filters, securityPredicate: e.securityPredicate,
+            });
+            ok++;
+          } catch (err) { fail++; console.error(`[batch] parse fail ${key}: ${(err as Error).message}`); }
+        } else { fail++; if (res.error) console.error(`[batch] ${key}: ${res.error}`); }
+      }
+      await runMaterialize(store);
+      console.error(`[batch] round done: enriched=${ok} failed=${fail}`);
+      if (ok === 0) { console.error("[batch] no progress this round — stopping to avoid a loop"); break; }
+    }
+  } catch (e) {
+    console.error("[batch] drain error", e);
+  } finally {
+    batchDraining = false;
   }
 }
 
@@ -325,10 +383,23 @@ export function startIngestScheduler(): void {
     console.error("[ingest] scheduler disabled (ENRICH_INTERVAL <= 0)");
     return;
   }
-  // Enrich at most ENRICH_BATCH pending rows per tick so a large backlog (e.g. a fresh full poll)
-  // drains gradually instead of firing thousands of model calls at once. 0 = all pending per tick.
-  const batch = Number(process.env.ENRICH_BATCH ?? 200) || undefined;
   const store = getStore();
+
+  // BATCH mode: drain the whole backlog via the native Gemini Batch API (concurrent batch jobs,
+  // ~50% cheaper, async). The drain loops until empty; the interval just re-kicks it when new
+  // poller pushes arrive (single-flight — an in-progress drain is a no-op).
+  if ((process.env.ENRICH_MODE ?? "pool").toLowerCase() === "batch") {
+    const kick = () => { void drainViaBatches(store); };
+    kick();
+    const t = setInterval(kick, ms);
+    t.unref?.();
+    console.error(`[ingest] scheduler on: BATCH mode, re-kick every ${ms}ms (provider=${getEnrichConfig().provider})`);
+    return;
+  }
+
+  // POOL mode (default): enrich at most ENRICH_BATCH pending rows per tick via concurrent
+  // generateContent calls so a large backlog drains gradually. 0 = all pending per tick.
+  const batch = Number(process.env.ENRICH_BATCH ?? 200) || undefined;
   const tick = async () => {
     try {
       if (store.counts().pending > 0) await runEnrich(store, batch);
