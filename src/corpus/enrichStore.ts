@@ -6,11 +6,13 @@ import type { SqlSource } from "./sources.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT = process.env.ENRICH_DB ?? path.resolve(__dirname, "../../data/enrich.sqlite");
 
+export type ReportRef = { path?: string; title?: string; index?: number };
+
 export type EnrichRow = {
   id: string; source: string; title: string; sourceHash: string;
   originalSql: string; cleanSql: string | null; description: string | null;
   tablesUsed: string[]; lookupTypes: string[]; joins: any[]; filters: string[];
-  securityPredicate: string | null; approved: number;
+  securityPredicate: string | null; approved: number; reports: ReportRef[];
 };
 
 export type Enrichment = {
@@ -29,18 +31,22 @@ export function openEnrichStore(dbPath: string = DEFAULT) {
       id TEXT PRIMARY KEY, source TEXT, title TEXT, source_hash TEXT,
       original_sql TEXT, clean_sql TEXT, description TEXT,
       tables_used TEXT, lookup_types TEXT, joins TEXT, filters TEXT,
-      security_predicate TEXT, approved INTEGER DEFAULT 0
+      security_predicate TEXT, approved INTEGER DEFAULT 0, reports TEXT
     );`);
+  // migrate older stores that predate the reports column
+  try { db.exec("ALTER TABLE enrich ADD COLUMN reports TEXT"); } catch { /* already present */ }
 
   const qHash = db.prepare("SELECT source_hash, description FROM enrich WHERE id = ?");
+  const qReports = db.prepare("SELECT reports FROM enrich WHERE id = ?");
   const insSrc = db.prepare(`
-    INSERT INTO enrich (id, source, title, source_hash, original_sql)
-    VALUES (@id, @source, @title, @sourceHash, @originalSql)
+    INSERT INTO enrich (id, source, title, source_hash, original_sql, reports)
+    VALUES (@id, @source, @title, @sourceHash, @originalSql, @reports)
     ON CONFLICT(id) DO UPDATE SET
       source=excluded.source, title=excluded.title,
       source_hash=excluded.source_hash, original_sql=excluded.original_sql,
       clean_sql=NULL, description=NULL   -- hash changed → invalidate prior enrichment
     WHERE enrich.source_hash <> excluded.source_hash`);
+  const updReports = db.prepare("UPDATE enrich SET reports=@reports WHERE id=@id");
   const updEnr = db.prepare(`
     UPDATE enrich SET clean_sql=@cleanSql, description=@description,
       tables_used=@tablesUsed, lookup_types=@lookupTypes, joins=@joins,
@@ -53,6 +59,7 @@ export function openEnrichStore(dbPath: string = DEFAULT) {
     originalSql: r.original_sql, cleanSql: r.clean_sql, description: r.description,
     tablesUsed: P(r.tables_used), lookupTypes: P(r.lookup_types), joins: P(r.joins),
     filters: P(r.filters), securityPredicate: r.security_predicate, approved: r.approved,
+    reports: r.reports ? JSON.parse(r.reports) : [],
   };
 
   return {
@@ -62,7 +69,25 @@ export function openEnrichStore(dbPath: string = DEFAULT) {
         return !row || row.source_hash !== s.sourceHash || row.description == null;
       });
     },
-    upsertSource(s: SqlSource) { insSrc.run(s); },
+    upsertSource(s: SqlSource) { insSrc.run({ ...s, reports: null }); },
+    /**
+     * Content-dedup stage: `s.id` is a normalized-SQL hash, so identical queries across reports
+     * collapse to ONE row. Merges the report reference; keeps the existing enrichment intact.
+     * Returns true if this was a brand-new SQL (first time seen).
+     */
+    stageSql(s: SqlSource, ref: ReportRef): boolean {
+      const existing = qReports.get(s.id) as { reports: string | null } | undefined;
+      if (!existing) {
+        insSrc.run({ ...s, reports: J([ref]) });
+        return true;
+      }
+      const refs: ReportRef[] = existing.reports ? JSON.parse(existing.reports) : [];
+      if (!refs.some((r) => r.path === ref.path && r.index === ref.index)) {
+        refs.push(ref);
+        updReports.run({ id: s.id, reports: J(refs) });
+      }
+      return false;
+    },
     setEnrichment(id: string, e: Enrichment) {
       updEnr.run({ id, cleanSql: e.cleanSql, description: e.description,
         tablesUsed: J(e.tablesUsed), lookupTypes: J(e.lookupTypes),

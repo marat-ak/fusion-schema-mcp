@@ -20,6 +20,21 @@ export function hashSql(sql: string): string {
   return crypto.createHash("sha256").update(sql, "utf8").digest("hex");
 }
 
+/** Normalize SQL for content-dedup: strip comments, collapse whitespace, lowercase. */
+export function normalizeSql(sql: string): string {
+  return sql
+    .replace(/--[^\n]*/g, " ")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+/** Content hash used as the corpus identity — identical queries (ignoring formatting) collapse. */
+export function hashSqlNormalized(sql: string): string {
+  return crypto.createHash("sha256").update(normalizeSql(sql), "utf8").digest("hex");
+}
+
 function readJson(file: string): any | null {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return null; }
 }

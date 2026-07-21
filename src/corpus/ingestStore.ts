@@ -31,6 +31,9 @@ function db(): Database.Database {
   const d = new Database(DB_PATH);
   d.pragma("busy_timeout = 10000"); // tolerate the read-only reader connection briefly locking
   loadVec(d);
+  // report_queries.reports = JSON list of source reports that use this (deduped) SQL. Added at
+  // runtime so existing compiled catalogs pick it up without a recompile.
+  try { d.exec("ALTER TABLE report_queries ADD COLUMN reports TEXT"); } catch { /* already present */ }
   _db = d;
   return d;
 }
@@ -190,6 +193,7 @@ export interface MaterializeRow {
   filters?: unknown[];
   securityPredicate?: string | null;
   source?: string;
+  reports?: unknown[]; // source reports referencing this (deduped) SQL
 }
 
 /** ids already present in report_queries — lets the materializer skip already-searchable rows. */
@@ -215,8 +219,8 @@ export async function materialize(rows: MaterializeRow[]): Promise<{ inserted: n
   const insRq = d.prepare(
     `INSERT INTO report_queries
        (rowid, id, source, title, original_sql, clean_sql, description,
-        tables_used, joins, filters, lookup_types, security_predicate, approved)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)`,
+        tables_used, joins, filters, lookup_types, security_predicate, approved, reports)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?)`,
   );
   const insVec = d.prepare("INSERT INTO report_queries_vec (rowid, embedding) VALUES (?, ?)");
   const maxRowid = d.prepare("SELECT COALESCE(MAX(rowid), 0) AS m FROM report_queries");
@@ -233,7 +237,7 @@ export async function materialize(rows: MaterializeRow[]): Promise<{ inserted: n
         rowid, r.id, r.source ?? "bip-report", r.title, r.originalSql, r.cleanSql ?? r.originalSql, r.description,
         JSON.stringify(r.tablesUsed ?? []), JSON.stringify(r.joins ?? []),
         JSON.stringify(r.filters ?? []), JSON.stringify(r.lookupTypes ?? []),
-        r.securityPredicate ?? null,
+        r.securityPredicate ?? null, JSON.stringify(r.reports ?? []),
       );
       insVec.run(rowid, Buffer.from(vecs[i].buffer));
       inserted++;
@@ -266,6 +270,7 @@ export function* exportCorpus(scope: ExportScope, source?: string): Generator<Re
       original_sql: r.original_sql, clean_sql: r.clean_sql, description: r.description,
       tables_used: r.tables_used, joins: r.joins, filters: r.filters,
       lookup_types: r.lookup_types, security_predicate: r.security_predicate, approved: r.approved,
+      reports: r.reports,
     };
     if (scope === "full" && r._emb) row.embedding = Buffer.from(r._emb).toString("base64");
     yield row;
@@ -276,7 +281,7 @@ export interface ImportRow {
   id: string; source?: string; title: string;
   original_sql: string; clean_sql?: string | null; description: string;
   tables_used?: string; joins?: string; filters?: string; lookup_types?: string;
-  security_predicate?: string | null;
+  security_predicate?: string | null; reports?: string;
   embedding?: string; // base64 float32 (present on a "full" export)
 }
 
@@ -298,8 +303,8 @@ export async function importCorpus(rows: ImportRow[]): Promise<{ imported: numbe
   const insRq = d.prepare(
     `INSERT INTO report_queries
        (rowid, id, source, title, original_sql, clean_sql, description,
-        tables_used, joins, filters, lookup_types, security_predicate, approved)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)`,
+        tables_used, joins, filters, lookup_types, security_predicate, approved, reports)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?)`,
   );
   const insVec = d.prepare("INSERT INTO report_queries_vec (rowid, embedding) VALUES (?, ?)");
   const maxRowid = d.prepare("SELECT COALESCE(MAX(rowid), 0) AS m FROM report_queries");
@@ -314,6 +319,7 @@ export async function importCorpus(rows: ImportRow[]): Promise<{ imported: numbe
       insRq.run(
         rowid, r.id, r.source ?? "bip-report", r.title, r.original_sql, r.clean_sql ?? r.original_sql, r.description,
         r.tables_used ?? "[]", r.joins ?? "[]", r.filters ?? "[]", r.lookup_types ?? "[]", r.security_predicate ?? null,
+        r.reports ?? "[]",
       );
       let vec: Buffer;
       if (r.embedding) vec = Buffer.from(r.embedding, "base64");

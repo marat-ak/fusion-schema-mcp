@@ -41,7 +41,7 @@ import express from "express";
 import { corpusCount, materialize, materializedIds, exportCorpus, importCorpus, type MaterializeRow, type ImportRow } from "./corpus/ingestStore.js";
 import { extractModels } from "./corpus/extractArchive.js";
 import { openEnrichStore, type EnrichStore } from "./corpus/enrichStore.js";
-import { hashSql, type SqlSource } from "./corpus/sources.js";
+import { hashSql, hashSqlNormalized, type SqlSource } from "./corpus/sources.js";
 import { enrichOne } from "./corpus/enrichAdapters.js";
 import { getEnrichConfig } from "./corpus/enrichConfig.js";
 
@@ -94,21 +94,26 @@ function collectReports(body: any): ReadyCatalogReport[] {
   return [];
 }
 
-/** Stage one report's SQLs as PENDING rows. Returns how many SQLs were staged. */
-function stageReport(store: EnrichStore, r: ReadyCatalogReport): number {
+/**
+ * Stage one report's SQLs. Identity is a NORMALIZED-SQL content hash, so a query shared across
+ * many reports (e.g. an LOV "list of ledgers") is staged and enriched ONCE; each report that uses
+ * it is recorded as a reference. Returns { staged: total SQLs seen, unique: brand-new SQLs added }.
+ */
+function stageReport(store: EnrichStore, r: ReadyCatalogReport): { staged: number; unique: number } {
   const sqls = reportSqls(r);
-  if (sqls.length === 0) return 0;
+  if (sqls.length === 0) return { staged: 0, unique: 0 };
   const title = reportTitle(r);
-  const groupKey = title || `sql-${hashSql(sqls[0]).slice(0, 12)}`;
+  const reportPath = (r.reportPath ?? r.path ?? title) || undefined;
+  let unique = 0;
   sqls.forEach((sql, i) => {
-    const id = sqls.length > 1 ? `catalog:${groupKey}#${i}` : `catalog:${groupKey}`;
+    const id = `sql:${hashSqlNormalized(sql)}`;
     const src: SqlSource = {
-      id, source: "catalog", title: title || groupKey,
+      id, source: "catalog", title: title || id,
       originalSql: sql, sourceHash: hashSql(sql), raw: {},
     };
-    store.upsertSource(src);
+    if (store.stageSql(src, { path: reportPath, title: title || undefined, index: i })) unique++;
   });
-  return sqls.length;
+  return { staged: sqls.length, unique };
 }
 
 // ---- enrich + materialize orchestration -------------------------------------------------------
@@ -166,7 +171,7 @@ async function runMaterialize(store: EnrichStore, force = false): Promise<{ inse
       id: r.id, title: r.title, originalSql: r.originalSql, cleanSql: r.cleanSql,
       description: r.description ?? "", tablesUsed: r.tablesUsed, lookupTypes: r.lookupTypes,
       joins: r.joins, filters: r.filters, securityPredicate: r.securityPredicate,
-      source: "bip-report",
+      source: "bip-report", reports: r.reports,
     });
   }
   if (rows.length === 0) return { inserted: 0, replaced: 0 };
@@ -199,13 +204,13 @@ export function createIngestRouter(): express.Router {
         return res.status(400).json({ ok: false, error: "expected a report {sqls:[...]}, an array of reports, or {items:[...]}" });
       }
       const store = getStore();
-      let staged = 0, reportsStaged = 0;
+      let staged = 0, unique = 0, reportsStaged = 0;
       for (const r of reports) {
         const n = stageReport(store, r);
-        if (n > 0) { staged += n; reportsStaged++; }
+        if (n.staged > 0) { staged += n.staged; unique += n.unique; reportsStaged++; }
       }
       const c = store.counts();
-      res.json({ ok: true, reports: reportsStaged, staged, pending: c.pending, enriched: c.enriched });
+      res.json({ ok: true, reports: reportsStaged, staged, unique, deduped: staged - unique, pending: c.pending, enriched: c.enriched });
     } catch (e: any) {
       console.error("[ingest] stage error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
@@ -242,9 +247,9 @@ export function createIngestRouter(): express.Router {
         if (sqls.length === 0) {
           return res.json({ ok: true, models: models.length, staged: 0, note: "no physical SQL found", ...getStore().counts() });
         }
-        const staged = stageReport(getStore(), { title: groupKey, sqls });
+        const st = stageReport(getStore(), { title: groupKey, reportPath: groupKey, sqls });
         const c = getStore().counts();
-        res.json({ ok: true, models: models.length, staged, pending: c.pending, enriched: c.enriched });
+        res.json({ ok: true, models: models.length, staged: st.staged, unique: st.unique, pending: c.pending, enriched: c.enriched });
       } catch (e: any) {
         console.error("[ingest] /catalog error", e);
         res.status(500).json({ ok: false, error: e?.message ?? String(e) });
@@ -320,10 +325,13 @@ export function startIngestScheduler(): void {
     console.error("[ingest] scheduler disabled (ENRICH_INTERVAL <= 0)");
     return;
   }
+  // Enrich at most ENRICH_BATCH pending rows per tick so a large backlog (e.g. a fresh full poll)
+  // drains gradually instead of firing thousands of model calls at once. 0 = all pending per tick.
+  const batch = Number(process.env.ENRICH_BATCH ?? 200) || undefined;
   const store = getStore();
   const tick = async () => {
     try {
-      if (store.counts().pending > 0) await runEnrich(store);
+      if (store.counts().pending > 0) await runEnrich(store, batch);
       await runMaterialize(store);
     } catch (e) {
       console.error("[ingest] scheduler tick error", e);
@@ -331,7 +339,7 @@ export function startIngestScheduler(): void {
   };
   const timer = setInterval(tick, ms);
   timer.unref?.(); // don't keep the event loop alive for the scheduler alone
-  console.error(`[ingest] scheduler on: enrich+materialize every ${ms}ms (provider=${getEnrichConfig().provider})`);
+  console.error(`[ingest] scheduler on: enrich(${batch ?? "all"})+materialize every ${ms}ms (provider=${getEnrichConfig().provider})`);
 }
 
 export function ingestAuthWarning(): void {
