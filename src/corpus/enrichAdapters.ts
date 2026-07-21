@@ -104,8 +104,38 @@ async function enrichGemini(sql: string, title: string, cfg: EnrichConfig, tries
 //           messages: [{ role: "user", content: <buildEnrichPrompt().user> }] }
 //   parse: response.content[0].text -> JSON { description, tablesUsed, lookupTypes }
 //          (reuse parseEnrichReply for lenient extraction).
-async function enrichAnthropic(_sql: string, _title: string, _cfg: EnrichConfig): Promise<EnrichResult> {
-  throw new Error("anthropic enrichment not yet implemented");
+async function enrichAnthropic(sql: string, title: string, cfg: EnrichConfig, tries = 4): Promise<EnrichResult> {
+  const s = asSource(sql, title);
+  const p = buildEnrichPrompt(s);
+  const base = (cfg.url || "https://api.anthropic.com").replace(/\/$/, "");
+  // sk-ant- keys use x-api-key; anything else is treated as an OAuth bearer token.
+  const auth: Record<string, string> = cfg.apiKey.startsWith("sk-ant-")
+    ? { "x-api-key": cfg.apiKey }
+    : { authorization: `Bearer ${cfg.apiKey}` };
+  const body = {
+    model: cfg.model || "claude-haiku-4-5",
+    max_tokens: 1024,
+    system: p.system,
+    messages: [{ role: "user", content: p.user }],
+  };
+  let lastErr = "unknown";
+  for (let attempt = 0; attempt < tries; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(`${base}/v1/messages`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "anthropic-version": "2023-06-01", ...auth },
+        body: JSON.stringify(body),
+      });
+    } catch (e) { lastErr = String(e); await backoff(attempt); continue; }
+    if (res.status === 429 || res.status >= 500) { lastErr = `HTTP ${res.status}`; await backoff(attempt, res.headers.get("retry-after")); continue; }
+    const j: any = await res.json();
+    if (!res.ok) throw new Error(`anthropic HTTP ${res.status}: ${JSON.stringify(j).slice(0, 160)}`);
+    const text = (j.content ?? []).map((c: any) => c.text ?? "").join("");
+    const e = parseEnrichReply(text, s);
+    return { description: e.description, tablesUsed: e.tablesUsed, lookupTypes: e.lookupTypes };
+  }
+  throw new Error(`anthropic exhausted retries (${lastErr})`);
 }
 
 // ---- openai (SCAFFOLD) ------------------------------------------------------------------------
@@ -116,8 +146,33 @@ async function enrichAnthropic(_sql: string, _title: string, _cfg: EnrichConfig)
 //           messages: [{ role: "system", content: <SYSTEM_DESC> },
 //                      { role: "user", content: <buildEnrichPrompt().user> }] }
 //   parse: choices[0].message.content -> JSON { description, tablesUsed, lookupTypes }.
-async function enrichOpenAI(_sql: string, _title: string, _cfg: EnrichConfig): Promise<EnrichResult> {
-  throw new Error("openai enrichment not yet implemented");
+async function enrichOpenAI(sql: string, title: string, cfg: EnrichConfig, tries = 4): Promise<EnrichResult> {
+  const s = asSource(sql, title);
+  const p = buildEnrichPrompt(s);
+  const base = (cfg.url || "https://api.openai.com").replace(/\/$/, "");
+  const body = {
+    model: cfg.model || "gpt-5-mini",
+    response_format: { type: "json_object" },
+    messages: [{ role: "system", content: p.system }, { role: "user", content: p.user }],
+  };
+  let lastErr = "unknown";
+  for (let attempt = 0; attempt < tries; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(`${base}/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${cfg.apiKey}` },
+        body: JSON.stringify(body),
+      });
+    } catch (e) { lastErr = String(e); await backoff(attempt); continue; }
+    if (res.status === 429 || res.status >= 500) { lastErr = `HTTP ${res.status}`; await backoff(attempt, res.headers.get("retry-after")); continue; }
+    const j: any = await res.json();
+    if (!res.ok) throw new Error(`openai HTTP ${res.status}: ${JSON.stringify(j).slice(0, 160)}`);
+    const text = j.choices?.[0]?.message?.content ?? "";
+    const e = parseEnrichReply(text, s);
+    return { description: e.description, tablesUsed: e.tablesUsed, lookupTypes: e.lookupTypes };
+  }
+  throw new Error(`openai exhausted retries (${lastErr})`);
 }
 
 // ---- custom (IMPLEMENTED) ---------------------------------------------------------------------
