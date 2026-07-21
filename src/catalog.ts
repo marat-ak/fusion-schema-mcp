@@ -144,9 +144,46 @@ export function getColumns(table: string, opts?: { like?: string; limit?: number
   const res: any = { tableExists: true, totalColumns: total, returned: cols.length, columns: cols };
   if (truncated) {
     res.note = `Showing ${cols.length} of ${shown}${opts?.like ? ` matching '${opts.like}'` : ""} (table has ${total} columns). ` +
-      `Refine with getColumns(table, {like:'...'}) or validate specific ones with validateColumns(table, [...]).`;
+      `Refine with getColumns(table, {like:'...'}), searchColumns for a concept, or validateColumns(table, [...]).`;
   }
   return res;
+}
+
+function cosine(a: Float32Array, b: Float32Array): number {
+  let d = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { d += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
+  return d / (Math.sqrt(na) * Math.sqrt(nb) + 1e-9);
+}
+
+/**
+ * Semantic column search within ONE table: embeds each column's "NAME: remarks" and ranks by
+ * cosine to the query intent (e.g. "amount owed to the supplier" → GROSS_AMOUNT, AMOUNT_PAID,
+ * BALANCING_AMOUNT...). Better than a name substring because it uses the column DESCRIPTIONS too.
+ * Embeds on the fly (no precompute) — bounded to the table's columns.
+ */
+export async function searchColumns(table: string, query: string, limit = 20) {
+  const n = normName(table);
+  if (!NAME_SET.has(n)) return { tableExists: false, columns: [] as any[] };
+  const pk = new Set((qPk.all(n) as any[]).map((r) => r.column_name));
+  const rows = qColumns.all(n) as any[];
+  if (!rows.length) return { tableExists: true, totalColumns: 0, columns: [] };
+  const texts = rows.map((r) => `${r.name}: ${r.remarks ?? ""}`.replace(/\s+/g, " ").trim().slice(0, 220));
+  const vecs = await embed([query, ...texts]);
+  const qv = vecs[0];
+  const scored = rows
+    .map((r, i) => ({ r, s: cosine(qv, vecs[i + 1]) }))
+    .sort((a, b) => b.s - a.s)
+    .slice(0, Math.max(1, Math.min(limit, 100)));
+  const columns = scored.map(({ r, s }) => ({
+    name: r.name,
+    dataType: r.data_type,
+    size: r.size,
+    nullable: r.nullable === 1,
+    remarks: r.remarks ? String(r.remarks).replace(/\s+/g, " ").trim().slice(0, 140) : null,
+    isPrimaryKey: pk.has(r.name),
+    score: Number(s.toFixed(3)),
+  }));
+  return { tableExists: true, totalColumns: rows.length, query, columns };
 }
 
 export function validateTable(name: string) {

@@ -55,16 +55,24 @@ export function buildServer(): McpServer {
       title: "List columns of a table/view",
       description:
         "Columns with data type, size, nullability, a short description and primary-key flag. Wide " +
-        "Fusion tables have 100+ columns — pass `like` to get only columns whose name contains a " +
-        "substring (e.g. like:'AMOUNT'), which is usually what you want. Results are capped (default " +
-        "120) with a note; remarks are truncated. For a few known columns prefer validateColumns.",
+        "Fusion tables have 100+ columns — narrow instead of dumping all:\n" +
+        "- `search`: SEMANTIC — ranks columns by name + description against a concept " +
+        "(e.g. search:'amount owed to supplier' → GROSS_AMOUNT, AMOUNT_PAID, ...). Best when you " +
+        "know the meaning but not the exact name.\n" +
+        "- `like`: exact name substring (e.g. like:'AMOUNT').\n" +
+        "Plain (no filter) is capped at 120 with a note; remarks truncated. For a few known names " +
+        "prefer validateColumns.",
       inputSchema: {
         table: z.string().describe("Exact object name, e.g. AP_INVOICES_ALL"),
+        search: z.string().optional().describe("semantic concept to rank columns by (uses name + description embeddings)"),
         like: z.string().optional().describe("only columns whose name contains this substring (case-insensitive)"),
-        limit: z.number().int().min(1).max(400).optional().describe("max columns to return (default 120)"),
+        limit: z.number().int().min(1).max(400).optional().describe("max columns to return (default 120; 20 for search)"),
       },
     },
-    async ({ table, like, limit }) => reply("getColumns", { table, like, limit }, catalog.getColumns(table, { like, limit })),
+    async ({ table, search, like, limit }) =>
+      search
+        ? reply("getColumns", { table, search, limit }, await catalog.searchColumns(table, search, limit ?? 20))
+        : reply("getColumns", { table, like, limit }, catalog.getColumns(table, { like, limit })),
   );
 
   server.registerTool(
