@@ -70,7 +70,9 @@ async function enrichGemini(sql: string, title: string, cfg: EnrichConfig, tries
   const body = {
     system_instruction: { parts: [{ text: p.system }] },
     contents: [{ role: "user", parts: [{ text: p.user }] }],
-    generationConfig: { responseMimeType: "application/json", thinkingConfig: { thinkingBudget: 0 } },
+    // NB: no thinkingConfig — gemini-flash-lite-latest rejects thinkingBudget with HTTP 400
+    // INVALID_ARGUMENT (it is already a non-thinking model). JSON response mode is all we need.
+    generationConfig: { responseMimeType: "application/json" },
   };
   let lastErr = "unknown";
   for (let attempt = 0; attempt < tries; attempt++) {
