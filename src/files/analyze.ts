@@ -25,7 +25,9 @@ export interface FileSummary {
   datasetLinks?: boolean;
   // report
   dataModelRef?: string;
-  layouts?: string[];
+  defaultTemplate?: string;
+  templates?: { label?: string; url?: string; type?: string; outputFormats?: string; defaultFormat?: string; isDefault: boolean }[];
+  layouts?: string[];   // template labels (back-compat)
   formats?: string[];
   note?: string;
 }
@@ -134,8 +136,25 @@ export function getDatasetSql(bytes: Buffer, dataset: string): { name: string; t
 
 function summarizeReport(xml: string, names: string[]): Partial<FileSummary> {
   const dataModelRef = xml.match(/<dataModel[^>]*\burl="([^"]+)"/i)?.[1] ?? xml.match(/\burl="([^"]+\.xdm)"/i)?.[1];
-  const layouts = [...xml.matchAll(/<layout\b([^>]*)>/gi)]
-    .map((l) => l[1].match(/name="([^"]*)"/i)?.[1] ?? l[1].match(/url="([^"]*)"/i)?.[1] ?? "")
-    .filter(Boolean);
-  return { dataModelRef, layouts, formats: fmtOf(names) };
+  // Fusion _report.xdo lists layouts under <templates default="…">/<template …>, NOT <layout>.
+  const defaultTemplate = xml.match(/<templates\b[^>]*\bdefault="([^"]+)"/i)?.[1];
+  const templates = [...xml.matchAll(/<template\b([^>]*?)\/?>/gi)]
+    .map((m) => {
+      const a = m[1];
+      const label = a.match(/\blabel="([^"]*)"/i)?.[1];
+      return {
+        label,
+        url: a.match(/\burl="([^"]*)"/i)?.[1],
+        type: a.match(/\btype="([^"]*)"/i)?.[1],
+        outputFormats: a.match(/\boutputFormat="([^"]*)"/i)?.[1],
+        defaultFormat: a.match(/\bdefaultFormat="([^"]*)"/i)?.[1],
+        isDefault: !!label && label === defaultTemplate,
+      };
+    })
+    .filter((t) => t.label || t.url);
+  // formats = the union of declared template output formats, else fall back to file extensions.
+  const declared = new Set<string>();
+  for (const t of templates) (t.outputFormats ?? "").split(",").map((s) => s.trim()).filter(Boolean).forEach((f) => declared.add(f));
+  const formats = declared.size ? [...declared] : fmtOf(names);
+  return { dataModelRef, defaultTemplate, templates, layouts: templates.map((t) => t.label || t.url || ""), formats };
 }
