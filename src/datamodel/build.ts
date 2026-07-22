@@ -315,6 +315,58 @@ export function replaceDatasetSql(xdm: string, dataset: string, sql: string): { 
   return { xml, found };
 }
 
+/** Balanced <group source="dataset"> … </group> region within the structure string. */
+function groupRegion(struct: string, dataset: string): { start: number; end: number } | null {
+  const open = new RegExp(`<group\\b[^>]*\\bsource="${dataset.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"[^>]*>`, "i").exec(struct);
+  if (!open) return null;
+  const start = open.index;
+  const tagRe = /<group\b[^>]*>|<\/group>/gi;
+  tagRe.lastIndex = start;
+  let depth = 0, m: RegExpExecArray | null;
+  while ((m = tagRe.exec(struct)) !== null) {
+    if (m[0][1] !== "/") depth++;
+    else if (--depth === 0) return { start, end: m.index + m[0].length };
+  }
+  return null;
+}
+
+/**
+ * Reconcile the output <dataStructure> of a dataset with its (new) SQL columns: add <element>s for
+ * new columns and drop <element>s for columns no longer selected. Without this, a setDatasetSql that
+ * adds a column changes the SQL but the column is NOT emitted in the output XML (the reported bug).
+ */
+export function reconcileStructure(xdm: string, dataset: string, sql: string): { xml: string; added: string[]; removed: string[] } {
+  const sm = xdm.match(/<dataStructure\b[\s\S]*?<\/dataStructure>/i);
+  if (!sm) return { xml: xdm, added: [], removed: [] };
+  const struct = sm[0];
+  const region = groupRegion(struct, dataset);
+  if (!region) return { xml: xdm, added: [], removed: [] };
+  let block = struct.slice(region.start, region.end);
+
+  const cols = (parseSelectColumns(sql) ?? []).map((c) => ({ ...c, key: tag(c.name).toUpperCase() }));
+  const wanted = new Set(cols.map((c) => c.key));
+  const removed: string[] = [];
+  // drop elements whose column is no longer selected
+  block = block.replace(/[ \t]*<element\b[^>]*\/>\s*\n?/gi, (el) => {
+    const nm = (el.match(/\bname="([^"]*)"/i)?.[1] ?? "").toUpperCase();
+    if (nm && !wanted.has(nm)) { removed.push(nm); return ""; }
+    return el;
+  });
+  const present = new Set([...block.matchAll(/<element\b[^>]*\bname="([^"]*)"/gi)].map((m) => m[1].toUpperCase()));
+  const missing = cols.filter((c) => !present.has(c.key));
+  const added = missing.map((c) => tag(c.name));
+  if (missing.length) {
+    const els = missing.map((c, i) =>
+      `               <element name="${xesc(tag(c.name))}" value="${xesc(c.value ?? c.name)}" ` +
+      `label="${xesc(c.label ?? c.name)}" dataType="${XSD[c.dataType ?? "string"]}" breakOrder="" fieldOrder="${900 + i}"/>`
+    ).join("\n");
+    const closeIdx = block.indexOf("</group>"); // innermost group's close (detail level)
+    if (closeIdx >= 0) block = block.slice(0, closeIdx) + els + "\n            " + block.slice(closeIdx);
+  }
+  const newStruct = struct.slice(0, region.start) + block + struct.slice(region.end);
+  return { xml: xdm.replace(struct, newStruct), added, removed };
+}
+
 /** Apply a targeted patch to an existing .xdmz, preserving all other archive entries. */
 export function updateXdmzWithPatch(baseBytes: Uint8Array, patch: DmPatch): { bytes: Uint8Array; applied: string[]; warnings: string[] } {
   const entries = unzipSync(baseBytes);
@@ -325,8 +377,16 @@ export function updateXdmzWithPatch(baseBytes: Uint8Array, patch: DmPatch): { by
 
   for (const s of patch.setDatasetSql ?? []) {
     const r = replaceDatasetSql(xdm, s.dataset, s.sql);
-    if (r.found) { xdm = r.xml; applied.push(`setDatasetSql:${s.dataset}`); }
-    else warnings.push(`dataset not found: ${s.dataset}`);
+    if (r.found) {
+      xdm = r.xml;
+      applied.push(`setDatasetSql:${s.dataset}`);
+      // keep the output <dataStructure> in sync with the new columns (else new columns are fetched
+      // but never emitted in the report XML — and dropped columns leave dangling elements).
+      const rec = reconcileStructure(xdm, s.dataset, s.sql);
+      xdm = rec.xml;
+      if (rec.added.length) applied.push(`structure+:[${rec.added.join(",")}]`);
+      if (rec.removed.length) applied.push(`structure-:[${rec.removed.join(",")}]`);
+    } else warnings.push(`dataset not found: ${s.dataset}`);
   }
   if (patch.setDefaultDataSource) {
     xdm = xdm.replace(/(<dataModel\b[^>]*\bdefaultDataSourceRef=")[^"]*(")/i, `$1${xesc(patch.setDefaultDataSource)}$2`);

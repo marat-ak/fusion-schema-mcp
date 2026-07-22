@@ -59,8 +59,11 @@ export function registerFileTools(server: McpServer): void {
       title: "Apply new SQL to a dataset (returns a new file)",
       description:
         "Replace a dataset's SQL with SQL YOU have already written and grounded against the Fusion " +
-        "schema. Produces a NEW file (the original is unchanged) and returns its fileId — give the " +
-        "user that file to download. Does not invent SQL; it only applies what you pass.",
+        "schema. FIRST: unless the user already approved it or explicitly asked for a direct change, " +
+        "SHOW the new SQL and get their OK (SQL-first) before calling this. Produces a NEW file " +
+        "(original unchanged) and returns its fileId to download. The output <dataStructure> is " +
+        "auto-reconciled to the new columns (added/removed), so new columns appear in the results. " +
+        "Only applies the SQL you pass — it does not invent SQL.",
       inputSchema: {
         fileId: z.string(),
         dataset: z.string(),
@@ -107,7 +110,10 @@ export function registerFileTools(server: McpServer): void {
       title: "Update a data model file with a patch (returns a new file)",
       description:
         "Apply a targeted patch to an uploaded/generated data model: setDatasetSql, addParameters, " +
-        "addTriggers, setBursting, setDefaultDataSource. Produces a NEW file (returns its fileId).",
+        "addTriggers, setBursting, setDefaultDataSource. Produces a NEW file (returns its fileId). " +
+        "For any SQL change (setDatasetSql), first confirm SQL-first vs direct with the user and show " +
+        "the new SQL unless already approved. setDatasetSql auto-reconciles the output structure to " +
+        "the new columns.",
       inputSchema: { fileId: z.string(), patch: zPatch },
     },
     async ({ fileId, patch }) => {
