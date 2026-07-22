@@ -1,8 +1,7 @@
-/** Registers the 7 grounding tools on an McpServer instance. */
+/** Registers the grounding tools on an McpServer instance (grounding-only MCP). */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as catalog from "./catalog.js";
-import { registerFileTools } from "./files/tools.js";
 
 const DEBUG = process.env.MCP_DEBUG === "1" || process.env.MCP_DEBUG === "true";
 
@@ -199,11 +198,8 @@ export function buildServer(): McpServer {
       reply("listQueriesForSubjectArea", { area, limit }, catalog.listQueriesForSubjectArea(area, limit ?? 100)),
   );
 
-  // Data-model authoring + file tools (operate on uploaded/generated archives by fileId).
-  // NB: the base64 createDataModel/updateDataModel are intentionally NOT registered — the fileId
-  // variants (createDataModelFile/updateDataModelFile) supersede them (small result + a real
-  // download, no huge base64 blob in the chat stream).
-  registerFileTools(server);
+  // Data-model / file authoring tools have moved to the agent (in-process SDK tools). This MCP is
+  // now a pure, stateless GROUNDING server — catalog + corpus search only.
 
   return server;
 }
