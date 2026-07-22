@@ -7,8 +7,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { listFiles, getFile, putFile } from "./store.js";
 import { analyze, getDatasetSql } from "./analyze.js";
-import { buildXdmz, updateXdmzWithPatch, type DataModelSpec, type DmPatch } from "../datamodel/build.js";
-import { zSpec, zPatch } from "../datamodel/tools.js";
+import { buildXdmz, updateXdmzWithPatch, type DataModelSpec, type DmPatch, type DmColumn } from "../datamodel/build.js";
+import { zSpec, zPatch, zColumn } from "../datamodel/tools.js";
 
 const DEBUG = process.env.MCP_DEBUG === "1" || process.env.MCP_DEBUG === "true";
 function reply(name: string, data: unknown) {
@@ -68,13 +68,17 @@ export function registerFileTools(server: McpServer): void {
         fileId: z.string(),
         dataset: z.string(),
         sql: z.string().describe("the complete new SQL for this dataset"),
+        columns: z.array(zColumn).optional().describe(
+          "the new SQL's output columns (name/value/dataType/label) — pass these so the output " +
+          "<dataStructure> is reconciled EXACTLY. Omit only to let the tool parse the SELECT list. " +
+          "To change several datasets/params/triggers at once, prefer ONE updateDataModelFile call."),
       },
     },
-    async ({ fileId, dataset, sql }) => {
+    async ({ fileId, dataset, sql, columns }) => {
       const f = getFile(fileId);
       if (!f) return reply("setDatasetSql", { error: "file not found or expired" });
       const before = getDatasetSql(f.bytes, dataset);
-      const { bytes, applied, warnings } = updateXdmzWithPatch(f.bytes, { setDatasetSql: [{ dataset, sql }] });
+      const { bytes, applied, warnings } = updateXdmzWithPatch(f.bytes, { setDatasetSql: [{ dataset, sql, columns: columns as DmColumn[] | undefined }] });
       if (!applied.length) return reply("setDatasetSql", { error: `dataset '${dataset}' not found`, warnings });
       const buf = Buffer.from(bytes);
       const meta = putFile(f.name.replace(/(\.xdmz)?$/i, "") + ".modified.xdmz", "datamodel", buf, analyze(buf), fileId);

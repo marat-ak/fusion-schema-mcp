@@ -15,7 +15,7 @@ function reply(name: string, args: unknown, data: unknown) {
 // ---- zod shapes -------------------------------------------------------------------------------
 
 const zType = z.enum(["string", "integer", "float", "number", "date", "boolean"]);
-const zColumn = z.object({
+export const zColumn = z.object({
   name: z.string(), value: z.string().optional(), dataType: zType.optional(), label: z.string().optional(),
 });
 const zDataset = z.object({
@@ -59,7 +59,13 @@ export const zSpec = z.object({
   properties: z.record(z.string()).optional(),
 });
 export const zPatch = z.object({
-  setDatasetSql: z.array(z.object({ dataset: z.string(), sql: z.string() })).optional(),
+  setDatasetSql: z.array(z.object({
+    dataset: z.string(),
+    sql: z.string(),
+    columns: z.array(zColumn).optional().describe(
+      "the new SQL's output columns (name/value/dataType/label) — pass these so the output structure " +
+      "is reconciled exactly; omit only to let the tool parse the SELECT list."),
+  })).optional(),
   setDefaultDataSource: z.string().optional(),
   addParameters: z.array(zParameter).optional(),
   addTriggers: z.array(zTrigger).optional(),

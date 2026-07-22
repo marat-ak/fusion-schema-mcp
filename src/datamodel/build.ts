@@ -299,7 +299,10 @@ export function unzipXdmz(bytes: Uint8Array): Record<string, Uint8Array> {
 // ---- update -----------------------------------------------------------------------------------
 
 export interface DmPatch {
-  setDatasetSql?: { dataset: string; sql: string }[];
+  // columns: OPTIONAL authoritative output columns for the new SQL (name/value/dataType/label). When
+  // present the output structure is reconciled to THESE (the agent knows the query); otherwise they
+  // are parsed from the SELECT list as a fallback.
+  setDatasetSql?: { dataset: string; sql: string; columns?: DmColumn[] }[];
   setDefaultDataSource?: string;
   addParameters?: DmParameter[];
   addTriggers?: DmEventTrigger[];
@@ -335,7 +338,7 @@ function groupRegion(struct: string, dataset: string): { start: number; end: num
  * new columns and drop <element>s for columns no longer selected. Without this, a setDatasetSql that
  * adds a column changes the SQL but the column is NOT emitted in the output XML (the reported bug).
  */
-export function reconcileStructure(xdm: string, dataset: string, sql: string): { xml: string; added: string[]; removed: string[] } {
+export function reconcileStructure(xdm: string, dataset: string, sql: string, columns?: DmColumn[]): { xml: string; added: string[]; removed: string[] } {
   const sm = xdm.match(/<dataStructure\b[\s\S]*?<\/dataStructure>/i);
   if (!sm) return { xml: xdm, added: [], removed: [] };
   const struct = sm[0];
@@ -343,7 +346,9 @@ export function reconcileStructure(xdm: string, dataset: string, sql: string): {
   if (!region) return { xml: xdm, added: [], removed: [] };
   let block = struct.slice(region.start, region.end);
 
-  const cols = (parseSelectColumns(sql) ?? []).map((c) => ({ ...c, key: tag(c.name).toUpperCase() }));
+  // agent-provided columns are authoritative; fall back to parsing the SELECT list.
+  const src = columns && columns.length ? columns : parseSelectColumns(sql);
+  const cols = (src ?? []).map((c) => ({ ...c, key: tag(c.name).toUpperCase() }));
   const wanted = new Set(cols.map((c) => c.key));
   const removed: string[] = [];
   // drop elements whose column is no longer selected
@@ -382,7 +387,7 @@ export function updateXdmzWithPatch(baseBytes: Uint8Array, patch: DmPatch): { by
       applied.push(`setDatasetSql:${s.dataset}`);
       // keep the output <dataStructure> in sync with the new columns (else new columns are fetched
       // but never emitted in the report XML — and dropped columns leave dangling elements).
-      const rec = reconcileStructure(xdm, s.dataset, s.sql);
+      const rec = reconcileStructure(xdm, s.dataset, s.sql, s.columns);
       xdm = rec.xml;
       if (rec.added.length) applied.push(`structure+:[${rec.added.join(",")}]`);
       if (rec.removed.length) applied.push(`structure-:[${rec.removed.join(",")}]`);
