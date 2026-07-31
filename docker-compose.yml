@@ -14,11 +14,17 @@ services:
     environment:
       MCP_PORT: "8979"
       MCP_HOST: "0.0.0.0"
+      # Split DBs live under DATA_DIR (schema.sqlite + reports.sqlite + cache.sqlite). The entrypoint
+      # self-provisions them from the baked /app/seed on first start.
+      DATA_DIR: "/app/data"
       # Shared bearer token for the /ingest/* endpoints (unset => dev mode, unauthenticated).
       INGEST_TOKEN: "${INGEST_TOKEN:-}"
     volumes:
-      # catalog is mounted from the host; must be writable for the runtime ingest API to persist.
-      - ./catalog.sqlite:/app/catalog.sqlite
+      # DIRECTORY mount (not a single file) so VACUUM/WAL inode swaps survive and all three DBs
+      # persist + stay writable for the runtime ingest API. To migrate an existing 1.4G catalog.sqlite
+      # into this dir: `node dist/migrate-split.js /path/to/catalog.sqlite --schema <dir>/schema.sqlite
+      # --reports <dir>/reports.sqlite` (writes schema.sqlite + reports.sqlite the provisioner keeps).
+      - "${CATALOG_DATA_DIR:-./catalog-data}:/app/data"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8979/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

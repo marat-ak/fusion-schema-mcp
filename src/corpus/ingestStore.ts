@@ -10,30 +10,35 @@
  * recomputed at query time by findSimilarQueries from tables_used — but is folded into the
  * embedded description so intent search can hit it.
  */
-import path from "node:path";
 import fs from "node:fs";
-import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
 import { embed } from "./embed.js";
 import { classifyDomain } from "./domain.js";
+import { reportsDbPath, schemaDbPath, isSingleFile, sqlQuote } from "../dbPaths.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, "../..");
-const DB_PATH = process.env.CATALOG_DB ?? path.join(ROOT, "catalog.sqlite");
+// SPLIT DBs: the writable corpus connection opens reports.sqlite (report_queries* + vec0) and
+// ATTACHes schema.sqlite read-only so moduleOf() can resolve `FROM tables`. catalog.ts holds a
+// separate read-only connection to the same reports.sqlite.
+const DB_PATH = reportsDbPath();
 
 let _db: Database.Database | null = null;
 function db(): Database.Database {
   if (_db) return _db;
   if (!fs.existsSync(DB_PATH)) {
-    throw new Error(`catalog.sqlite not found at ${DB_PATH} (run the compile step first).`);
+    throw new Error(`reports DB not found at ${DB_PATH} (provision or migrate first).`);
   }
   const d = new Database(DB_PATH);
   d.pragma("busy_timeout = 10000"); // tolerate the read-only reader connection briefly locking
   loadVec(d);
-  // report_queries.reports = JSON list of source reports that use this (deduped) SQL. Added at
-  // runtime so existing compiled catalogs pick it up without a recompile.
+  if (!isSingleFile()) {
+    d.exec(`ATTACH DATABASE '${sqlQuote(schemaDbPath())}' AS schemadb`);
+  }
+  // report_queries.reports = JSON list of source reports that use this (deduped) SQL; embedding = the
+  // bge-small vector as a BLOB (kept alongside report_queries_vec so the vec index can be rebuilt from
+  // blobs without re-embedding). Added at runtime so pre-split/legacy DBs pick them up without recompile.
   try { d.exec("ALTER TABLE report_queries ADD COLUMN reports TEXT"); } catch { /* already present */ }
+  try { d.exec("ALTER TABLE report_queries ADD COLUMN embedding BLOB"); } catch { /* already present */ }
   _db = d;
   return d;
 }
@@ -141,8 +146,8 @@ export async function ingestReport(input: IngestReportInput): Promise<IngestRepo
   const insRq = d.prepare(
     `INSERT INTO report_queries
        (rowid, id, source, title, original_sql, clean_sql, description,
-        tables_used, joins, filters, lookup_types, security_predicate, approved)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)`,
+        tables_used, joins, filters, lookup_types, security_predicate, approved, embedding)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?)`,
   );
   const insVec = d.prepare("INSERT INTO report_queries_vec (rowid, embedding) VALUES (?, ?)");
   const maxRowid = d.prepare("SELECT COALESCE(MAX(rowid), 0) AS m FROM report_queries");
@@ -157,11 +162,12 @@ export async function ingestReport(input: IngestReportInput): Promise<IngestRepo
     let next = (maxRowid.get() as any).m as number;
     rows.forEach((r, i) => {
       const rowid = BigInt(next + 1 + i);
+      const emb = Buffer.from(vecs[i].buffer);
       insRq.run(
         rowid, r.id, "bip-report", r.title, r.sql, r.sql, r.description,
-        JSON.stringify(r.tables), "[]", "[]", "[]", null,
+        JSON.stringify(r.tables), "[]", "[]", "[]", null, emb,
       );
-      insVec.run(rowid, Buffer.from(vecs[i].buffer));
+      insVec.run(rowid, emb);
     });
   });
   tx();
@@ -219,8 +225,8 @@ export async function materialize(rows: MaterializeRow[]): Promise<{ inserted: n
   const insRq = d.prepare(
     `INSERT INTO report_queries
        (rowid, id, source, title, original_sql, clean_sql, description,
-        tables_used, joins, filters, lookup_types, security_predicate, approved, reports)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?)`,
+        tables_used, joins, filters, lookup_types, security_predicate, approved, reports, embedding)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`,
   );
   const insVec = d.prepare("INSERT INTO report_queries_vec (rowid, embedding) VALUES (?, ?)");
   const maxRowid = d.prepare("SELECT COALESCE(MAX(rowid), 0) AS m FROM report_queries");
@@ -233,13 +239,14 @@ export async function materialize(rows: MaterializeRow[]): Promise<{ inserted: n
       const prev = qById.get(r.id) as { rowid: number } | undefined;
       if (prev) { delVec.run(prev.rowid); delRq.run(prev.rowid); replaced++; }
       const rowid = BigInt(++next);
+      const emb = Buffer.from(vecs[i].buffer);
       insRq.run(
         rowid, r.id, r.source ?? "bip-report", r.title, r.originalSql, r.cleanSql ?? r.originalSql, r.description,
         JSON.stringify(r.tablesUsed ?? []), JSON.stringify(r.joins ?? []),
         JSON.stringify(r.filters ?? []), JSON.stringify(r.lookupTypes ?? []),
-        r.securityPredicate ?? null, JSON.stringify(r.reports ?? []),
+        r.securityPredicate ?? null, JSON.stringify(r.reports ?? []), emb,
       );
-      insVec.run(rowid, Buffer.from(vecs[i].buffer));
+      insVec.run(rowid, emb);
       inserted++;
     });
   });
@@ -303,8 +310,8 @@ export async function importCorpus(rows: ImportRow[]): Promise<{ imported: numbe
   const insRq = d.prepare(
     `INSERT INTO report_queries
        (rowid, id, source, title, original_sql, clean_sql, description,
-        tables_used, joins, filters, lookup_types, security_predicate, approved, reports)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?)`,
+        tables_used, joins, filters, lookup_types, security_predicate, approved, reports, embedding)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`,
   );
   const insVec = d.prepare("INSERT INTO report_queries_vec (rowid, embedding) VALUES (?, ?)");
   const maxRowid = d.prepare("SELECT COALESCE(MAX(rowid), 0) AS m FROM report_queries");
@@ -316,14 +323,14 @@ export async function importCorpus(rows: ImportRow[]): Promise<{ imported: numbe
       const prev = qById.get(r.id) as { rowid: number } | undefined;
       if (prev) { delVec.run(prev.rowid); delRq.run(prev.rowid); replaced++; }
       const rowid = BigInt(++next);
-      insRq.run(
-        rowid, r.id, r.source ?? "bip-report", r.title, r.original_sql, r.clean_sql ?? r.original_sql, r.description,
-        r.tables_used ?? "[]", r.joins ?? "[]", r.filters ?? "[]", r.lookup_types ?? "[]", r.security_predicate ?? null,
-        r.reports ?? "[]",
-      );
       let vec: Buffer;
       if (r.embedding) vec = Buffer.from(r.embedding, "base64");
       else { vec = Buffer.from(embMap.get(r.id)!.buffer); embedded++; }
+      insRq.run(
+        rowid, r.id, r.source ?? "bip-report", r.title, r.original_sql, r.clean_sql ?? r.original_sql, r.description,
+        r.tables_used ?? "[]", r.joins ?? "[]", r.filters ?? "[]", r.lookup_types ?? "[]", r.security_predicate ?? null,
+        r.reports ?? "[]", vec,
+      );
       insVec.run(rowid, vec);
       imported++;
     }

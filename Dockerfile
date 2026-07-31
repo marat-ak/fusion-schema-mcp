@@ -1,7 +1,7 @@
-# Multi-stage: build TS + compile catalog, then ship a lean runtime with only the SQLite catalog.
+# Multi-stage: build TS, compile the split seed DBs, then ship a lean self-provisioning runtime.
 # Debian base both stages so the better-sqlite3 native module matches at runtime.
 
-# ---- build stage: install deps, build TS, compile CSV -> catalog.sqlite ----
+# ---- build stage: install deps, build TS, compile CSV -> schema.sqlite + reports.sqlite seed ----
 FROM node:22-bookworm AS build
 WORKDIR /app
 
@@ -13,25 +13,42 @@ COPY package.json package-lock.json* ./
 RUN npm install
 
 COPY tsconfig.json ./
+COPY VERSION ./VERSION
 COPY src ./src
 RUN npm run build
 
-# Warm the bge-small embedding model into node_modules/.cache so the runtime can embed
-# query intents (findSimilarQueries) offline. The catalog itself is NOT compiled in-image
-# anymore (109K rows is slow to embed in-build) — it is mounted from the host at runtime
-# (see docker-compose volume: ./catalog.sqlite -> /app/catalog.sqlite).
+# Warm the bge-small embedding model into node_modules/.cache so the runtime can embed query intents
+# (findSimilarQueries) and re-embed during provisioning, offline.
 RUN node -e "import('@xenova/transformers').then(async t=>{const p=await t.pipeline('feature-extraction','Xenova/bge-small-en-v1.5');await p('warm',{pooling:'mean',normalize:true});console.log('bge-small cached');})"
 
-# ---- runtime stage: node + dist + node_modules (with model cache); catalog is mounted ----
+# Compile the seed DBs from the DB_SCHEMA CSVs (data/ must be present in the build context; the
+# report corpus is EMPTY in CI because data/enrich.sqlite is .dockerignored — that is expected, the
+# real corpus is populated at runtime by the poller /ingest or restored via migrate-split). Then zip
+# the seeds so provision.js can unpack them into the /app/data volume on first start.
+COPY data ./data
+RUN npm run compile && node dist/zip-seed.js
+
+# ---- runtime stage: node + dist + node_modules (model cache) + baked seed; DBs live on a volume ----
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ENV MCP_PORT=8979
 ENV MCP_HOST=0.0.0.0
+ENV DATA_DIR=/app/data
+ENV SEED_DIR=/app/seed
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
 
+# Baked, versioned seed — NOT under /app/data (the volume mount would mask it).
+COPY --from=build /app/schema.sqlite.zip /app/seed/schema.sqlite.zip
+COPY --from=build /app/reports.sqlite.zip /app/seed/reports.sqlite.zip
+COPY --from=build /app/VERSION /app/seed/VERSION
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 EXPOSE 8979
-CMD ["node", "dist/server.js"]
+# entrypoint self-provisions the /app/data volume from /app/seed, then starts the server.
+ENTRYPOINT ["/entrypoint.sh"]

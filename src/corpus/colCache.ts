@@ -8,10 +8,11 @@ import path from "node:path";
 import fs from "node:fs";
 import crypto from "node:crypto";
 import Database from "better-sqlite3";
+import { CACHE_DB } from "../dbPaths.js";
 
-const DEFAULT =
-  process.env.COLCACHE_DB ??
-  path.join(path.dirname(process.env.ENRICH_DB ?? path.join(process.env.DATA_DIR ?? ".", "enrich.sqlite")), "colcache.sqlite");
+// The column-search embedding cache now lives in its own file cache.sqlite (env CACHE_DB, default
+// <DATA_DIR>/cache.sqlite). COLCACHE_DB is still honoured (via dbPaths) for back-compat.
+const DEFAULT = CACHE_DB;
 
 let _db: Database.Database | null = null;
 function db(): Database.Database {

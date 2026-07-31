@@ -2,6 +2,15 @@ node_modules
 dist
 catalog.sqlite
 catalog.sqlite-*
+# split-DB build artifacts / stray local zips (the seeds are built INSIDE the image, not copied in)
+schema.sqlite
+schema.sqlite-*
+reports.sqlite
+reports.sqlite-*
+cache.sqlite
+cache.sqlite-*
+*.sqlite.zip
+catalog-data
 *.log
 npm-debug.log*
 .git

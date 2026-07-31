@@ -9,14 +9,13 @@
  *   - JSON_ARRAYAGG / JSON_OBJECT / JSON_TABLE + LEFT JOIN LATERAL for multi-row allocation.
  * Run: npx tsx src/corpus/insertCustom.mts   (then redeploy catalog to /opt/fusion-catalog)
  */
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
 import { embed } from "./embed.js";
+import { reportsDbPath } from "../dbPaths.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB = process.env.CATALOG_DB ?? path.resolve(__dirname, "../../catalog.sqlite");
+// The report corpus now lives in reports.sqlite (env REPORTS_DB / CATALOG_DB fallback via dbPaths).
+const DB = reportsDbPath();
 
 const EX1_SQL = `
 -- Technique: inline PL/SQL in Fusion SaaS SQL (BIP data model). SaaS forbids creating DB
@@ -262,20 +261,22 @@ const ROWS = [
 
 const db = new Database(DB);
 loadVec(db);
+try { db.exec("ALTER TABLE report_queries ADD COLUMN embedding BLOB"); } catch { /* present */ }
 const maxRow = (db.prepare("SELECT MAX(rowid) m FROM report_queries").get() as any).m as number;
 const insQ = db.prepare(
   `INSERT OR REPLACE INTO report_queries
    (rowid, id, source, title, original_sql, clean_sql, description, tables_used, joins, filters,
-    lookup_types, security_predicate, approved)
-   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)`);
+    lookup_types, security_predicate, approved, embedding)
+   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?)`);
 const insV = db.prepare("INSERT OR REPLACE INTO report_queries_vec (rowid, embedding) VALUES (?, ?)");
 
 const vecs = await embed(ROWS.map((r) => r.description));
 ROWS.forEach((r, i) => {
   const rowid = BigInt(maxRow + 1 + i);
+  const emb = Buffer.from(vecs[i].buffer);
   insQ.run(rowid, r.id, r.source, r.title, r.sql, r.sql, r.description,
-           JSON.stringify(r.tables), "[]", "[]", "[]", null);
-  insV.run(rowid, Buffer.from(vecs[i].buffer));
+           JSON.stringify(r.tables), "[]", "[]", "[]", null, emb);
+  insV.run(rowid, emb);
   console.log("inserted", r.id, "rowid", rowid);
 });
 db.close();

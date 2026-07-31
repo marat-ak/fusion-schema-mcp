@@ -1,25 +1,33 @@
-/** Query layer over catalog.sqlite. All object names are normalized before lookup. */
-import path from "node:path";
+/** Query layer over the split DBs (reports.sqlite main + schema.sqlite attached). Names normalized. */
 import fs from "node:fs";
-import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
 import { embed } from "./corpus/embed.js";
 import { textHash, getVecs, putVecs } from "./corpus/colCache.js";
 import { classifyDomain, topDomain } from "./corpus/domain.js";
 import { normName, suggestNames } from "./util.js";
+import { reportsDbPath, schemaDbPath, isSingleFile, sqlQuote } from "./dbPaths.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, "..");
-const DB_PATH = process.env.CATALOG_DB ?? path.join(ROOT, "catalog.sqlite");
+// SPLIT DBs: the read layer opens reports.sqlite as the MAIN connection (so the sqlite-vec `vec0`
+// KNN over report_queries_vec runs on a native, non-attached DB — vec0 KNN is unreliable over an
+// ATTACHed database) and ATTACHes schema.sqlite. Table names are unique across the two files, so
+// unqualified queries (FROM tables / FROM report_queries / FROM meta) resolve unchanged. When a
+// legacy single catalog.sqlite is in play (isSingleFile), both paths resolve to it and we skip the
+// ATTACH (every table already lives in main).
+const REPORTS_PATH = reportsDbPath();
+const SCHEMA_PATH = schemaDbPath();
 
-if (!fs.existsSync(DB_PATH)) {
+if (!fs.existsSync(REPORTS_PATH)) {
   throw new Error(
-    `catalog.sqlite not found at ${DB_PATH}. Run the compile step first (npm run compile).`,
+    `reports DB not found at ${REPORTS_PATH}. Provision or migrate first ` +
+      `(node dist/provision.js / node dist/migrate-split.js), or set CATALOG_DB to a legacy catalog.sqlite.`,
   );
 }
 
-const db = new Database(DB_PATH, { readonly: true, fileMustExist: true });
+const db = new Database(REPORTS_PATH, { readonly: true, fileMustExist: true });
+if (!isSingleFile()) {
+  db.exec(`ATTACH DATABASE '${sqlQuote(SCHEMA_PATH)}' AS schemadb`);
+}
 db.pragma("query_only = true");
 
 // In-memory table-name list for fuzzy did-you-mean (~30k strings, cheap).
