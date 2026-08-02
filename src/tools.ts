@@ -82,10 +82,15 @@ export function buildServer(): McpServer {
         "Check whether a table/view exists in Fusion. If not, returns fuzzy 'did-you-mean' " +
         "suggestions — use this to catch EBS-vs-Fusion name drift in a name you think you know.",
       inputSchema: {
-        name: z.string().describe("Candidate object name to validate"),
+        name: z.string().optional().describe("Candidate object name to validate"),
+        table: z.string().optional().describe("Alias for `name` (matches getColumns/validateColumns param naming)"),
       },
     },
-    async ({ name }) => reply("validateTable", { name }, catalog.validateTable(name)),
+    async ({ name, table }) => {
+      const n = name ?? table;
+      if (!n) return reply("validateTable", { name: n }, { error: "pass `name` (or `table`)" });
+      return reply("validateTable", { name: n }, catalog.validateTable(n));
+    },
   );
 
   server.registerTool(
