@@ -2,6 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as catalog from "./catalog.js";
+import { queryFlexfields } from "./corpus/flexStore.js";
 
 const DEBUG = process.env.MCP_DEBUG === "1" || process.env.MCP_DEBUG === "true";
 
@@ -201,6 +202,30 @@ export function buildServer(): McpServer {
     },
     async ({ area, limit }) =>
       reply("listQueriesForSubjectArea", { area, limit }, catalog.listQueriesForSubjectArea(area, limit ?? 100)),
+  );
+
+  server.registerTool(
+    "getFlexfields",
+    {
+      title: "DFF/EFF flexfield registry lookup",
+      description:
+        "The customer's descriptive (DFF) and extensible (EFF) flexfield registry: which contexts " +
+        "exist on which flexfield, and each segment's business name -> physical column " +
+        "(ATTRIBUTE_CHARn / GLOBAL_ATTRIBUTEn) + value set + required flag. USE THIS to resolve an " +
+        "EFF/DFF context_code and attribute column BEFORE writing SQL against *_EFF_B / ATTRIBUTE " +
+        "columns — never guess a context or ship a placeholder when the registry can answer. " +
+        "Filter by flexfieldCode (e.g. 'DOO_FULFILL_LINES', 'AP_INVOICES'), context, or free-text " +
+        "search over business names ('pallet', 'dealer'). Empty result = registry has no such " +
+        "field: ask the user/admin instead of guessing.",
+      inputSchema: {
+        flexfieldCode: z.string().optional().describe("flexfield/table-family filter, substring match, e.g. 'DOO_FULFILL_LINES'"),
+        context: z.string().optional().describe("context_code filter, substring match"),
+        search: z.string().optional().describe("free text over segment names / prompts / codes, e.g. 'pallet qty'"),
+        type: z.enum(["DFF", "EFF"]).optional(),
+        limit: z.number().int().min(1).max(1000).optional().describe("max segment rows scanned (default 200)"),
+      },
+    },
+    async (args) => reply("getFlexfields", args, queryFlexfields(args)),
   );
 
   // Data-model / file authoring tools have moved to the agent (in-process SDK tools). This MCP is

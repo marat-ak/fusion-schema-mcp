@@ -46,6 +46,7 @@ import { enrichOne } from "./corpus/enrichAdapters.js";
 import { getEnrichConfig } from "./corpus/enrichConfig.js";
 import { runGeminiBatches } from "./corpus/geminiBatch.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./corpus/enrichPrompt.js";
+import { loadFlexfieldsCsv, flexfieldsCount } from "./corpus/flexStore.js";
 import type { EnrichRow } from "./corpus/enrichStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -332,6 +333,26 @@ export function createIngestRouter(): express.Router {
       console.error("[ingest] /materialize error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
     }
+  });
+
+  // ---- DFF/EFF flexfield registry (admin-provided CSV; see corpus/flexStore.ts) ----
+  //   POST /ingest/flexfields[?source=admin-export]  body = the registry CSV (text/csv)
+  //   GET  /ingest/flexfields/health                 counts per type + source
+  router.post("/ingest/flexfields", requireAuth, express.text({ type: () => true, limit: "256mb" }), async (req, res) => {
+    try {
+      const csv = typeof req.body === "string" ? req.body : "";
+      if (!csv.trim()) return res.status(400).json({ ok: false, error: "empty body — POST the registry CSV" });
+      const source = typeof req.query.source === "string" && req.query.source.trim() ? req.query.source.trim() : "admin-export";
+      const r = loadFlexfieldsCsv(csv, source);
+      res.json({ ok: true, source, ...r, ...flexfieldsCount() });
+    } catch (e: any) {
+      console.error("[ingest] /flexfields error", e);
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+  router.get("/ingest/flexfields/health", requireAuth, (_req, res) => {
+    try { res.json({ ok: true, ...flexfieldsCount() }); }
+    catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
   });
 
   // ---- portable corpus export / import ----
