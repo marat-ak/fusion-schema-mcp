@@ -244,7 +244,9 @@ export function buildServer(): McpServer {
         "the *_c API name — `search` also matches de-camelized human words ('ticket contact' finds " +
         "TicketContact_c, 'net price' finds NetPrice_c); try the user's own words first. Empty " +
         "result => the registry has no such object/field: ASK the user which object/field they " +
-        "mean (or for its API name) — never guess and never silently fall back to a standard column.",
+        "mean (or for its API name) — never guess and never silently fall back to a standard " +
+        "column. SEVERAL plausible matches => ask the user to pick (offer the candidate API names " +
+        "as options); only a single unambiguous match may be used without confirmation.",
       inputSchema: {
         object: z.string().optional().describe("custom object name, substring, e.g. 'Ticket' or 'Ticket_c'"),
         table: z.string().optional().describe("generic-store or extension table filter, e.g. 'SVC_SERVICE_REQUESTS'"),
