@@ -181,6 +181,7 @@ function ensureAdf(d: Database.Database): void {
       context_column_name TEXT,               -- filter column when object_name is set
       attribute_name      TEXT NOT NULL,      -- business field name (usually *_c)
       column_name         TEXT NOT NULL,      -- EXTN_ATTRIBUTE_* physical column
+      display_hint        TEXT,               -- de-camelized human words for fuzzy lookup
       source              TEXT NOT NULL DEFAULT 'admin-export',
       loaded_at           TEXT NOT NULL,
       UNIQUE(object_name, table_name, attribute_name, column_name, source)
@@ -189,6 +190,22 @@ function ensureAdf(d: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_adf_table  ON adf_extensions(table_name);
     CREATE INDEX IF NOT EXISTS idx_adf_attr   ON adf_extensions(attribute_name);
   `);
+  try { d.exec("ALTER TABLE adf_extensions ADD COLUMN display_hint TEXT"); } catch { /* already present */ }
+}
+
+/** API name -> searchable human words: TicketContact_c -> "ticket contact";
+ *  ServiceRequest_Id_Return_to_Work -> "service request id return to work". Users say display
+ *  names, not *_c API names — the registry export carries only API names, so this derived field
+ *  is what free-text search matches against. */
+export function displayHint(apiName: string): string {
+  return apiName
+    .replace(/_+c$/i, "")
+    .replace(/[_]+/g, " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 /** Parse the ADF-extensions CSV (OBJECT_NAME, TABLE_NAME, CONTEXT_COLUMN_NAME, ATTRIBUTE_NAME,
@@ -210,8 +227,8 @@ export function loadAdfExtensionsCsv(csvText: string, source = "admin-export"): 
   const now = new Date().toISOString();
   const ins = d.prepare(`
     INSERT OR REPLACE INTO adf_extensions
-      (object_name, table_name, context_column_name, attribute_name, column_name, source, loaded_at)
-    VALUES (?,?,?,?,?,?,?)
+      (object_name, table_name, context_column_name, attribute_name, column_name, display_hint, source, loaded_at)
+    VALUES (?,?,?,?,?,?,?,?)
   `);
   let rows = 0;
   const objects = new Set<string>();
@@ -224,7 +241,8 @@ export function loadAdfExtensionsCsv(csvText: string, source = "admin-export"): 
       const col = norm(r.COLUMN_NAME);
       if (!table || !attr || !col) continue;
       const obj = norm(r.OBJECT_NAME);
-      ins.run(obj, table, norm(r.CONTEXT_COLUMN_NAME), attr, col, source, now);
+      const hint = `${obj ? displayHint(obj) + " " : ""}${displayHint(attr)}`;
+      ins.run(obj, table, norm(r.CONTEXT_COLUMN_NAME), attr, col, hint, source, now);
       rows++;
       if (obj) objects.add(obj); else builtinTables.add(table);
     }
@@ -250,11 +268,14 @@ export function queryAdfExtensions(q: AdfQuery): unknown {
   ensureAdf(d);
   const cond: string[] = [];
   const bind: unknown[] = [];
-  if (q.object) { cond.push("UPPER(coalesce(object_name,'')) LIKE UPPER(?)"); bind.push(`%${q.object}%`); }
+  if (q.object) { cond.push("(UPPER(coalesce(object_name,'')) LIKE UPPER(?) OR coalesce(display_hint,'') LIKE ?)"); bind.push(`%${q.object}%`, `%${displayHint(q.object)}%`); }
   if (q.table) { cond.push("UPPER(table_name) LIKE UPPER(?)"); bind.push(`%${q.table}%`); }
   if (q.search) {
-    cond.push("(UPPER(attribute_name || ' ' || coalesce(object_name,'') || ' ' || table_name) LIKE UPPER(?))");
-    bind.push(`%${q.search}%`);
+    // match API names AND the de-camelized human words (users say display names, not *_c)
+    const words = displayHint(q.search).split(" ").filter(Boolean);
+    const wordCond = words.map(() => "coalesce(display_hint,'') LIKE ?").join(" AND ");
+    cond.push(`(UPPER(attribute_name || ' ' || coalesce(object_name,'') || ' ' || table_name) LIKE UPPER(?)${wordCond ? ` OR (${wordCond})` : ""})`);
+    bind.push(`%${q.search}%`, ...words.map((w) => `%${w}%`));
   }
   const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
   const limit = Math.min(Math.max(q.limit ?? 200, 1), 1000);
