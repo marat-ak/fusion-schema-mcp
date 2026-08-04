@@ -241,8 +241,9 @@ export function buildServer(): McpServer {
         "returns the object's dedicated extension table + attribute->column mapping (no filter). " +
         "USE THIS whenever a request mentions a *_c object/field or a custom attribute that " +
         "getColumns doesn't show on the standard table. Users normally say the DISPLAY name, not " +
-        "the *_c API name — `search` also matches de-camelized human words ('ticket contact' finds " +
-        "TicketContact_c, 'net price' finds NetPrice_c); try the user's own words first. Empty " +
+        "the *_c API name — `search` matches de-camelized API words AND real display labels when " +
+        "the admin loaded the App Composer Configuration Report ('account owner' finds " +
+        "AccountOwner_c labeled 'Account Owner'); try the user's own words first. Empty " +
         "result => the registry has no such object/field: ASK the user which object/field they " +
         "mean (or for its API name) — never guess and never silently fall back to a standard " +
         "column. SEVERAL plausible matches => ask the user to pick (offer the candidate API names " +

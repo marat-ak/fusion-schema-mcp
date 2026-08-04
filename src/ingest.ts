@@ -46,7 +46,7 @@ import { enrichOne } from "./corpus/enrichAdapters.js";
 import { getEnrichConfig } from "./corpus/enrichConfig.js";
 import { runGeminiBatches } from "./corpus/geminiBatch.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./corpus/enrichPrompt.js";
-import { loadFlexfieldsCsv, flexfieldsCount, loadAdfExtensionsCsv, adfCount } from "./corpus/flexStore.js";
+import { loadFlexfieldsCsv, flexfieldsCount, loadAdfExtensionsCsv, adfCount, loadConfigReportXml } from "./corpus/flexStore.js";
 import type { EnrichRow } from "./corpus/enrichStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -365,6 +365,20 @@ export function createIngestRouter(): express.Router {
       res.json({ ok: true, source, ...r, ...adfCount() });
     } catch (e: any) {
       console.error("[ingest] /adf-extensions error", e);
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+
+  // App Composer Configuration Report XML — merges DISPLAY NAMES onto the ADF registry and adds
+  // rows the ADF export lacks (OOTB fields with business labels).
+  router.post("/ingest/config-report", requireAuth, express.text({ type: () => true, limit: "256mb" }), async (req, res) => {
+    try {
+      const xml = typeof req.body === "string" ? req.body : "";
+      if (!xml.includes("<ReportModel")) return res.status(400).json({ ok: false, error: "expected an App Composer ConfigurationReport XML body" });
+      const r = loadConfigReportXml(xml);
+      res.json({ ok: true, ...r, ...adfCount() });
+    } catch (e: any) {
+      console.error("[ingest] /config-report error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
     }
   });

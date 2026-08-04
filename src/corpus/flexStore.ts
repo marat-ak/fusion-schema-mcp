@@ -191,6 +191,8 @@ function ensureAdf(d: Database.Database): void {
     CREATE INDEX IF NOT EXISTS idx_adf_attr   ON adf_extensions(attribute_name);
   `);
   try { d.exec("ALTER TABLE adf_extensions ADD COLUMN display_hint TEXT"); } catch { /* already present */ }
+  try { d.exec("ALTER TABLE adf_extensions ADD COLUMN object_display TEXT"); } catch { /* already present */ }
+  try { d.exec("ALTER TABLE adf_extensions ADD COLUMN field_display TEXT"); } catch { /* already present */ }
 }
 
 /** API name -> searchable human words: TicketContact_c -> "ticket contact";
@@ -251,6 +253,81 @@ export function loadAdfExtensionsCsv(csvText: string, source = "admin-export"): 
   return { rows, customObjects: objects.size, builtinExtensions: builtinTables.size };
 }
 
+// ── App Composer Configuration Report (XML) — the DISPLAY-NAME source ──────────────────────────
+// Setup and Maintenance -> Application Composer -> Configuration Report exports one XML with every
+// custom object and field INCLUDING human display names (objectDisplayName / field displayName),
+// plus tableName and columnName. Merge strategy: UPDATE display names onto existing registry rows
+// (matched by object+attribute, or attribute+column for std-object custom fields), then INSERT
+// rows the ADF export didn't have (e.g. OOTB fields like RecordName "Plan Name") as
+// source='config-report'. display_hint gains the lowercased display names so searches match the
+// words users actually say.
+
+function xmlTag(block: string, tag: string): string | null {
+  const m = block.match(new RegExp(`<${tag}>([^<]*)</${tag}>`));
+  return m ? m[1].trim() || null : null;
+}
+
+export function loadConfigReportXml(xml: string): {
+  objects: number; fields: number; displayUpdated: number; inserted: number;
+} {
+  const d = db();
+  ensureAdf(d);
+  const now = new Date().toISOString();
+  const updByObj = d.prepare(`
+    UPDATE adf_extensions SET object_display = ?, field_display = ?,
+      display_hint = coalesce(display_hint,'') || ' ' || ?
+    WHERE object_name = ? AND attribute_name = ?
+  `);
+  const updByCol = d.prepare(`
+    UPDATE adf_extensions SET field_display = ?,
+      display_hint = coalesce(display_hint,'') || ' ' || ?
+    WHERE object_name IS NULL AND attribute_name = ? AND column_name = ?
+  `);
+  const ins = d.prepare(`
+    INSERT OR REPLACE INTO adf_extensions
+      (object_name, table_name, context_column_name, attribute_name, column_name,
+       display_hint, object_display, field_display, source, loaded_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)
+  `);
+
+  let objects = 0, fields = 0, displayUpdated = 0, inserted = 0;
+  const objBlocks = xml.split(/<CustomizedObject>/).slice(1).map((b) => b.split("</CustomizedObject>")[0]);
+  const tx = d.transaction(() => {
+    d.prepare("DELETE FROM adf_extensions WHERE source = 'config-report'").run();
+    for (const ob of objBlocks) {
+      const objName = xmlTag(ob, "objectName");
+      if (!objName) continue;
+      objects++;
+      const objDisplay = xmlTag(ob, "objectDisplayName");
+      const objType = xmlTag(ob, "objectType"); // Custom | Standard
+      const tableName = xmlTag(ob, "tableName");
+      const isCustomObject = (objType ?? "").toLowerCase() === "custom";
+      const fieldBlocks = ob.split(/<CustomField>/).slice(1).map((b) => b.split("</CustomField>")[0]);
+      for (const fb of fieldBlocks) {
+        const fieldName = xmlTag(fb, "fieldName");
+        const colName = xmlTag(fb, "columnName");
+        if (!fieldName) continue;
+        fields++;
+        const fieldDisplay = xmlTag(fb, "displayName");
+        const hintAdd = `${(objDisplay ?? "").toLowerCase()} ${(fieldDisplay ?? "").toLowerCase()}`.trim();
+        // custom object rows in the ADF export carry object_name; std-object custom fields have NULL
+        const r1 = isCustomObject ? updByObj.run(objDisplay, fieldDisplay, hintAdd, objName, fieldName) : { changes: 0 };
+        const r2 = !isCustomObject && colName ? updByCol.run(fieldDisplay, hintAdd, fieldName, colName) : { changes: 0 };
+        if (r1.changes || r2.changes) { displayUpdated += r1.changes + r2.changes; continue; }
+        if (!tableName || !colName) continue; // nothing to anchor an insert on
+        const hint = `${isCustomObject ? displayHint(objName) + " " : ""}${displayHint(fieldName)} ${hintAdd}`.trim();
+        ins.run(
+          isCustomObject ? objName : null, tableName, null, fieldName, colName,
+          hint, isCustomObject ? objDisplay : null, fieldDisplay, "config-report", now,
+        );
+        inserted++;
+      }
+    }
+  });
+  tx();
+  return { objects, fields, displayUpdated, inserted };
+}
+
 export interface AdfQuery {
   /** custom object name (usually *_c), substring match. */
   object?: string;
@@ -286,20 +363,35 @@ export function queryAdfExtensions(q: AdfQuery): unknown {
   const custom = new Map<string, any>();
   const builtin = new Map<string, any>();
   for (const r of rows) {
+    const field = {
+      attribute: r.attribute_name, column: r.column_name,
+      ...(r.field_display ? { label: r.field_display } : {}),
+    };
     if (r.object_name) {
       const k = r.object_name;
       if (!custom.has(k)) {
         custom.set(k, {
-          objectName: r.object_name, storedIn: r.table_name,
+          objectName: r.object_name,
+          ...(r.object_display ? { displayName: r.object_display } : {}),
+          storedIn: r.table_name,
           rowFilter: r.context_column_name ? `${r.context_column_name} = '${r.object_name}'` : null,
           fields: [],
         });
       }
-      custom.get(k).fields.push({ attribute: r.attribute_name, column: r.column_name });
+      const c = custom.get(k);
+      if (!c.displayName && r.object_display) c.displayName = r.object_display;
+      if (!c.rowFilter && r.context_column_name) c.rowFilter = `${r.context_column_name} = '${r.object_name}'`;
+      // same attribute may come from two sources (adf export + config report) — keep one, prefer labeled
+      const dup = c.fields.find((f: any) => f.attribute === field.attribute && f.column === field.column);
+      if (dup) { if (!dup.label && field.label) dup.label = field.label; continue; }
+      c.fields.push(field);
     } else {
       const k = r.table_name;
       if (!builtin.has(k)) builtin.set(k, { extensionTable: r.table_name, note: "custom fields on the built-in object this table extends (dedicated, no context filter)", fields: [] });
-      builtin.get(k).fields.push({ attribute: r.attribute_name, column: r.column_name });
+      const b = builtin.get(k);
+      const dup = b.fields.find((f: any) => f.attribute === field.attribute && f.column === field.column);
+      if (dup) { if (!dup.label && field.label) dup.label = field.label; continue; }
+      b.fields.push(field);
     }
   }
   return {
