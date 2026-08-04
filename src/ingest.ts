@@ -46,7 +46,7 @@ import { enrichOne } from "./corpus/enrichAdapters.js";
 import { getEnrichConfig } from "./corpus/enrichConfig.js";
 import { runGeminiBatches } from "./corpus/geminiBatch.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./corpus/enrichPrompt.js";
-import { loadFlexfieldsCsv, flexfieldsCount } from "./corpus/flexStore.js";
+import { loadFlexfieldsCsv, flexfieldsCount, loadAdfExtensionsCsv, adfCount } from "./corpus/flexStore.js";
 import type { EnrichRow } from "./corpus/enrichStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -351,8 +351,22 @@ export function createIngestRouter(): express.Router {
     }
   });
   router.get("/ingest/flexfields/health", requireAuth, (_req, res) => {
-    try { res.json({ ok: true, ...flexfieldsCount() }); }
+    try { res.json({ ok: true, ...flexfieldsCount(), adf: adfCount() }); }
     catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
+  });
+
+  // ADF extensions (CRM/CX custom objects + custom fields) — same lifecycle as /ingest/flexfields.
+  router.post("/ingest/adf-extensions", requireAuth, express.text({ type: () => true, limit: "256mb" }), async (req, res) => {
+    try {
+      const csv = typeof req.body === "string" ? req.body : "";
+      if (!csv.trim()) return res.status(400).json({ ok: false, error: "empty body — POST the ADF-extensions CSV" });
+      const source = typeof req.query.source === "string" && req.query.source.trim() ? req.query.source.trim() : "admin-export";
+      const r = loadAdfExtensionsCsv(csv, source);
+      res.json({ ok: true, source, ...r, ...adfCount() });
+    } catch (e: any) {
+      console.error("[ingest] /adf-extensions error", e);
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
   });
 
   // ---- portable corpus export / import ----

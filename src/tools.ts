@@ -2,7 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as catalog from "./catalog.js";
-import { queryFlexfields } from "./corpus/flexStore.js";
+import { queryFlexfields, queryAdfExtensions } from "./corpus/flexStore.js";
 
 const DEBUG = process.env.MCP_DEBUG === "1" || process.env.MCP_DEBUG === "true";
 
@@ -226,6 +226,30 @@ export function buildServer(): McpServer {
       },
     },
     async (args) => reply("getFlexfields", args, queryFlexfields(args)),
+  );
+
+  server.registerTool(
+    "getCustomObjects",
+    {
+      title: "ADF custom objects & custom fields registry (CRM/CX)",
+      description:
+        "The customer's ADF extension registry — application-composer CUSTOM OBJECTS (names ending " +
+        "_c: Ticket_c, ContractRequest_c...) and CUSTOM FIELDS added to built-in objects. For a " +
+        "custom OBJECT it returns the exact access recipe: which GENERIC table stores it (e.g. " +
+        "HZ_REF_ENTITIES), the row filter (context column = object name), and each business " +
+        "attribute's physical EXTN_ATTRIBUTE_* column. For a custom FIELD on a built-in object it " +
+        "returns the object's dedicated extension table + attribute->column mapping (no filter). " +
+        "USE THIS whenever a request mentions a *_c object/field or a custom attribute that " +
+        "getColumns doesn't show on the standard table. Empty result => the registry has no such " +
+        "object/field: ask, don't guess.",
+      inputSchema: {
+        object: z.string().optional().describe("custom object name, substring, e.g. 'Ticket' or 'Ticket_c'"),
+        table: z.string().optional().describe("generic-store or extension table filter, e.g. 'SVC_SERVICE_REQUESTS'"),
+        search: z.string().optional().describe("free text over attribute/object/table names, e.g. 'grade'"),
+        limit: z.number().int().min(1).max(1000).optional().describe("max rows scanned (default 200)"),
+      },
+    },
+    async (args) => reply("getCustomObjects", args, queryAdfExtensions(args)),
   );
 
   // Data-model / file authoring tools have moved to the agent (in-process SDK tools). This MCP is

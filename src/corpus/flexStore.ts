@@ -165,6 +165,143 @@ export function queryFlexfields(q: FlexQuery): unknown {
   return { matched: rows.length, truncated: rows.length >= limit, flexfields };
 }
 
+// ─────────────────────────── ADF extensions (CRM/CX custom objects & fields) ───────────────────────────
+// Second registry, same lifecycle: the admin exports adf_extension_column_usage ⋈ adf_extension_column
+// ⋈ adf_extensible_table ⋈ adf_extensible_table_usage. Two shapes in one file:
+//  - OBJECT_NAME set  -> a CUSTOM OBJECT stored in a GENERIC table (TABLE_NAME, e.g. HZ_REF_ENTITIES):
+//    rows filtered by CONTEXT_COLUMN_NAME = OBJECT_NAME; field ATTRIBUTE_NAME lives in COLUMN_NAME.
+//  - OBJECT_NAME null -> a CUSTOM FIELD on a BUILT-IN object: TABLE_NAME is that object's dedicated
+//    extension table (e.g. SVC_SERVICE_REQUESTS); no context filter; ATTRIBUTE_NAME -> COLUMN_NAME.
+
+function ensureAdf(d: Database.Database): void {
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS adf_extensions (
+      object_name         TEXT,               -- NULL => custom field on the built-in object
+      table_name          TEXT NOT NULL,      -- generic store (custom object) or dedicated ext table
+      context_column_name TEXT,               -- filter column when object_name is set
+      attribute_name      TEXT NOT NULL,      -- business field name (usually *_c)
+      column_name         TEXT NOT NULL,      -- EXTN_ATTRIBUTE_* physical column
+      source              TEXT NOT NULL DEFAULT 'admin-export',
+      loaded_at           TEXT NOT NULL,
+      UNIQUE(object_name, table_name, attribute_name, column_name, source)
+    );
+    CREATE INDEX IF NOT EXISTS idx_adf_object ON adf_extensions(object_name);
+    CREATE INDEX IF NOT EXISTS idx_adf_table  ON adf_extensions(table_name);
+    CREATE INDEX IF NOT EXISTS idx_adf_attr   ON adf_extensions(attribute_name);
+  `);
+}
+
+/** Parse the ADF-extensions CSV (OBJECT_NAME, TABLE_NAME, CONTEXT_COLUMN_NAME, ATTRIBUTE_NAME,
+ *  COLUMN_NAME) and snapshot-replace all rows of `source`. */
+export function loadAdfExtensionsCsv(csvText: string, source = "admin-export"): { rows: number; customObjects: number; builtinExtensions: number } {
+  const records: Record<string, string>[] = parse(csvText, {
+    columns: (h: string[]) => h.map((c) => c.trim().toUpperCase()),
+    bom: true,
+    relax_quotes: true,
+    relax_column_count: true,
+    skip_empty_lines: true,
+  });
+  if (!records.length) throw new Error("CSV parsed to 0 rows");
+  for (const col of ["TABLE_NAME", "ATTRIBUTE_NAME", "COLUMN_NAME"]) {
+    if (!(col in records[0])) throw new Error(`CSV missing expected column ${col}`);
+  }
+  const d = db();
+  ensureAdf(d);
+  const now = new Date().toISOString();
+  const ins = d.prepare(`
+    INSERT OR REPLACE INTO adf_extensions
+      (object_name, table_name, context_column_name, attribute_name, column_name, source, loaded_at)
+    VALUES (?,?,?,?,?,?,?)
+  `);
+  let rows = 0;
+  const objects = new Set<string>();
+  const builtinTables = new Set<string>();
+  const tx = d.transaction(() => {
+    d.prepare("DELETE FROM adf_extensions WHERE source = ?").run(source);
+    for (const r of records) {
+      const table = norm(r.TABLE_NAME);
+      const attr = norm(r.ATTRIBUTE_NAME);
+      const col = norm(r.COLUMN_NAME);
+      if (!table || !attr || !col) continue;
+      const obj = norm(r.OBJECT_NAME);
+      ins.run(obj, table, norm(r.CONTEXT_COLUMN_NAME), attr, col, source, now);
+      rows++;
+      if (obj) objects.add(obj); else builtinTables.add(table);
+    }
+  });
+  tx();
+  return { rows, customObjects: objects.size, builtinExtensions: builtinTables.size };
+}
+
+export interface AdfQuery {
+  /** custom object name (usually *_c), substring match. */
+  object?: string;
+  /** generic-store or extension table name, substring match. */
+  table?: string;
+  /** free text over attribute_name / object_name / table_name. */
+  search?: string;
+  limit?: number;
+}
+
+/** Lookup, grouped per object (custom objects) / per table (built-in extensions), with the exact
+ *  access recipe (which table, which context filter, which physical column per attribute). */
+export function queryAdfExtensions(q: AdfQuery): unknown {
+  const d = db();
+  ensureAdf(d);
+  const cond: string[] = [];
+  const bind: unknown[] = [];
+  if (q.object) { cond.push("UPPER(coalesce(object_name,'')) LIKE UPPER(?)"); bind.push(`%${q.object}%`); }
+  if (q.table) { cond.push("UPPER(table_name) LIKE UPPER(?)"); bind.push(`%${q.table}%`); }
+  if (q.search) {
+    cond.push("(UPPER(attribute_name || ' ' || coalesce(object_name,'') || ' ' || table_name) LIKE UPPER(?))");
+    bind.push(`%${q.search}%`);
+  }
+  const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
+  const limit = Math.min(Math.max(q.limit ?? 200, 1), 1000);
+  const rows = d.prepare(
+    `SELECT * FROM adf_extensions ${where} ORDER BY object_name IS NULL, object_name, table_name, attribute_name LIMIT ${limit}`,
+  ).all(...bind) as any[];
+
+  const custom = new Map<string, any>();
+  const builtin = new Map<string, any>();
+  for (const r of rows) {
+    if (r.object_name) {
+      const k = r.object_name;
+      if (!custom.has(k)) {
+        custom.set(k, {
+          objectName: r.object_name, storedIn: r.table_name,
+          rowFilter: r.context_column_name ? `${r.context_column_name} = '${r.object_name}'` : null,
+          fields: [],
+        });
+      }
+      custom.get(k).fields.push({ attribute: r.attribute_name, column: r.column_name });
+    } else {
+      const k = r.table_name;
+      if (!builtin.has(k)) builtin.set(k, { extensionTable: r.table_name, note: "custom fields on the built-in object this table extends (dedicated, no context filter)", fields: [] });
+      builtin.get(k).fields.push({ attribute: r.attribute_name, column: r.column_name });
+    }
+  }
+  return {
+    matched: rows.length,
+    truncated: rows.length >= limit,
+    customObjects: [...custom.values()],
+    builtinExtensions: [...builtin.values()],
+  };
+}
+
+export function adfCount(): { total: number; customObjects: number; builtinTables: number } {
+  const d = db();
+  ensureAdf(d);
+  try {
+    const total = (d.prepare("SELECT COUNT(*) c FROM adf_extensions").get() as any).c;
+    const customObjects = (d.prepare("SELECT COUNT(DISTINCT object_name) c FROM adf_extensions WHERE object_name IS NOT NULL").get() as any).c;
+    const builtinTables = (d.prepare("SELECT COUNT(DISTINCT table_name) c FROM adf_extensions WHERE object_name IS NULL").get() as any).c;
+    return { total, customObjects, builtinTables };
+  } catch {
+    return { total: 0, customObjects: 0, builtinTables: 0 };
+  }
+}
+
 export function flexfieldsCount(): { total: number; dff: number; eff: number; sources: unknown } {
   const d = db();
   try {
