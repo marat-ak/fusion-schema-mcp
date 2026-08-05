@@ -41,7 +41,7 @@ import express from "express";
 import { corpusCount, materialize, materializedIds, exportCorpus, importCorpus, updateEnrichment, reenrichQueue, reenrichCounts, embedTexts, recordUsage, usageStats, type MaterializeRow, type ImportRow } from "./corpus/ingestStore.js";
 import { embed } from "./corpus/embed.js";
 import { enrichAgentBatch } from "./corpus/enrichAdapters.js";
-import { submitBatch, pollJob, runningJobs, allJobs } from "./corpus/enrichBatchApi.js";
+import { submitBatch, pollJob, runningJobs, allJobs, finishedJobs, reingestJob } from "./corpus/enrichBatchApi.js";
 import { redoQueue } from "./corpus/ingestStore.js";
 import { extractModels } from "./corpus/extractArchive.js";
 import { openEnrichStore, type EnrichStore } from "./corpus/enrichStore.js";
@@ -536,6 +536,18 @@ export function createIngestRouter(): express.Router {
   router.get("/ingest/batch/status", requireAuth, (_req, res) => {
     try { res.json({ ok: true, jobs: allJobs() }); }
     catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
+  });
+  // Re-parse + re-ingest FINISHED jobs from their stored results (free — no model calls). Recovers
+  // rows a past parser bug wrote as placeholders (e.g. array-typed mechanics discarded as non-string).
+  router.post("/ingest/batch/reingest", requireAuth, async (_req, res) => {
+    try {
+      const out: unknown[] = [];
+      for (const j of finishedJobs()) out.push(await reingestJob(j.batch_id));
+      res.json({ ok: true, jobs: out });
+    } catch (e: any) {
+      console.error("[ingest] /batch/reingest error", e);
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
   });
 
   // App Composer Configuration Report XML — merges DISPLAY NAMES onto the ADF registry and adds

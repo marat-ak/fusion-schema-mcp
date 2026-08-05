@@ -103,6 +103,16 @@ export async function submitBatch(rows: { id: string; title: string; sql: string
 export function runningJobs(): { batch_id: string; model: string; n: number; status: string; submitted_at: string }[] {
   return db().prepare("SELECT batch_id, model, n, status, submitted_at FROM batch_jobs WHERE status NOT IN ('done','failed','canceled')").all() as any[];
 }
+export function finishedJobs(): { batch_id: string }[] {
+  return db().prepare("SELECT batch_id FROM batch_jobs WHERE status = 'done'").all() as any[];
+}
+
+/** Re-fetch a FINISHED job's results and re-run ingest with the current parser (results_url stays
+ *  valid ~29 days). Free — no model calls. Recovers rows a past parser bug wrote as placeholders. */
+export async function reingestJob(batchId: string): Promise<Record<string, unknown>> {
+  db().prepare("UPDATE batch_jobs SET status = 'ended' WHERE batch_id = ?").run(batchId); // let pollJob re-ingest
+  return pollJob(batchId);
+}
 
 export function allJobs(): unknown[] {
   return db().prepare("SELECT * FROM batch_jobs ORDER BY submitted_at DESC LIMIT 20").all();

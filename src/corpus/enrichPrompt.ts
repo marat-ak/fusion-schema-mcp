@@ -95,7 +95,7 @@ export function shapeBatchItem(o: any): { description: string; intents: string[]
   return {
     description: o.description,
     intents: Array.isArray(o.intents) ? o.intents.filter((x: unknown) => typeof x === "string" && (x as string).trim()).slice(0, 8) : [],
-    mechanics: typeof o.mechanics === "string" && o.mechanics.trim() ? o.mechanics.trim() : null,
+    mechanics: coerceMechanics(o.mechanics),
     tablesUsed: Array.isArray(o.tablesUsed) ? o.tablesUsed.filter((x: unknown) => typeof x === "string") : [],
   };
 }
@@ -122,6 +122,18 @@ function extractJson(text: string): any {
   throw new Error("no parseable JSON object");
 }
 
+/** mechanics may arrive as a plain string OR a JSON ARRAY of bullet lines (the model chooses,
+ *  and roughly half the corpus came back as an array). Coerce either into one bulleted string. */
+export function coerceMechanics(v: unknown): string | null {
+  if (typeof v === "string") return v.trim() || null;
+  if (Array.isArray(v)) {
+    const lines = v.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).map((s) => s.trim()).filter(Boolean);
+    return lines.length ? lines.map((l) => (l.startsWith("-") ? l : `- ${l}`)).join("\n") : null;
+  }
+  if (v && typeof v === "object") { const s = JSON.stringify(v); return s.length > 2 ? s : null; }
+  return null;
+}
+
 export function parseEnrichReply(text: string, s: SqlSource): Enrichment {
   const j = extractJson(text);
   if (typeof j.description !== "string") throw new Error(`enrich reply missing description for ${s.id}`);
@@ -130,7 +142,7 @@ export function parseEnrichReply(text: string, s: SqlSource): Enrichment {
     cleanSql: typeof j.cleanSql === "string" && j.cleanSql.trim() ? j.cleanSql : s.originalSql,
     description: j.description,
     intents: Array.isArray(j.intents) ? j.intents.filter((x: unknown) => typeof x === "string" && (x as string).trim()).slice(0, 8) : [],
-    mechanics: typeof j.mechanics === "string" && j.mechanics.trim() ? j.mechanics.trim() : null,
+    mechanics: coerceMechanics(j.mechanics),
     tablesUsed: Array.isArray(j.tablesUsed) && j.tablesUsed.length ? j.tablesUsed : m.tablesUsed,
     lookupTypes: Array.isArray(j.lookupTypes) && j.lookupTypes.length ? j.lookupTypes : m.lookupTypes,
     joins: m.joins,
