@@ -94,15 +94,25 @@ export function updateEnrichment(
 /** Rows still lacking v2 enrichment for the given sources — the re-enrich worker's queue.
  *  `includeRedo` also catches BATCH-DEGRADED rows: "(no notable mechanics)" on a non-trivial SQL
  *  (>3000 chars) is a known artifact of prompt-batching, not an honest empty. */
+/** Rows already riding an unfinished batch job must not be re-submitted by the next chunk. */
+const NOT_IN_FLIGHT = `id NOT IN (
+  SELECT bi.row_id FROM batch_items bi
+  JOIN batch_jobs bj ON bj.batch_id = bi.batch_id
+  WHERE bj.status NOT IN ('done','failed','canceled'))`;
+function hasBatchTables(d: Database.Database): boolean {
+  try { d.prepare("SELECT 1 FROM batch_jobs LIMIT 1").get(); return true; } catch { return false; }
+}
+
 export function reenrichQueue(sources: string[], limit: number, includeRedo = false): { id: string; title: string; sql: string; source: string }[] {
   const d = db();
   const ph = sources.map(() => "?").join(",");
   const cond = includeRedo
     ? `(mechanics IS NULL OR (mechanics = '(no notable mechanics)' AND LENGTH(COALESCE(clean_sql, original_sql)) > 3000))`
     : `mechanics IS NULL`;
+  const inflight = hasBatchTables(d) ? ` AND ${NOT_IN_FLIGHT}` : "";
   return d.prepare(
     `SELECT id, title, COALESCE(clean_sql, original_sql) AS sql, source
-     FROM report_queries WHERE source IN (${ph}) AND ${cond}
+     FROM report_queries WHERE source IN (${ph}) AND ${cond}${inflight}
      ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC LIMIT ?`,
   ).all(...sources, limit) as any[];
 }
@@ -111,10 +121,11 @@ export function reenrichQueue(sources: string[], limit: number, includeRedo = fa
 export function redoQueue(sources: string[], limit: number): { id: string; title: string; sql: string; source: string }[] {
   const d = db();
   const ph = sources.map(() => "?").join(",");
+  const inflight = hasBatchTables(d) ? ` AND ${NOT_IN_FLIGHT}` : "";
   return d.prepare(
     `SELECT id, title, COALESCE(clean_sql, original_sql) AS sql, source
      FROM report_queries WHERE source IN (${ph})
-       AND mechanics = '(no notable mechanics)' AND LENGTH(COALESCE(clean_sql, original_sql)) > 3000
+       AND mechanics = '(no notable mechanics)' AND LENGTH(COALESCE(clean_sql, original_sql)) > 3000${inflight}
      ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC LIMIT ?`,
   ).all(...sources, limit) as any[];
 }
@@ -140,22 +151,30 @@ function ensureUsage(d: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_usage_model ON enrich_usage(model);
   `);
+  try { d.exec("ALTER TABLE enrich_usage ADD COLUMN batch_id TEXT"); } catch { /* already present */ }
 }
 
 export interface UsageRecord {
   ts: string; model: string; source?: string; nItems: number;
   inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number;
-  sqlChars?: number;
+  sqlChars?: number; batchId?: string;
 }
 export function recordUsage(u: UsageRecord): void {
   const d = db();
   ensureUsage(d);
   d.prepare(`INSERT INTO enrich_usage
-    (ts, model, source, n_items, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, sql_chars)
-    VALUES (?,?,?,?,?,?,?,?,?)`).run(
+    (ts, model, source, n_items, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, sql_chars, batch_id)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
     u.ts, u.model, u.source ?? null, u.nItems, u.inputTokens, u.outputTokens,
-    u.cacheReadTokens, u.cacheCreationTokens, u.sqlChars ?? null,
+    u.cacheReadTokens, u.cacheCreationTokens, u.sqlChars ?? null, u.batchId ?? null,
   );
+}
+
+/** Idempotent re-ingest support: wipe a batch's usage rows before (re)recording them. */
+export function clearBatchUsage(batchId: string): void {
+  const d = db();
+  ensureUsage(d);
+  d.prepare("DELETE FROM enrich_usage WHERE batch_id = ?").run(batchId);
 }
 
 // Published API pricing per 1M tokens (USD). Cache reads billed ~10% of input; cache writes ~1.25x.

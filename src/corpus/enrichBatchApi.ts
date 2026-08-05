@@ -18,18 +18,21 @@ import { reportsDbPath } from "../dbPaths.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./enrichPrompt.js";
 import type { SqlSource } from "./sources.js";
 import { embed } from "./embed.js";
-import { updateEnrichment, embedTexts, recordUsage } from "./ingestStore.js";
+import { updateEnrichment, embedTexts, recordUsage, clearBatchUsage } from "./ingestStore.js";
 
 const API = "https://api.anthropic.com/v1/messages/batches";
 
 function apiKey(): string {
-  const k = (process.env.ENRICH_API_KEY ?? "").trim() || dotEnvKey();
-  if (!k.startsWith("sk-ant-api")) throw new Error("Batch path needs a real API key (sk-ant-api…) in ENRICH_API_KEY");
+  // The batch path is Anthropic-only, so ANTHROPIC_API_KEY is an equally valid home for the key.
+  const k = (process.env.ENRICH_API_KEY ?? "").trim()
+    || (process.env.ANTHROPIC_API_KEY ?? "").trim()
+    || dotEnvKey("ENRICH_API_KEY") || dotEnvKey("ANTHROPIC_API_KEY");
+  if (!k.startsWith("sk-ant-api")) throw new Error("Batch path needs a real API key (sk-ant-api…) in ENRICH_API_KEY or ANTHROPIC_API_KEY");
   return k;
 }
-function dotEnvKey(): string {
+function dotEnvKey(name: string): string {
   try {
-    const m = fs.readFileSync(new URL("../../.env", import.meta.url), "utf8").match(/^ENRICH_API_KEY=(.+)$/m);
+    const m = fs.readFileSync(new URL("../../.env", import.meta.url), "utf8").match(new RegExp(`^${name}=(.+)$`, "m"));
     return (m?.[1] ?? "").trim();
   } catch { return ""; }
 }
@@ -123,6 +126,7 @@ export async function pollJob(batchId: string): Promise<Record<string, unknown>>
     (d.prepare("SELECT custom_id, row_id FROM batch_items WHERE batch_id = ?").all(batchId) as any[]).map((x) => [x.custom_id, x.row_id]),
   );
   const model = (d.prepare("SELECT model FROM batch_jobs WHERE batch_id = ?").get(batchId) as any)?.model ?? "claude-opus-5";
+  clearBatchUsage(batchId); // replaying results after a mid-ingest crash must not double-count usage
   let ok = 0, failed = 0;
   const nowIso = new Date().toISOString();
   for (const line of text.split("\n")) {
@@ -141,7 +145,7 @@ export async function pollJob(batchId: string): Promise<Record<string, unknown>>
       updateEnrichment(rowId, { description: e.description, intents: e.intents ?? [], mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
       const u = msg.usage ?? {};
       recordUsage({
-        ts: nowIso, model: `${model}@batch`, source: "batch", nItems: 1,
+        ts: nowIso, model: `${model}@batch`, source: "batch", nItems: 1, batchId,
         inputTokens: Number(u.input_tokens ?? 0), outputTokens: Number(u.output_tokens ?? 0),
         cacheReadTokens: Number(u.cache_read_input_tokens ?? 0), cacheCreationTokens: Number(u.cache_creation_input_tokens ?? 0),
       });

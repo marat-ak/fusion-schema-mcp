@@ -502,10 +502,22 @@ export function createIngestRouter(): express.Router {
       const model = typeof req.query.model === "string" && req.query.model.trim() ? req.query.model.trim() : "claude-opus-5";
       const limit = Math.max(1, Number(req.query.limit) || 20000);
       const redoOnly = req.query.redo === "1" || req.query.redo === "true";
-      const rows = redoOnly ? redoQueue(sources, limit) : reenrichQueue(sources, limit, true);
+      // full submit deliberately EXCLUDES redo rows (mechanics IS NULL only) so running the redo
+      // job and the full job concurrently can never double-pay for the same row.
+      const rows = redoOnly ? redoQueue(sources, limit) : reenrichQueue(sources, limit, false);
       if (!rows.length) { res.json({ ok: true, submitted: 0, note: "queue empty" }); return; }
+      const chars = rows.reduce((a, r) => a + (r.sql?.length ?? 0), 0);
+      // estimate at @batch half-rate from observed shape: input ≈ sql/4 + 900 prompt tokens,
+      // output ≈ 1500 tokens per row (solo mechanics runs). Rough but honest — shown pre-spend.
+      const inTok = Math.round(chars / 4) + rows.length * 900;
+      const outTok = rows.length * 1500;
+      const estUsd = +((inTok * 2.5 + outTok * 12.5) / 1e6).toFixed(2);
+      if (req.query.dryRun === "1" || req.query.dryRun === "true") {
+        res.json({ ok: true, dryRun: true, wouldSubmit: rows.length, sqlChars: chars, estUsd, model, redoOnly });
+        return;
+      }
       const r = await submitBatch(rows, model);
-      res.json({ ok: true, ...r, model, redoOnly });
+      res.json({ ok: true, ...r, model, redoOnly, estUsd });
     } catch (e: any) {
       console.error("[ingest] /batch/submit error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
