@@ -387,16 +387,20 @@ export function createIngestRouter(): express.Router {
   // bulk enrichment never locks the owner out of interactive Claude use. Reads the remaining-usage
   // endpoint on fusion-agent; unreachable/unconfigured => no guard (fail-open, the 429 backoff
   // still protects).
-  async function usageGuard(): Promise<{ blocked: boolean; utilization?: number }> {
-    const stopAt = Number(process.env.ENRICH_USAGE_STOP ?? 90);
-    if (!(stopAt > 0)) return { blocked: false };
+  async function usageGuard(): Promise<{ blocked: boolean; utilization?: number; weekly?: number; reason?: string }> {
+    const stopAt = Number(process.env.ENRICH_USAGE_STOP ?? 90);        // five-hour window
+    const weeklyStop = Number(process.env.ENRICH_WEEKLY_STOP ?? 70);   // seven-day window
+    if (!(stopAt > 0) && !(weeklyStop > 0)) return { blocked: false };
     try {
       const base = (process.env.ENRICH_URL ?? "http://fusion-agent:8980/api/internal/llm").replace(/\/api\/internal\/llm.*$/, "");
       const r = await fetch(`${base}/api/internal/limits`, { headers: { authorization: `Bearer ${process.env.INGEST_TOKEN ?? ""}` } });
       if (!r.ok) return { blocked: false };
       const j: any = await r.json();
       const u = Number(j?.fiveHour?.utilizationPct ?? 0);
-      return { blocked: u >= stopAt, utilization: u };
+      const w = Number(j?.sevenDay?.utilizationPct ?? 0);
+      if (stopAt > 0 && u >= stopAt) return { blocked: true, utilization: u, weekly: w, reason: "five-hour" };
+      if (weeklyStop > 0 && w >= weeklyStop) return { blocked: true, utilization: u, weekly: w, reason: "seven-day" };
+      return { blocked: false, utilization: u, weekly: w };
     } catch { return { blocked: false }; }
   }
 
@@ -405,7 +409,7 @@ export function createIngestRouter(): express.Router {
       const guard = await usageGuard();
       if (guard.blocked) {
         const sources0 = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
-        res.json({ ok: true, skipped: "usage-guard", fiveHourUtilizationPct: guard.utilization, processed: 0, failed: 0, ...reenrichCounts(sources0) });
+        res.json({ ok: true, skipped: "usage-guard", guardReason: guard.reason, fiveHourUtilizationPct: guard.utilization, sevenDayUtilizationPct: guard.weekly, processed: 0, failed: 0, ...reenrichCounts(sources0) });
         return;
       }
       const sources = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
