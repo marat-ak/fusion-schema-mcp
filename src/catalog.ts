@@ -344,24 +344,60 @@ function vecStmts() {
          WHERE v.embedding MATCH ? AND k = ? AND rq.source = ?
          ORDER BY v.distance
          LIMIT ?`),
-      // multi-vector KNN: one vec row per intent PHRASING -> dedup by query row in JS
+      // multi-vector KNN: one vec row per intent PHRASING -> dedup by query row in JS.
+      // NB: the KNN must live in a bare subquery — joining/filtering the vec0 aux column inside
+      // the KNN query itself is an "illegal WHERE constraint" for sqlite-vec.
+      // the inner LIMIT (same value as k) blocks SQLite's subquery flattening, which would
+      // otherwise push the JOIN constraint into vec0 and fail ("illegal WHERE constraint").
       qMulti: db.prepare(
         `SELECT ${RQ_COLS}, rq.rowid AS qrid, v.distance AS distance
-         FROM report_queries_vec_multi v
+         FROM (SELECT qrowid, distance FROM report_queries_vec_multi
+               WHERE embedding MATCH ? ORDER BY distance LIMIT ?) v
          JOIN report_queries rq ON rq.rowid = v.qrowid
-         WHERE v.embedding MATCH ? AND k = ?
          ORDER BY v.distance`),
       qMultiSrc: db.prepare(
         `SELECT ${RQ_COLS}, rq.rowid AS qrid, v.distance AS distance
-         FROM report_queries_vec_multi v
+         FROM (SELECT qrowid, distance FROM report_queries_vec_multi
+               WHERE embedding MATCH ? ORDER BY distance LIMIT ?) v
          JOIN report_queries rq ON rq.rowid = v.qrowid
-         WHERE v.embedding MATCH ? AND k = ? AND rq.source = ?
+         WHERE rq.source = ?
          ORDER BY v.distance
          LIMIT ?`),
       multiCount: db.prepare("SELECT COUNT(*) AS c FROM report_queries_vec_multi"),
     };
   }
   return _vecStmts;
+}
+
+/**
+ * Two-stage retrieval: cross-encoder rerank of the KNN overfetch via a TEI sidecar (/rerank).
+ * Candidate text = title + description + intents (short, what cross-encoders score best on).
+ * Fail-open: no RERANK_URL, timeout (1.5s) or any error -> return rows in KNN order unchanged.
+ */
+async function rerank<T extends { title: string; description: string; intents?: string[] }>(intent: string, rows: T[]): Promise<T[]> {
+  const url = (process.env.RERANK_URL ?? "").trim();
+  if (!url || rows.length < 3) return rows;
+  try {
+    const texts = rows.map((r) =>
+      `${r.title}\n${r.description}\n${(r.intents ?? []).join("; ")}`.slice(0, 2000));
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), Number(process.env.RERANK_TIMEOUT_MS ?? 1500));
+    const res = await fetch(`${url.replace(/\/$/, "")}/rerank`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ query: intent, texts, raw_scores: false }),
+      signal: ctl.signal,
+    });
+    clearTimeout(t);
+    if (!res.ok) return rows;
+    const scores = (await res.json()) as { index: number; score: number }[];
+    if (!Array.isArray(scores) || !scores.length) return rows;
+    const order = [...scores].sort((a, b) => b.score - a.score).map((s) => s.index);
+    const seen = new Set(order);
+    return [...order.map((i) => rows[i]), ...rows.filter((_r, i) => !seen.has(i))];
+  } catch {
+    return rows;
+  }
 }
 
 /** Full SQL only when it is small enough to be worth inlining; big ones ship mechanics instead. */
@@ -445,7 +481,7 @@ export async function findSimilarQueries(
     rawRows = (opts.source ? qVecSrc.all(blob, K, opts.source, K) : qVec.all(blob, K)) as any[];
   }
 
-  const enriched = rawRows.map((r) => {
+  let enriched = rawRows.map((r) => {
     const tablesUsed = JSON.parse(r.tables_used ?? "[]");
     return {
       id: r.id, source: r.source, title: r.title, description: r.description,
@@ -459,6 +495,8 @@ export async function findSimilarQueries(
       domain: classifyDomain(tablesUsed, r.title, moduleOf),
     };
   });
+  // two-stage: cross-encoder reorders the overfetch before domain logic + slicing (fail-open)
+  enriched = await rerank(intent, enriched);
 
   // mechanics-first payload: the once-analyzed playbook always ships; full SQL only when small
   // (large exemplars: read mechanics, then getReportQuery(title) for the verbatim SQL if needed).
