@@ -38,8 +38,9 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import express from "express";
-import { corpusCount, materialize, materializedIds, exportCorpus, importCorpus, updateEnrichment, reenrichQueue, reenrichCounts, embedTexts, type MaterializeRow, type ImportRow } from "./corpus/ingestStore.js";
+import { corpusCount, materialize, materializedIds, exportCorpus, importCorpus, updateEnrichment, reenrichQueue, reenrichCounts, embedTexts, recordUsage, usageStats, type MaterializeRow, type ImportRow } from "./corpus/ingestStore.js";
 import { embed } from "./corpus/embed.js";
+import { enrichAgentBatch } from "./corpus/enrichAdapters.js";
 import { extractModels } from "./corpus/extractArchive.js";
 import { openEnrichStore, type EnrichStore } from "./corpus/enrichStore.js";
 import { hashSql, hashSqlNormalized, type SqlSource } from "./corpus/sources.js";
@@ -374,39 +375,76 @@ export function createIngestRouter(): express.Router {
 
   // ---- v2 re-enrichment over the MATERIALIZED corpus ----
   // Walks report_queries rows of the given sources that still lack `mechanics`, runs the v2
-  // enrichment ({description, intents[], mechanics}) via the configured provider, and rewrites the
-  // row in place with fresh vectors (legacy + multi). Resumable by design: the queue is simply
-  // `mechanics IS NULL`, so crashes/usage-window pauses lose nothing.
-  //   POST /ingest/reenrich?sources=bip-report,view&limit=200
-  //   GET  /ingest/reenrich/status?sources=bip-report,view
+  // enrichment ({description, intents[], mechanics}) and rewrites the row in place with fresh
+  // vectors. BATCHED: rows are grouped into model calls (up to BATCH_CHARS / BATCH_ITEMS each; a
+  // single oversized SQL is its own batch) — one call analyzes several SQLs, cutting subprocess
+  // spawns AND request count (rate-limit headroom). Batches run through a concurrency pool.
+  // Per-call token usage is recorded (enrich_usage) for cost analysis. Resumable by design: the
+  // queue is `mechanics IS NULL`, so crashes / usage-window pauses lose nothing.
+  //   POST /ingest/reenrich?sources=bip-report,view&limit=300&model=claude-opus-5&batchItems=6&batchChars=14000
+  //   GET  /ingest/reenrich/status?sources=…    GET /ingest/reenrich/cost?sources=…
   router.post("/ingest/reenrich", requireAuth, async (req, res) => {
     try {
       const sources = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
       const limit = Math.max(1, Number(req.query.limit) || 100);
       const modelOverride = typeof req.query.model === "string" && req.query.model.trim() ? req.query.model.trim() : undefined;
+      const BATCH_ITEMS = Math.max(1, Number(req.query.batchItems) || 6);
+      const BATCH_CHARS = Math.max(2000, Number(req.query.batchChars) || 14000);
       const cfg = getEnrichConfig();
       const queue = reenrichQueue(sources, limit);
-      let done = 0, failed = 0;
+
+      // group the queue into batches by char budget + item cap; a huge SQL rides alone.
+      const batches: (typeof queue)[] = [];
+      let cur: typeof queue = [], curChars = 0;
+      for (const row of queue) {
+        const c = (row.sql ?? "").length;
+        if (cur.length && (cur.length >= BATCH_ITEMS || curChars + c > BATCH_CHARS)) { batches.push(cur); cur = []; curChars = 0; }
+        cur.push(row); curChars += c;
+      }
+      if (cur.length) batches.push(cur);
+
+      let done = 0, failed = 0, calls = 0;
       const errors: string[] = [];
-      const workers = Array.from({ length: Math.min(cfg.concurrency, queue.length) }, async () => {
+      const nowIso = new Date().toISOString();
+      const persist = async (row: typeof queue[number], e: { description: string; intents: string[]; mechanics: string | null }) => {
+        const vecs = await embed(embedTexts(e.description, [], e.intents));
+        updateEnrichment(row.id, { description: e.description, intents: e.intents, mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
+        done++;
+      };
+      const bq = [...batches];
+      const workers = Array.from({ length: Math.min(cfg.concurrency, batches.length) }, async () => {
         for (;;) {
-          const row = queue.shift();
-          if (!row) return;
+          const batch = bq.shift();
+          if (!batch) return;
           try {
-            const e = await enrichOne(row.sql, row.title, { model: modelOverride });
-            const texts = embedTexts(e.description, e.tablesUsed, e.intents);
-            const vecs = await embed(texts);
-            updateEnrichment(row.id, { description: e.description, intents: e.intents, mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
-            done++;
-            if (done % 25 === 0) console.error(`[reenrich] ${done} done (${failed} failed)`);
+            const { results, usage, model } = await enrichAgentBatch(batch.map((r) => ({ sql: r.sql, title: r.title })), { model: modelOverride });
+            calls++;
+            recordUsage({
+              ts: nowIso, model, source: batch[0]?.source, nItems: batch.length,
+              inputTokens: usage.input_tokens, outputTokens: usage.output_tokens,
+              cacheReadTokens: usage.cache_read_input_tokens, cacheCreationTokens: usage.cache_creation_input_tokens,
+              sqlChars: batch.reduce((a, r) => a + (r.sql?.length ?? 0), 0),
+            });
+            for (let i = 0; i < batch.length; i++) await persist(batch[i], results[i]);
           } catch (err: any) {
-            failed++;
-            if (errors.length < 5) errors.push(`${row.id}: ${err?.message ?? err}`.slice(0, 200));
+            // batch failed (bad JSON / count mismatch / model error): retry each row as a batch-of-1
+            for (const row of batch) {
+              try {
+                const { results, usage, model } = await enrichAgentBatch([{ sql: row.sql, title: row.title }], { model: modelOverride });
+                calls++;
+                recordUsage({ ts: nowIso, model, source: row.source, nItems: 1, inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, cacheReadTokens: usage.cache_read_input_tokens, cacheCreationTokens: usage.cache_creation_input_tokens, sqlChars: row.sql?.length ?? 0 });
+                await persist(row, results[0]);
+              } catch (err2: any) {
+                failed++;
+                if (errors.length < 8) errors.push(`${row.id}: ${(err2?.message ?? err2)}`.slice(0, 180));
+              }
+            }
           }
+          if (done % 25 < batch.length) console.error(`[reenrich] ${done} done, ${calls} calls, ${failed} failed`);
         }
       });
       await Promise.all(workers);
-      res.json({ ok: true, provider: cfg.provider, model: modelOverride ?? cfg.model, processed: done, failed, errors, ...reenrichCounts(sources) });
+      res.json({ ok: true, provider: cfg.provider, model: modelOverride ?? cfg.model, batches: batches.length, calls, processed: done, failed, errors, ...reenrichCounts(sources) });
     } catch (e: any) {
       console.error("[ingest] /reenrich error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
@@ -415,6 +453,11 @@ export function createIngestRouter(): express.Router {
   router.get("/ingest/reenrich/status", requireAuth, (req, res) => {
     const sources = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
     try { res.json({ ok: true, ...reenrichCounts(sources) }); }
+    catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
+  });
+  router.get("/ingest/reenrich/cost", requireAuth, (req, res) => {
+    const sources = String(req.query.sources ?? "bip-report,view,otbi").split(",").map((s) => s.trim()).filter(Boolean);
+    try { res.json({ ok: true, ...(usageStats(sources) as object) }); }
     catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
   });
 

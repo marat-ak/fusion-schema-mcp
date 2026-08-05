@@ -63,6 +63,44 @@ export function buildEnrichPrompt(s: SqlSource): { system: string; user: string;
 }
 
 /**
+ * BATCH prompt: analyze several queries in ONE model call (amortizes subprocess spawn + one
+ * request against the rate limit). The model returns { results: [ …one object per query, in
+ * order… ] }. Callers must handle a length mismatch by falling back to per-row.
+ */
+export function buildBatchEnrichPrompt(items: { title: string; sql: string }[]): { system: string; user: string } {
+  const blocks = items.map((it, i) =>
+    `=== QUERY ${i + 1} — ${it.title} ===\n${it.sql}`).join("\n\n");
+  const user =
+    `Analyze the ${items.length} Oracle Fusion SQL queries below. For EACH, produce the three ` +
+    `artifacts (description, intents[3-6], mechanics) plus tablesUsed.\n\n${blocks}\n\n` +
+    `Return ONLY JSON: {"results":[ {"description","intents","mechanics","tablesUsed"}, … ]} with ` +
+    `EXACTLY ${items.length} objects in the SAME ORDER as the queries. mechanics is REQUIRED and ` +
+    `must be substantive (real join bridges A.col->B.col, filter idioms, aggregation techniques, ` +
+    `parameter handling) for each non-trivial query.`;
+  return { system: SYSTEM_DESC, user };
+}
+
+/** Extract a JSON array of enrichment objects from a batch reply ({results:[…]} or a bare array). */
+export function parseBatchReply(text: string, count: number): any[] {
+  const j = extractJson(text);
+  const arr = Array.isArray(j) ? j : Array.isArray(j?.results) ? j.results : null;
+  if (!arr) throw new Error("batch reply missing results array");
+  if (arr.length !== count) throw new Error(`batch reply has ${arr.length} results, expected ${count}`);
+  return arr;
+}
+
+/** Shape one batch-array element into an Enrichment (mirrors parseEnrichReply, no OTBI meta). */
+export function shapeBatchItem(o: any): { description: string; intents: string[]; mechanics: string | null; tablesUsed: string[] } {
+  if (!o || typeof o.description !== "string") throw new Error("batch item missing description");
+  return {
+    description: o.description,
+    intents: Array.isArray(o.intents) ? o.intents.filter((x: unknown) => typeof x === "string" && (x as string).trim()).slice(0, 8) : [],
+    mechanics: typeof o.mechanics === "string" && o.mechanics.trim() ? o.mechanics.trim() : null,
+    tablesUsed: Array.isArray(o.tablesUsed) ? o.tablesUsed.filter((x: unknown) => typeof x === "string") : [],
+  };
+}
+
+/**
  * Lenient JSON extraction — models occasionally wrap the object in ```json fences or append
  * prose after it ("Unexpected non-whitespace character after JSON"). Strip fences, then
  * balance-match the first complete {...} object. Truncated JSON (never balances) still throws.

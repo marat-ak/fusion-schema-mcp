@@ -14,7 +14,7 @@
  */
 import crypto from "node:crypto";
 import type { SqlSource } from "./sources.js";
-import { buildEnrichPrompt, parseEnrichReply } from "./enrichPrompt.js";
+import { buildEnrichPrompt, parseEnrichReply, buildBatchEnrichPrompt, parseBatchReply, shapeBatchItem } from "./enrichPrompt.js";
 import { getEnrichConfig, type EnrichConfig } from "./enrichConfig.js";
 
 export interface EnrichResult {
@@ -48,9 +48,58 @@ const backoff = (n: number, retryAfter?: string | null) =>
     setTimeout(r, retryAfter ? Number(retryAfter) * 1000 : Math.min(30_000, 1000 * 2 ** n)),
   );
 
+/** Token usage of one model call (shape mirrors the Anthropic result usage). */
+export interface CallUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
+}
+const zeroUsage = (): CallUsage => ({ input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 });
+function normUsage(u: any): CallUsage {
+  return {
+    input_tokens: Number(u?.input_tokens ?? 0),
+    output_tokens: Number(u?.output_tokens ?? 0),
+    cache_creation_input_tokens: Number(u?.cache_creation_input_tokens ?? 0),
+    cache_read_input_tokens: Number(u?.cache_read_input_tokens ?? 0),
+  };
+}
+
+/** Batch enrichment through the agent endpoint: N queries, ONE model call. Returns aligned
+ *  EnrichResult[] + the call's token usage (throws on a length/shape mismatch → caller retries). */
+export async function enrichAgentBatch(
+  items: { sql: string; title: string }[], override?: { model?: string },
+): Promise<{ results: EnrichResult[]; usage: CallUsage; model: string }> {
+  const cfg = { ...getEnrichConfig(), ...(override?.model ? { model: override.model } : {}) };
+  const url = cfg.url || "http://fusion-agent:8980/api/internal/llm";
+  const token = process.env.INGEST_TOKEN ?? "";
+  const p = buildBatchEnrichPrompt(items);
+  let lastErr = "unknown";
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ system: p.system, user: p.user, model: cfg.model }),
+      });
+    } catch (e) { lastErr = String(e); await backoff(attempt); continue; }
+    if (res.status === 429 || res.status >= 500) { lastErr = `HTTP ${res.status}`; await backoff(attempt); continue; }
+    const j: any = await res.json();
+    if (!res.ok) throw new Error(`agent-llm HTTP ${res.status}: ${JSON.stringify(j).slice(0, 160)}`);
+    const arr = parseBatchReply(String(j.text ?? ""), items.length); // throws on count mismatch
+    const results = arr.map((o) => {
+      const s = shapeBatchItem(o);
+      return { description: s.description, tablesUsed: s.tablesUsed, lookupTypes: [] as string[], intents: s.intents, mechanics: s.mechanics };
+    });
+    return { results, usage: j.usage ? normUsage(j.usage) : zeroUsage(), model: String(j.model ?? cfg.model ?? "") };
+  }
+  throw new Error(`agent-llm batch exhausted retries (${lastErr})`);
+}
+
 export async function enrichOne(sql: string, title: string, override?: { model?: string }): Promise<EnrichResult> {
   const cfg = { ...getEnrichConfig(), ...(override?.model ? { model: override.model } : {}) };
-  if (!cfg.apiKey && cfg.provider !== "custom") {
+  if (!cfg.apiKey && cfg.provider !== "custom" && cfg.provider !== "agent") {
     throw new Error(`no ENRICH_API_KEY configured for provider "${cfg.provider}"`);
   }
   switch (cfg.provider) {
@@ -58,8 +107,45 @@ export async function enrichOne(sql: string, title: string, override?: { model?:
     case "anthropic": return enrichAnthropic(sql, title, cfg);
     case "openai": return enrichOpenAI(sql, title, cfg);
     case "custom": return enrichCustom(sql, title, cfg);
+    case "agent": return enrichAgent(sql, title, cfg);
     default: throw new Error(`unknown ENRICH_PROVIDER "${cfg.provider}"`);
   }
+}
+
+// ---- agent (fusion-agent internal LLM endpoint) -----------------------------------------------
+// One-shot completion through the Claude Agent SDK inside fusion-agent. This is the ONLY path that
+// reaches premium Claude models on a SUBSCRIPTION credential — direct Messages calls with an OAuth
+// token are 429'd outside the official client (verified live: direct opus-5 429, SDK opus-5 ok).
+// Auth = the shared INGEST_TOKEN service secret. Retries left to the SDK; 502s bubble up as
+// failures and the reenrich queue keeps the row pending.
+async function enrichAgent(sql: string, title: string, cfg: EnrichConfig, tries = 3): Promise<EnrichResult> {
+  const s = asSource(sql, title);
+  const p = buildEnrichPrompt(s);
+  const url = cfg.url || "http://fusion-agent:8980/api/internal/llm";
+  const token = process.env.INGEST_TOKEN ?? "";
+  let lastErr = "unknown";
+  for (let attempt = 0; attempt < tries; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({
+          system: p.system,
+          user: p.user + "\n\nReturn ONLY the JSON object, no prose. The mechanics field is REQUIRED " +
+            "and must be substantive: real join bridges (A.col -> B.col), filter idioms, aggregation " +
+            "techniques and parameter handling from THIS SQL.",
+          model: cfg.model,
+        }),
+      });
+    } catch (e) { lastErr = String(e); await backoff(attempt); continue; }
+    if (res.status === 429 || res.status >= 500) { lastErr = `HTTP ${res.status}`; await backoff(attempt); continue; }
+    const j: any = await res.json();
+    if (!res.ok) throw new Error(`agent-llm HTTP ${res.status}: ${JSON.stringify(j).slice(0, 160)}`);
+    const e = parseEnrichReply(String(j.text ?? ""), s);
+    return { description: e.description, tablesUsed: e.tablesUsed, lookupTypes: e.lookupTypes, intents: e.intents ?? [], mechanics: e.mechanics ?? null };
+  }
+  throw new Error(`agent-llm exhausted retries (${lastErr})`);
 }
 
 // ---- gemini (IMPLEMENTED) ---------------------------------------------------------------------

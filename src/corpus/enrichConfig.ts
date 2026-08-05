@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-export type EnrichProvider = "gemini" | "anthropic" | "openai" | "custom";
+export type EnrichProvider = "gemini" | "anthropic" | "openai" | "custom" | "agent";
 
 export interface EnrichConfig {
   provider: EnrichProvider;
@@ -69,7 +69,8 @@ export function getEnrichConfig(): EnrichConfig {
 
   const model = (process.env.ENRICH_MODEL ?? "").trim() ||
     (provider === "gemini" ? "gemini-flash-lite-latest" : undefined);
-  const url = (process.env.ENRICH_URL ?? "").trim() || undefined;
+  const url = (process.env.ENRICH_URL ?? "").trim() ||
+    (provider === "agent" ? "http://fusion-agent:8980/api/internal/llm" : undefined);
 
   return { provider, apiKey, model, url, concurrency };
 }

@@ -110,6 +110,81 @@ export function reenrichCounts(sources: string[]): { total: number; done: number
   return { total, done, pending: total - done };
 }
 
+// ---- enrichment usage accounting (per model call) ----
+// One row per LLM call (a batch of `n_items` SQLs), so cost analysis is exact: sum tokens, derive
+// per-SQL averages, project the remaining queue and the full corpus at published API rates.
+function ensureUsage(d: Database.Database): void {
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS enrich_usage (
+      ts TEXT NOT NULL, model TEXT NOT NULL, source TEXT, n_items INTEGER NOT NULL,
+      input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+      cache_read_tokens INTEGER NOT NULL, cache_creation_tokens INTEGER NOT NULL,
+      sql_chars INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_usage_model ON enrich_usage(model);
+  `);
+}
+
+export interface UsageRecord {
+  ts: string; model: string; source?: string; nItems: number;
+  inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number;
+  sqlChars?: number;
+}
+export function recordUsage(u: UsageRecord): void {
+  const d = db();
+  ensureUsage(d);
+  d.prepare(`INSERT INTO enrich_usage
+    (ts, model, source, n_items, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, sql_chars)
+    VALUES (?,?,?,?,?,?,?,?,?)`).run(
+    u.ts, u.model, u.source ?? null, u.nItems, u.inputTokens, u.outputTokens,
+    u.cacheReadTokens, u.cacheCreationTokens, u.sqlChars ?? null,
+  );
+}
+
+// Published API pricing per 1M tokens (USD). Cache reads billed ~10% of input; cache writes ~1.25x.
+const PRICE: Record<string, { in: number; out: number }> = {
+  "claude-opus-5": { in: 5, out: 25 }, "claude-opus-4-8": { in: 5, out: 25 },
+  "claude-sonnet-5": { in: 3, out: 15 }, "claude-haiku-4-5": { in: 1, out: 5 },
+  "claude-fable-5": { in: 10, out: 50 },
+};
+function dollars(model: string, inTok: number, outTok: number, cacheRead: number): number {
+  const p = PRICE[model] ?? PRICE["claude-opus-5"];
+  return ((inTok - cacheRead) * p.in + cacheRead * p.in * 0.1 + outTok * p.out) / 1e6;
+}
+
+/** Aggregate usage + project cost for the remaining reenrich queue and the whole corpus. */
+export function usageStats(sources: string[]): unknown {
+  const d = db();
+  ensureUsage(d);
+  const perModel = d.prepare(`
+    SELECT model, COUNT(*) calls, SUM(n_items) items,
+      SUM(input_tokens) inp, SUM(output_tokens) outp,
+      SUM(cache_read_tokens) cread, SUM(cache_creation_tokens) ccreate
+    FROM enrich_usage GROUP BY model`).all() as any[];
+  const corpusTotal = (d.prepare("SELECT COUNT(*) c FROM report_queries").get() as any).c;
+  const { total: srcTotal, done, pending } = reenrichCounts(sources);
+
+  const models = perModel.map((m) => {
+    const perSqlIn = m.items ? m.inp / m.items : 0;
+    const perSqlOut = m.items ? m.outp / m.items : 0;
+    const spent = dollars(m.model, m.inp, m.outp, m.cread);
+    const perSql = m.items ? spent / m.items : 0;
+    return {
+      model: m.model, calls: m.calls, sqlsEnriched: m.items,
+      inputTokens: m.inp, outputTokens: m.outp, cacheReadTokens: m.cread,
+      perSqlInputTokens: Math.round(perSqlIn), perSqlOutputTokens: Math.round(perSqlOut),
+      apiCostSpentUsd: +spent.toFixed(2), apiCostPerSqlUsd: +perSql.toFixed(5),
+      projectRemainingQueueUsd: +(perSql * pending).toFixed(2),
+      projectWholeCorpusUsd: +(perSql * corpusTotal).toFixed(2),
+    };
+  });
+  return {
+    note: "apiCost = equivalent cost at published API rates (subscription runs are $0 marginal). Projections use the per-SQL average of THIS model.",
+    queue: { sources, total: srcTotal, done, pending, corpusTotal },
+    models,
+  };
+}
+
 // ---- table -> Fusion module lookup (authoritative signal for classifyDomain) ----
 let _qModule: Database.Statement | null = null;
 const _moduleCache = new Map<string, string | undefined>();
