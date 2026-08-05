@@ -383,8 +383,31 @@ export function createIngestRouter(): express.Router {
   // queue is `mechanics IS NULL`, so crashes / usage-window pauses lose nothing.
   //   POST /ingest/reenrich?sources=bip-report,view&limit=300&model=claude-opus-5&batchItems=6&batchChars=14000
   //   GET  /ingest/reenrich/status?sources=…    GET /ingest/reenrich/cost?sources=…
+  // Subscription-usage guard: refuse to burn the window past ENRICH_USAGE_STOP % (default 90) so
+  // bulk enrichment never locks the owner out of interactive Claude use. Reads the remaining-usage
+  // endpoint on fusion-agent; unreachable/unconfigured => no guard (fail-open, the 429 backoff
+  // still protects).
+  async function usageGuard(): Promise<{ blocked: boolean; utilization?: number }> {
+    const stopAt = Number(process.env.ENRICH_USAGE_STOP ?? 90);
+    if (!(stopAt > 0)) return { blocked: false };
+    try {
+      const base = (process.env.ENRICH_URL ?? "http://fusion-agent:8980/api/internal/llm").replace(/\/api\/internal\/llm.*$/, "");
+      const r = await fetch(`${base}/api/internal/limits`, { headers: { authorization: `Bearer ${process.env.INGEST_TOKEN ?? ""}` } });
+      if (!r.ok) return { blocked: false };
+      const j: any = await r.json();
+      const u = Number(j?.fiveHour?.utilizationPct ?? 0);
+      return { blocked: u >= stopAt, utilization: u };
+    } catch { return { blocked: false }; }
+  }
+
   router.post("/ingest/reenrich", requireAuth, async (req, res) => {
     try {
+      const guard = await usageGuard();
+      if (guard.blocked) {
+        const sources0 = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
+        res.json({ ok: true, skipped: "usage-guard", fiveHourUtilizationPct: guard.utilization, processed: 0, failed: 0, ...reenrichCounts(sources0) });
+        return;
+      }
       const sources = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
       const limit = Math.max(1, Number(req.query.limit) || 100);
       const modelOverride = typeof req.query.model === "string" && req.query.model.trim() ? req.query.model.trim() : undefined;
