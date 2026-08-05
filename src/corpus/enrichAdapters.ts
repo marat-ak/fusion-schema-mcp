@@ -21,6 +21,9 @@ export interface EnrichResult {
   description: string;
   tablesUsed: string[];
   lookupTypes: string[];
+  /** v2: NL retrieval hooks + once-analyzed mechanics playbook (empty/null from legacy replies). */
+  intents: string[];
+  mechanics: string | null;
 }
 
 /**
@@ -45,8 +48,8 @@ const backoff = (n: number, retryAfter?: string | null) =>
     setTimeout(r, retryAfter ? Number(retryAfter) * 1000 : Math.min(30_000, 1000 * 2 ** n)),
   );
 
-export async function enrichOne(sql: string, title: string): Promise<EnrichResult> {
-  const cfg = getEnrichConfig();
+export async function enrichOne(sql: string, title: string, override?: { model?: string }): Promise<EnrichResult> {
+  const cfg = { ...getEnrichConfig(), ...(override?.model ? { model: override.model } : {}) };
   if (!cfg.apiKey && cfg.provider !== "custom") {
     throw new Error(`no ENRICH_API_KEY configured for provider "${cfg.provider}"`);
   }
@@ -89,7 +92,7 @@ async function enrichGemini(sql: string, title: string, cfg: EnrichConfig, tries
     if (!res.ok) throw new Error(`gemini HTTP ${res.status}: ${JSON.stringify(j).slice(0, 160)}`);
     const text = j.candidates?.[0]?.content?.parts?.map((x: any) => x.text).join("") ?? "";
     const e = parseEnrichReply(text, s);
-    return { description: e.description, tablesUsed: e.tablesUsed, lookupTypes: e.lookupTypes };
+    return { description: e.description, tablesUsed: e.tablesUsed, lookupTypes: e.lookupTypes, intents: e.intents ?? [], mechanics: e.mechanics ?? null };
   }
   throw new Error(`gemini exhausted retries (${lastErr})`);
 }
@@ -100,7 +103,7 @@ async function enrichGemini(sql: string, title: string, cfg: EnrichConfig, tries
 //   headers: "anthropic-version: 2023-06-01", "content-type: application/json"
 //     auth: key starting "sk-ant-"  -> "x-api-key: <key>"
 //           otherwise (OAuth token) -> "Authorization: Bearer <key>"
-//   body: { model: cfg.model, max_tokens: 1024, system: <SYSTEM_DESC from enrichPrompt>,
+//   body: { model: cfg.model, max_tokens: 2048, system: <SYSTEM_DESC from enrichPrompt>,
 //           messages: [{ role: "user", content: <buildEnrichPrompt().user> }] }
 //   parse: response.content[0].text -> JSON { description, tablesUsed, lookupTypes }
 //          (reuse parseEnrichReply for lenient extraction).
@@ -108,15 +111,20 @@ async function enrichAnthropic(sql: string, title: string, cfg: EnrichConfig, tr
   const s = asSource(sql, title);
   const p = buildEnrichPrompt(s);
   const base = (cfg.url || "https://api.anthropic.com").replace(/\/$/, "");
-  // sk-ant- keys use x-api-key; anything else is treated as an OAuth bearer token.
-  const auth: Record<string, string> = cfg.apiKey.startsWith("sk-ant-")
+  // sk-ant-api* keys use x-api-key; OAuth (subscription) tokens are sk-ant-oat* / anything else
+  // and need Bearer + the oauth beta header on direct Messages calls.
+  const isApiKey = cfg.apiKey.startsWith("sk-ant-") && !cfg.apiKey.startsWith("sk-ant-oat");
+  const auth: Record<string, string> = isApiKey
     ? { "x-api-key": cfg.apiKey }
-    : { authorization: `Bearer ${cfg.apiKey}` };
+    : { authorization: `Bearer ${cfg.apiKey}`, "anthropic-beta": "oauth-2025-04-20" };
   const body = {
     model: cfg.model || "claude-haiku-4-5",
-    max_tokens: 1024,
+    max_tokens: 4096, // v2 output (description+intents+mechanics) on huge SQLs must not truncate mid-JSON
     system: p.system,
-    messages: [{ role: "user", content: p.user }],
+    messages: [{ role: "user", content: p.user + "\n\nReturn ONLY the JSON object, no prose before or after. " +
+      "The mechanics field is REQUIRED and must be substantive: extract the actual join bridges " +
+      "(A.col -> B.col with real table names), filter idioms, hierarchy/aggregation techniques and " +
+      "parameter handling from THIS SQL — an empty or trivial mechanics on a non-trivial query is a failure." }],
   };
   let lastErr = "unknown";
   for (let attempt = 0; attempt < tries; attempt++) {
@@ -133,7 +141,7 @@ async function enrichAnthropic(sql: string, title: string, cfg: EnrichConfig, tr
     if (!res.ok) throw new Error(`anthropic HTTP ${res.status}: ${JSON.stringify(j).slice(0, 160)}`);
     const text = (j.content ?? []).map((c: any) => c.text ?? "").join("");
     const e = parseEnrichReply(text, s);
-    return { description: e.description, tablesUsed: e.tablesUsed, lookupTypes: e.lookupTypes };
+    return { description: e.description, tablesUsed: e.tablesUsed, lookupTypes: e.lookupTypes, intents: e.intents ?? [], mechanics: e.mechanics ?? null };
   }
   throw new Error(`anthropic exhausted retries (${lastErr})`);
 }
@@ -170,7 +178,7 @@ async function enrichOpenAI(sql: string, title: string, cfg: EnrichConfig, tries
     if (!res.ok) throw new Error(`openai HTTP ${res.status}: ${JSON.stringify(j).slice(0, 160)}`);
     const text = j.choices?.[0]?.message?.content ?? "";
     const e = parseEnrichReply(text, s);
-    return { description: e.description, tablesUsed: e.tablesUsed, lookupTypes: e.lookupTypes };
+    return { description: e.description, tablesUsed: e.tablesUsed, lookupTypes: e.lookupTypes, intents: e.intents ?? [], mechanics: e.mechanics ?? null };
   }
   throw new Error(`openai exhausted retries (${lastErr})`);
 }
@@ -196,5 +204,7 @@ async function enrichCustom(sql: string, title: string, cfg: EnrichConfig): Prom
     description: j.description,
     tablesUsed: Array.isArray(j.tablesUsed) ? j.tablesUsed : [],
     lookupTypes: Array.isArray(j.lookupTypes) ? j.lookupTypes : [],
+    intents: Array.isArray(j.intents) ? j.intents : [],
+    mechanics: typeof j.mechanics === "string" ? j.mechanics : null,
   };
 }

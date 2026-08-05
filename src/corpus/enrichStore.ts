@@ -18,6 +18,8 @@ export type EnrichRow = {
 export type Enrichment = {
   cleanSql: string; description: string; tablesUsed: string[];
   lookupTypes: string[]; joins: any[]; filters: string[]; securityPredicate: string | null;
+  /** v2: NL retrieval hooks (each embedded separately) + the once-analyzed mechanics playbook. */
+  intents?: string[]; mechanics?: string | null;
 };
 
 const J = (v: unknown) => JSON.stringify(v ?? null);
@@ -35,6 +37,8 @@ export function openEnrichStore(dbPath: string = DEFAULT) {
     );`);
   // migrate older stores that predate the reports column
   try { db.exec("ALTER TABLE enrich ADD COLUMN reports TEXT"); } catch { /* already present */ }
+  try { db.exec("ALTER TABLE enrich ADD COLUMN intents TEXT"); } catch { /* already present */ }
+  try { db.exec("ALTER TABLE enrich ADD COLUMN mechanics TEXT"); } catch { /* already present */ }
 
   const qHash = db.prepare("SELECT source_hash, description FROM enrich WHERE id = ?");
   const qReports = db.prepare("SELECT reports FROM enrich WHERE id = ?");
@@ -50,7 +54,8 @@ export function openEnrichStore(dbPath: string = DEFAULT) {
   const updEnr = db.prepare(`
     UPDATE enrich SET clean_sql=@cleanSql, description=@description,
       tables_used=@tablesUsed, lookup_types=@lookupTypes, joins=@joins,
-      filters=@filters, security_predicate=@securityPredicate WHERE id=@id`);
+      filters=@filters, security_predicate=@securityPredicate,
+      intents=@intents, mechanics=@mechanics WHERE id=@id`);
   const qGet = db.prepare("SELECT * FROM enrich WHERE id = ?");
   const qAll = db.prepare("SELECT * FROM enrich");
 
@@ -91,7 +96,8 @@ export function openEnrichStore(dbPath: string = DEFAULT) {
     setEnrichment(id: string, e: Enrichment) {
       updEnr.run({ id, cleanSql: e.cleanSql, description: e.description,
         tablesUsed: J(e.tablesUsed), lookupTypes: J(e.lookupTypes),
-        joins: J(e.joins), filters: J(e.filters), securityPredicate: e.securityPredicate });
+        joins: J(e.joins), filters: J(e.filters), securityPredicate: e.securityPredicate,
+        intents: J(e.intents ?? []), mechanics: e.mechanics ?? null });
     },
     get(id: string) { return toRow(qGet.get(id)); },
     all(): EnrichRow[] { return (qAll.all() as any[]).map(toRow); },

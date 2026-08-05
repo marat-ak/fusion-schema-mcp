@@ -38,7 +38,8 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import express from "express";
-import { corpusCount, materialize, materializedIds, exportCorpus, importCorpus, type MaterializeRow, type ImportRow } from "./corpus/ingestStore.js";
+import { corpusCount, materialize, materializedIds, exportCorpus, importCorpus, updateEnrichment, reenrichQueue, reenrichCounts, embedTexts, type MaterializeRow, type ImportRow } from "./corpus/ingestStore.js";
+import { embed } from "./corpus/embed.js";
 import { extractModels } from "./corpus/extractArchive.js";
 import { openEnrichStore, type EnrichStore } from "./corpus/enrichStore.js";
 import { hashSql, hashSqlNormalized, type SqlSource } from "./corpus/sources.js";
@@ -146,6 +147,7 @@ async function runEnrich(store: EnrichStore, limit?: number): Promise<{ enriched
         try {
           const e = await enrichOne(row.originalSql, row.title);
           store.setEnrichment(row.id, {
+            intents: e.intents, mechanics: e.mechanics,
             cleanSql: row.originalSql, description: e.description,
             tablesUsed: e.tablesUsed, lookupTypes: e.lookupTypes,
             joins: [], filters: [], securityPredicate: null,
@@ -231,6 +233,7 @@ async function runMaterialize(store: EnrichStore, force = false): Promise<{ inse
       description: r.description ?? "", tablesUsed: r.tablesUsed, lookupTypes: r.lookupTypes,
       joins: r.joins, filters: r.filters, securityPredicate: r.securityPredicate,
       source: "bip-report", reports: r.reports,
+      intents: (r as any).intents ?? [], mechanics: (r as any).mechanics ?? null,
     });
   }
   if (rows.length === 0) return { inserted: 0, replaced: 0 };
@@ -367,6 +370,52 @@ export function createIngestRouter(): express.Router {
       console.error("[ingest] /adf-extensions error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
     }
+  });
+
+  // ---- v2 re-enrichment over the MATERIALIZED corpus ----
+  // Walks report_queries rows of the given sources that still lack `mechanics`, runs the v2
+  // enrichment ({description, intents[], mechanics}) via the configured provider, and rewrites the
+  // row in place with fresh vectors (legacy + multi). Resumable by design: the queue is simply
+  // `mechanics IS NULL`, so crashes/usage-window pauses lose nothing.
+  //   POST /ingest/reenrich?sources=bip-report,view&limit=200
+  //   GET  /ingest/reenrich/status?sources=bip-report,view
+  router.post("/ingest/reenrich", requireAuth, async (req, res) => {
+    try {
+      const sources = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
+      const limit = Math.max(1, Number(req.query.limit) || 100);
+      const modelOverride = typeof req.query.model === "string" && req.query.model.trim() ? req.query.model.trim() : undefined;
+      const cfg = getEnrichConfig();
+      const queue = reenrichQueue(sources, limit);
+      let done = 0, failed = 0;
+      const errors: string[] = [];
+      const workers = Array.from({ length: Math.min(cfg.concurrency, queue.length) }, async () => {
+        for (;;) {
+          const row = queue.shift();
+          if (!row) return;
+          try {
+            const e = await enrichOne(row.sql, row.title, { model: modelOverride });
+            const texts = embedTexts(e.description, e.tablesUsed, e.intents);
+            const vecs = await embed(texts);
+            updateEnrichment(row.id, { description: e.description, intents: e.intents, mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
+            done++;
+            if (done % 25 === 0) console.error(`[reenrich] ${done} done (${failed} failed)`);
+          } catch (err: any) {
+            failed++;
+            if (errors.length < 5) errors.push(`${row.id}: ${err?.message ?? err}`.slice(0, 200));
+          }
+        }
+      });
+      await Promise.all(workers);
+      res.json({ ok: true, provider: cfg.provider, model: modelOverride ?? cfg.model, processed: done, failed, errors, ...reenrichCounts(sources) });
+    } catch (e: any) {
+      console.error("[ingest] /reenrich error", e);
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+  router.get("/ingest/reenrich/status", requireAuth, (req, res) => {
+    const sources = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
+    try { res.json({ ok: true, ...reenrichCounts(sources) }); }
+    catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
   });
 
   // App Composer Configuration Report XML — merges DISPLAY NAMES onto the ADF registry and adds

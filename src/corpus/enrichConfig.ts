@@ -52,6 +52,15 @@ export function getEnrichConfig(): EnrichConfig {
   const concurrency = Math.max(1, Number(process.env.ENRICH_CONCURRENCY ?? 8) || 8);
 
   let apiKey = envOrDotEnv("ENRICH_API_KEY");
+  // ENRICH_CREDS_FILE: JSON {mode,value} (the fusion-agent container credential, e.g. a Claude
+  // subscription OAuth token) mounted read-only — lets enrichment ride the Max subscription
+  // without copying the secret into env/compose.
+  if (!apiKey) {
+    const credsFile = (process.env.ENRICH_CREDS_FILE ?? "").trim();
+    if (credsFile && fs.existsSync(credsFile)) {
+      try { apiKey = String(JSON.parse(fs.readFileSync(credsFile, "utf8")).value ?? "").trim(); } catch { /* fall through */ }
+    }
+  }
   if (!apiKey) {
     if (provider === "gemini") apiKey = envOrDotEnv("GOOGLE_STUDIO_API_KEY");
     else if (provider === "anthropic") apiKey = envOrDotEnv("ANTHROPIC_API_KEY");

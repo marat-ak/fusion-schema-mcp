@@ -39,8 +39,75 @@ function db(): Database.Database {
   // blobs without re-embedding). Added at runtime so pre-split/legacy DBs pick them up without recompile.
   try { d.exec("ALTER TABLE report_queries ADD COLUMN reports TEXT"); } catch { /* already present */ }
   try { d.exec("ALTER TABLE report_queries ADD COLUMN embedding BLOB"); } catch { /* already present */ }
+  // v2 enrichment: NL intents (JSON array) + the once-analyzed mechanics playbook.
+  try { d.exec("ALTER TABLE report_queries ADD COLUMN intents TEXT"); } catch { /* already present */ }
+  try { d.exec("ALTER TABLE report_queries ADD COLUMN mechanics TEXT"); } catch { /* already present */ }
+  // multi-vector index: one row per intent phrase (plus one for description+tables), all pointing
+  // at the query rowid via +qrowid. KNN here matches the closest PHRASING; callers dedup by qrowid.
+  d.exec("CREATE VIRTUAL TABLE IF NOT EXISTS report_queries_vec_multi USING vec0(embedding FLOAT[384], +qrowid INTEGER)");
   _db = d;
   return d;
+}
+
+/** Texts embedded for one query row: description(+tables) first, then each NL intent phrase. */
+export function embedTexts(description: string, tables: string[], intents: string[]): string[] {
+  return [`${description}\nTables: ${tables.join(", ")}`, ...intents.filter((s) => s && s.trim())];
+}
+
+/** Replace this query's multi-vector rows with freshly computed ones. */
+function replaceMultiVec(d: Database.Database, qrowid: number | bigint, vecs: Float32Array[]): void {
+  const rid = BigInt(qrowid); // vec0 rejects JS numbers ("Only integers are allowed") — bind BigInt
+  d.prepare("DELETE FROM report_queries_vec_multi WHERE qrowid = ?").run(rid);
+  const ins = d.prepare("INSERT INTO report_queries_vec_multi (embedding, qrowid) VALUES (?, ?)");
+  for (const v of vecs) ins.run(Buffer.from(v.buffer), rid);
+}
+
+/**
+ * v2 re-enrichment writer: update one MATERIALIZED corpus row in place with the new
+ * {description, intents, mechanics} and rebuild its vectors (legacy desc vector + multi-vector).
+ * Embeddings are computed by the CALLER (batched) and passed in aligned with embedTexts() order.
+ */
+export function updateEnrichment(
+  id: string,
+  e: { description: string; intents: string[]; mechanics: string | null; cleanSql?: string | null },
+  vecs: Float32Array[],
+): boolean {
+  const d = db();
+  const row = d.prepare("SELECT rowid FROM report_queries WHERE id = ?").get(id) as { rowid: number } | undefined;
+  if (!row) return false;
+  const tx = d.transaction(() => {
+    d.prepare(
+      `UPDATE report_queries SET description = ?, intents = ?, mechanics = ?${e.cleanSql ? ", clean_sql = ?" : ""}, embedding = ? WHERE rowid = ?`,
+    ).run(
+      ...(e.cleanSql
+        ? [e.description, JSON.stringify(e.intents), e.mechanics, e.cleanSql, Buffer.from(vecs[0].buffer), row.rowid]
+        : [e.description, JSON.stringify(e.intents), e.mechanics, Buffer.from(vecs[0].buffer), row.rowid]),
+    );
+    d.prepare("DELETE FROM report_queries_vec WHERE rowid = ?").run(BigInt(row.rowid));
+    d.prepare("INSERT INTO report_queries_vec (rowid, embedding) VALUES (?, ?)").run(BigInt(row.rowid), Buffer.from(vecs[0].buffer));
+    replaceMultiVec(d, row.rowid, vecs);
+  });
+  tx();
+  return true;
+}
+
+/** Rows still lacking v2 enrichment for the given sources — the re-enrich worker's queue. */
+export function reenrichQueue(sources: string[], limit: number): { id: string; title: string; sql: string; source: string }[] {
+  const d = db();
+  const ph = sources.map(() => "?").join(",");
+  return d.prepare(
+    `SELECT id, title, COALESCE(clean_sql, original_sql) AS sql, source
+     FROM report_queries WHERE source IN (${ph}) AND mechanics IS NULL
+     ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC LIMIT ?`,
+  ).all(...sources, limit) as any[];
+}
+
+export function reenrichCounts(sources: string[]): { total: number; done: number; pending: number } {
+  const d = db();
+  const ph = sources.map(() => "?").join(",");
+  const total = (d.prepare(`SELECT COUNT(*) c FROM report_queries WHERE source IN (${ph})`).get(...sources) as any).c;
+  const done = (d.prepare(`SELECT COUNT(*) c FROM report_queries WHERE source IN (${ph}) AND mechanics IS NOT NULL`).get(...sources) as any).c;
+  return { total, done, pending: total - done };
 }
 
 // ---- table -> Fusion module lookup (authoritative signal for classifyDomain) ----
@@ -200,6 +267,8 @@ export interface MaterializeRow {
   securityPredicate?: string | null;
   source?: string;
   reports?: unknown[]; // source reports referencing this (deduped) SQL
+  intents?: string[];
+  mechanics?: string | null;
 }
 
 /** ids already present in report_queries — lets the materializer skip already-searchable rows. */
@@ -217,18 +286,26 @@ export async function materialize(rows: MaterializeRow[]): Promise<{ inserted: n
   const clean = rows.filter((r) => r && r.id && typeof r.description === "string" && /\S/.test(r.description));
   if (clean.length === 0) return { inserted: 0, replaced: 0 };
   const d = db();
-  const vecs = await embed(clean.map((r) => r.description));
+  // one embed batch covering every row's texts (description+tables first, then each intent)
+  const perRow = clean.map((r) => embedTexts(r.description, r.tablesUsed ?? [], r.intents ?? []));
+  const flat = perRow.flat();
+  const flatVecs = await embed(flat);
+  const offsets: number[] = [];
+  perRow.reduce((off, texts, i) => { offsets[i] = off; return off + texts.length; }, 0);
 
   const qById = d.prepare("SELECT rowid FROM report_queries WHERE id = ?");
   const delRq = d.prepare("DELETE FROM report_queries WHERE rowid = ?");
   const delVec = d.prepare("DELETE FROM report_queries_vec WHERE rowid = ?");
+  const delMulti = d.prepare("DELETE FROM report_queries_vec_multi WHERE qrowid = ?");
   const insRq = d.prepare(
     `INSERT INTO report_queries
        (rowid, id, source, title, original_sql, clean_sql, description,
-        tables_used, joins, filters, lookup_types, security_predicate, approved, reports, embedding)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`,
+        tables_used, joins, filters, lookup_types, security_predicate, approved, reports, embedding,
+        intents, mechanics)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?)`,
   );
   const insVec = d.prepare("INSERT INTO report_queries_vec (rowid, embedding) VALUES (?, ?)");
+  const insMulti = d.prepare("INSERT INTO report_queries_vec_multi (embedding, qrowid) VALUES (?, ?)");
   const maxRowid = d.prepare("SELECT COALESCE(MAX(rowid), 0) AS m FROM report_queries");
 
   let inserted = 0;
@@ -237,16 +314,19 @@ export async function materialize(rows: MaterializeRow[]): Promise<{ inserted: n
     let next = (maxRowid.get() as any).m as number; // new rowids strictly exceed all existing → no collisions
     clean.forEach((r, i) => {
       const prev = qById.get(r.id) as { rowid: number } | undefined;
-      if (prev) { delVec.run(prev.rowid); delRq.run(prev.rowid); replaced++; }
+      if (prev) { delVec.run(prev.rowid); delMulti.run(prev.rowid); delRq.run(prev.rowid); replaced++; }
       const rowid = BigInt(++next);
-      const emb = Buffer.from(vecs[i].buffer);
+      const rowVecs = perRow[i].map((_t, k) => flatVecs[offsets[i] + k]);
+      const emb = Buffer.from(rowVecs[0].buffer);
       insRq.run(
         rowid, r.id, r.source ?? "bip-report", r.title, r.originalSql, r.cleanSql ?? r.originalSql, r.description,
         JSON.stringify(r.tablesUsed ?? []), JSON.stringify(r.joins ?? []),
         JSON.stringify(r.filters ?? []), JSON.stringify(r.lookupTypes ?? []),
         r.securityPredicate ?? null, JSON.stringify(r.reports ?? []), emb,
+        JSON.stringify(r.intents ?? []), r.mechanics ?? null,
       );
       insVec.run(rowid, emb);
+      for (const v of rowVecs) insMulti.run(Buffer.from(v.buffer), rowid);
       inserted++;
     });
   });

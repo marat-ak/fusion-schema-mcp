@@ -323,31 +323,53 @@ export function getRelatedTables(table: string) {
 }
 
 const SRC_OVERFETCH = 40;
-let _vecStmts: { qVec: any; qVecSrc: any } | null = null;
+const RQ_COLS = `rq.id, rq.source, rq.title, rq.description, rq.clean_sql,
+                rq.tables_used, rq.joins, rq.filters, rq.lookup_types,
+                rq.intents, rq.mechanics`;
+let _vecStmts: { qVec: any; qVecSrc: any; qMulti: any; qMultiSrc: any; multiCount: any } | null = null;
 function vecStmts() {
   if (!_vecStmts) {
     loadVec(db);
     _vecStmts = {
       qVec: db.prepare(
-        `SELECT rq.id, rq.source, rq.title, rq.description, rq.clean_sql,
-                rq.tables_used, rq.joins, rq.filters, rq.lookup_types,
-                v.distance AS distance
+        `SELECT ${RQ_COLS}, v.distance AS distance
          FROM report_queries_vec v
          JOIN report_queries rq ON rq.rowid = v.rowid
          WHERE v.embedding MATCH ? AND k = ?
          ORDER BY v.distance`),
       qVecSrc: db.prepare(
-        `SELECT rq.id, rq.source, rq.title, rq.description, rq.clean_sql,
-                rq.tables_used, rq.joins, rq.filters, rq.lookup_types,
-                v.distance AS distance
+        `SELECT ${RQ_COLS}, v.distance AS distance
          FROM report_queries_vec v
          JOIN report_queries rq ON rq.rowid = v.rowid
          WHERE v.embedding MATCH ? AND k = ? AND rq.source = ?
          ORDER BY v.distance
          LIMIT ?`),
+      // multi-vector KNN: one vec row per intent PHRASING -> dedup by query row in JS
+      qMulti: db.prepare(
+        `SELECT ${RQ_COLS}, rq.rowid AS qrid, v.distance AS distance
+         FROM report_queries_vec_multi v
+         JOIN report_queries rq ON rq.rowid = v.qrowid
+         WHERE v.embedding MATCH ? AND k = ?
+         ORDER BY v.distance`),
+      qMultiSrc: db.prepare(
+        `SELECT ${RQ_COLS}, rq.rowid AS qrid, v.distance AS distance
+         FROM report_queries_vec_multi v
+         JOIN report_queries rq ON rq.rowid = v.qrowid
+         WHERE v.embedding MATCH ? AND k = ? AND rq.source = ?
+         ORDER BY v.distance
+         LIMIT ?`),
+      multiCount: db.prepare("SELECT COUNT(*) AS c FROM report_queries_vec_multi"),
     };
   }
   return _vecStmts;
+}
+
+/** Full SQL only when it is small enough to be worth inlining; big ones ship mechanics instead. */
+const CLEAN_SQL_INLINE_CAP = Number(process.env.CLEAN_SQL_INLINE_CAP ?? 6000);
+function sqlPayload(cleanSql: string | null): { cleanSql?: string; cleanSqlOmitted?: true; sqlChars?: number } {
+  if (!cleanSql) return {};
+  if (cleanSql.length <= CLEAN_SQL_INLINE_CAP) return { cleanSql };
+  return { cleanSqlOmitted: true, sqlChars: cleanSql.length };
 }
 
 // If the top matches split across >=2 business domains whose best scores are within this margin,
@@ -407,13 +429,23 @@ export async function findSimilarQueries(
   const limit = opts.limit ?? 5;
   const [vec] = await embed([intent]);
   const blob = Buffer.from(vec.buffer);
-  const { qVec, qVecSrc } = vecStmts();
+  const { qVec, qVecSrc, qMulti, qMultiSrc, multiCount } = vecStmts();
   const K = Math.max(limit * 6, 24); // overfetch so we can classify + domain-filter
-  const rows = (opts.source
-    ? qVecSrc.all(blob, K, opts.source, K)
-    : qVec.all(blob, K)) as any[];
+  // Prefer the multi-vector index (per-intent phrasings) once populated; dedup phrasing hits by
+  // query row keeping the BEST distance. Fall back to the legacy 1-vector index when empty.
+  let rawRows: any[];
+  const useMulti = ((multiCount.get() as any)?.c ?? 0) > 0;
+  if (useMulti) {
+    const KM = K * 3; // several phrasings of the same query may occupy top slots
+    const hits = (opts.source ? qMultiSrc.all(blob, KM, opts.source, KM) : qMulti.all(blob, KM)) as any[];
+    const seen = new Map<number, any>();
+    for (const h of hits) if (!seen.has(h.qrid)) seen.set(h.qrid, h);
+    rawRows = [...seen.values()].slice(0, K);
+  } else {
+    rawRows = (opts.source ? qVecSrc.all(blob, K, opts.source, K) : qVec.all(blob, K)) as any[];
+  }
 
-  const enriched = rows.map((r) => {
+  const enriched = rawRows.map((r) => {
     const tablesUsed = JSON.parse(r.tables_used ?? "[]");
     return {
       id: r.id, source: r.source, title: r.title, description: r.description,
@@ -421,14 +453,25 @@ export async function findSimilarQueries(
       joins: JSON.parse(r.joins ?? "[]"),
       filters: JSON.parse(r.filters ?? "[]"),
       lookupTypes: JSON.parse(r.lookup_types ?? "[]"),
+      intents: JSON.parse(r.intents ?? "[]"),
+      mechanics: r.mechanics ?? null,
       score: 1 - (r.distance * r.distance) / 2,
       domain: classifyDomain(tablesUsed, r.title, moduleOf),
     };
   });
 
+  // mechanics-first payload: the once-analyzed playbook always ships; full SQL only when small
+  // (large exemplars: read mechanics, then getReportQuery(title) for the verbatim SQL if needed).
+  const toMatch = (m: any) => ({
+    id: m.id, source: m.source, title: m.title, description: m.description,
+    mechanics: m.mechanics, tablesUsed: m.tablesUsed, joins: m.joins, filters: m.filters,
+    lookupTypes: m.lookupTypes, domain: m.domain, score: +m.score.toFixed(3),
+    ...sqlPayload(m.cleanSql),
+  });
+
   // Targeted second call: caller already resolved the domain -> full examples for that domain.
   if (opts.domain) {
-    const matches = enriched.filter((m) => domainMatches(m.domain, opts.domain!)).slice(0, limit);
+    const matches = enriched.filter((m) => domainMatches(m.domain, opts.domain!)).slice(0, limit).map(toMatch);
     return { ambiguous: false, domain: opts.domain, matches };
   }
 
@@ -470,11 +513,7 @@ export async function findSimilarQueries(
   return {
     ambiguous: false,
     domain: domainBreakdown[0]?.domain,
-    matches: enriched.slice(0, limit).map((m) => ({
-      id: m.id, source: m.source, title: m.title, description: m.description,
-      cleanSql: m.cleanSql, tablesUsed: m.tablesUsed, joins: m.joins, filters: m.filters,
-      lookupTypes: m.lookupTypes, domain: m.domain, score: +m.score.toFixed(3),
-    })),
+    matches: enriched.slice(0, limit).map(toMatch),
   };
 }
 
