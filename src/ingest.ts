@@ -41,6 +41,8 @@ import express from "express";
 import { corpusCount, materialize, materializedIds, exportCorpus, importCorpus, updateEnrichment, reenrichQueue, reenrichCounts, embedTexts, recordUsage, usageStats, type MaterializeRow, type ImportRow } from "./corpus/ingestStore.js";
 import { embed } from "./corpus/embed.js";
 import { enrichAgentBatch } from "./corpus/enrichAdapters.js";
+import { submitBatch, pollJob, runningJobs, allJobs } from "./corpus/enrichBatchApi.js";
+import { redoQueue } from "./corpus/ingestStore.js";
 import { extractModels } from "./corpus/extractArchive.js";
 import { openEnrichStore, type EnrichStore } from "./corpus/enrichStore.js";
 import { hashSql, hashSqlNormalized, type SqlSource } from "./corpus/sources.js";
@@ -488,6 +490,42 @@ export function createIngestRouter(): express.Router {
     catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
   });
 
+  // ---- Message Batches path (real API key, 50% rate): submit whole queue as SOLO requests ----
+  //   POST /ingest/batch/submit?sources=bip-report,view&model=claude-opus-5&redo=1&limit=20000
+  //     redo=1 -> ONLY batch-degraded rows (empty mechanics on >3k SQL); redo omitted -> pending
+  //     rows INCLUDING degraded ones (includeRedo).
+  //   POST /ingest/batch/poll   poll all running jobs, ingest finished results
+  //   GET  /ingest/batch/status jobs list
+  router.post("/ingest/batch/submit", requireAuth, async (req, res) => {
+    try {
+      const sources = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
+      const model = typeof req.query.model === "string" && req.query.model.trim() ? req.query.model.trim() : "claude-opus-5";
+      const limit = Math.max(1, Number(req.query.limit) || 20000);
+      const redoOnly = req.query.redo === "1" || req.query.redo === "true";
+      const rows = redoOnly ? redoQueue(sources, limit) : reenrichQueue(sources, limit, true);
+      if (!rows.length) { res.json({ ok: true, submitted: 0, note: "queue empty" }); return; }
+      const r = await submitBatch(rows, model);
+      res.json({ ok: true, ...r, model, redoOnly });
+    } catch (e: any) {
+      console.error("[ingest] /batch/submit error", e);
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+  router.post("/ingest/batch/poll", requireAuth, async (_req, res) => {
+    try {
+      const out: unknown[] = [];
+      for (const j of runningJobs()) out.push(await pollJob(j.batch_id));
+      res.json({ ok: true, jobs: out });
+    } catch (e: any) {
+      console.error("[ingest] /batch/poll error", e);
+      res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+    }
+  });
+  router.get("/ingest/batch/status", requireAuth, (_req, res) => {
+    try { res.json({ ok: true, jobs: allJobs() }); }
+    catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
+  });
+
   // App Composer Configuration Report XML — merges DISPLAY NAMES onto the ADF registry and adds
   // rows the ADF export lacks (OOTB fields with business labels).
   router.post("/ingest/config-report", requireAuth, express.text({ type: () => true, limit: "256mb" }), async (req, res) => {
@@ -552,6 +590,19 @@ export function startIngestScheduler(): void {
     return;
   }
   const store = getStore();
+
+  // Anthropic Message-Batches auto-poll: whatever the enrich mode, if batch jobs are running,
+  // poll them each tick and ingest finished results (submit is manual via /ingest/batch/submit).
+  const pollBatches = async () => {
+    try {
+      for (const j of runningJobs()) {
+        const r = await pollJob(j.batch_id);
+        if ((r as any).status === "done") console.error(`[batch] ${j.batch_id} done: ingested=${(r as any).ingested} failed=${(r as any).failed}`);
+      }
+    } catch (e: any) { console.error("[batch] poll error", e?.message ?? e); }
+  };
+  const bp = setInterval(() => { void pollBatches(); }, Math.max(ms, 60_000));
+  bp.unref?.();
 
   // BATCH mode: drain the whole backlog via the native Gemini Batch API (concurrent batch jobs,
   // ~50% cheaper, async). The drain loops until empty; the interval just re-kicks it when new

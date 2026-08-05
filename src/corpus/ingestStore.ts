@@ -91,13 +91,30 @@ export function updateEnrichment(
   return true;
 }
 
-/** Rows still lacking v2 enrichment for the given sources — the re-enrich worker's queue. */
-export function reenrichQueue(sources: string[], limit: number): { id: string; title: string; sql: string; source: string }[] {
+/** Rows still lacking v2 enrichment for the given sources — the re-enrich worker's queue.
+ *  `includeRedo` also catches BATCH-DEGRADED rows: "(no notable mechanics)" on a non-trivial SQL
+ *  (>3000 chars) is a known artifact of prompt-batching, not an honest empty. */
+export function reenrichQueue(sources: string[], limit: number, includeRedo = false): { id: string; title: string; sql: string; source: string }[] {
+  const d = db();
+  const ph = sources.map(() => "?").join(",");
+  const cond = includeRedo
+    ? `(mechanics IS NULL OR (mechanics = '(no notable mechanics)' AND LENGTH(COALESCE(clean_sql, original_sql)) > 3000))`
+    : `mechanics IS NULL`;
+  return d.prepare(
+    `SELECT id, title, COALESCE(clean_sql, original_sql) AS sql, source
+     FROM report_queries WHERE source IN (${ph}) AND ${cond}
+     ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC LIMIT ?`,
+  ).all(...sources, limit) as any[];
+}
+
+/** Only the batch-degraded rows (for the Opus redo batch). */
+export function redoQueue(sources: string[], limit: number): { id: string; title: string; sql: string; source: string }[] {
   const d = db();
   const ph = sources.map(() => "?").join(",");
   return d.prepare(
     `SELECT id, title, COALESCE(clean_sql, original_sql) AS sql, source
-     FROM report_queries WHERE source IN (${ph}) AND mechanics IS NULL
+     FROM report_queries WHERE source IN (${ph})
+       AND mechanics = '(no notable mechanics)' AND LENGTH(COALESCE(clean_sql, original_sql)) > 3000
      ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC LIMIT ?`,
   ).all(...sources, limit) as any[];
 }
@@ -146,6 +163,9 @@ const PRICE: Record<string, { in: number; out: number }> = {
   "claude-opus-5": { in: 5, out: 25 }, "claude-opus-4-8": { in: 5, out: 25 },
   "claude-sonnet-5": { in: 3, out: 15 }, "claude-haiku-4-5": { in: 1, out: 5 },
   "claude-fable-5": { in: 10, out: 50 },
+  // Message Batches = 50% of the sync rate
+  "claude-opus-5@batch": { in: 2.5, out: 12.5 }, "claude-sonnet-5@batch": { in: 1.5, out: 7.5 },
+  "claude-haiku-4-5@batch": { in: 0.5, out: 2.5 },
 };
 function dollars(model: string, inTok: number, outTok: number, cacheRead: number): number {
   const p = PRICE[model] ?? PRICE["claude-opus-5"];
