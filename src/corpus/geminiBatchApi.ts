@@ -13,7 +13,7 @@ import Database from "better-sqlite3";
 import { GoogleGenAI } from "@google/genai";
 import { reportsDbPath } from "../dbPaths.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./enrichPrompt.js";
-import { embed } from "./embed.js";
+import { embedBulk as embed } from "./embed.js";
 import { updateEnrichment, embedTexts, recordUsage, reenrichQueue, spentUsd } from "./ingestStore.js";
 
 function apiKey(): string {

@@ -17,7 +17,7 @@ import fs from "node:fs";
 import { reportsDbPath } from "../dbPaths.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./enrichPrompt.js";
 import type { SqlSource } from "./sources.js";
-import { embed } from "./embed.js";
+import { embedBulk as embed } from "./embed.js";
 import { updateEnrichment, embedTexts, recordUsage, clearBatchUsage } from "./ingestStore.js";
 
 const API = "https://api.anthropic.com/v1/messages/batches";

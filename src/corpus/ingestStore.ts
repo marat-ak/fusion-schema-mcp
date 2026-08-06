@@ -13,7 +13,7 @@
 import fs from "node:fs";
 import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
-import { embed } from "./embed.js";
+import { embedBulk as embed } from "./embed.js";
 import { classifyDomain } from "./domain.js";
 import { reportsDbPath, schemaDbPath, isSingleFile, sqlQuote } from "../dbPaths.js";
 

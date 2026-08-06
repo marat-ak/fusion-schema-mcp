@@ -380,19 +380,28 @@ async function rerank<T extends { title: string; description: string; intents?: 
   try {
     const texts = rows.map((r) =>
       `${r.title}\n${r.description}\n${(r.intents ?? []).join("; ")}`.slice(0, 2000));
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), Number(process.env.RERANK_TIMEOUT_MS ?? 1500));
-    const res = await fetch(`${url.replace(/\/$/, "")}/rerank`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ query: intent, texts, raw_scores: false }),
-      signal: ctl.signal,
-    });
-    clearTimeout(t);
-    if (!res.ok) return rows;
-    const scores = (await res.json()) as { index: number; score: number }[];
-    if (!Array.isArray(scores) || !scores.length) return rows;
-    const order = [...scores].sort((a, b) => b.score - a.score).map((s) => s.index);
+    // TEI rejects client batches over its --max-client-batch-size (default 32) with a 4xx — chunk
+    // the candidate list and merge the scored chunks (scores are query-relative, so comparable).
+    const CHUNK = Number(process.env.RERANK_MAX_BATCH ?? 32);
+    const scored: { index: number; score: number }[] = [];
+    for (let off = 0; off < texts.length; off += CHUNK) {
+      const slice = texts.slice(off, off + CHUNK);
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), Number(process.env.RERANK_TIMEOUT_MS ?? 1500));
+      const res = await fetch(`${url.replace(/\/$/, "")}/rerank`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: intent, texts: slice, raw_scores: false }),
+        signal: ctl.signal,
+      });
+      clearTimeout(t);
+      if (!res.ok) return rows;
+      const part = (await res.json()) as { index: number; score: number }[];
+      if (!Array.isArray(part)) return rows;
+      for (const s of part) scored.push({ index: s.index + off, score: s.score });
+    }
+    if (!scored.length) return rows;
+    const order = scored.sort((a, b) => b.score - a.score).map((s) => s.index);
     const seen = new Set(order);
     return [...order.map((i) => rows[i]), ...rows.filter((_r, i) => !seen.has(i))];
   } catch {

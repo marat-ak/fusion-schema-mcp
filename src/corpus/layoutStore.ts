@@ -246,17 +246,24 @@ async function rerankPatterns<T extends { name: string; description: string; whe
   if (!url || rows.length < 3) return rows;
   try {
     const texts = rows.map((r) => `${r.name}\n${r.description}\n${r.when_to_use ?? ""}`.slice(0, 1500));
-    const ctl = new AbortController();
-    const t = setTimeout(() => ctl.abort(), Number(process.env.RERANK_TIMEOUT_MS ?? 1500));
-    const res = await fetch(`${url.replace(/\/$/, "")}/rerank`, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ query: intent, texts, raw_scores: false }), signal: ctl.signal,
-    });
-    clearTimeout(t);
-    if (!res.ok) return rows;
-    const scores = (await res.json()) as { index: number; score: number }[];
-    if (!Array.isArray(scores) || !scores.length) return rows;
-    const order = [...scores].sort((a, b) => b.score - a.score).map((s) => s.index);
+    // chunk to TEI's --max-client-batch-size (default 32); scores are query-relative so mergeable
+    const CHUNK = Number(process.env.RERANK_MAX_BATCH ?? 32);
+    const scored: { index: number; score: number }[] = [];
+    for (let off = 0; off < texts.length; off += CHUNK) {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), Number(process.env.RERANK_TIMEOUT_MS ?? 1500));
+      const res = await fetch(`${url.replace(/\/$/, "")}/rerank`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ query: intent, texts: texts.slice(off, off + CHUNK), raw_scores: false }), signal: ctl.signal,
+      });
+      clearTimeout(t);
+      if (!res.ok) return rows;
+      const part = (await res.json()) as { index: number; score: number }[];
+      if (!Array.isArray(part)) return rows;
+      for (const s of part) scored.push({ index: s.index + off, score: s.score });
+    }
+    if (!scored.length) return rows;
+    const order = scored.sort((a, b) => b.score - a.score).map((s) => s.index);
     const seen = new Set(order);
     return [...order.map((i) => rows[i]), ...rows.filter((_r, i) => !seen.has(i))];
   } catch { return rows; }
