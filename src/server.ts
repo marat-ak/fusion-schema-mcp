@@ -67,6 +67,11 @@ app.listen(PORT, HOST, () => {
   startIngestScheduler();
   // layout-pattern corpus: (re)load from the repo JSONL when its hash changed (non-fatal)
   void loadLayoutPatterns().catch((e) => console.error("[layout-corpus] load failed:", e?.message ?? e));
+  // warm the embedder at boot — otherwise the FIRST findSimilarQueries pays the ~30-50s model load
+  void import("./corpus/embed.js")
+    .then((m) => m.embed(["warm"]))
+    .then(() => console.error("[embed] warm"))
+    .catch((e) => console.error("[embed] warm failed:", e?.message ?? e));
   console.error(
     `[mcp] fusion-schema-mcp listening on http://${HOST}:${PORT}/mcp ` +
       `(tables=${s.tables} columns=${s.columns} fkeys=${s.fkeys} relationships=${s.relationships})`,
