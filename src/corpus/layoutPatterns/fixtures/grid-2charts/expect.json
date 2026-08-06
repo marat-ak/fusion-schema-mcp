@@ -1,0 +1,1 @@
+{"assertions":["one row with TWO charts SIDE-BY-SIDE: pie left, vertical bar right","pie has 3 slices (Hardware/Software/Services; Hardware aggregated 5200+1800=7000) with data labels","bar chart shows Orders by Category (Hardware 20, Software 21, Services 9)","neither chart area contains the literal text 'No data to display'"]}

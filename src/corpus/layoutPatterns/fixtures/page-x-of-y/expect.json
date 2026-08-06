@@ -1,0 +1,1 @@
+{"assertions":["renders 2+ pages (45 ledger rows)","footer of page 1 reads 'Page 1 of 2' and footer of page 2 reads 'Page 2 of 2' (real Word PAGE/NUMPAGES fields, not literals)"],"note":"footer lives in page.footer which the harness drops; verify-extras.mts renders the full spec"}

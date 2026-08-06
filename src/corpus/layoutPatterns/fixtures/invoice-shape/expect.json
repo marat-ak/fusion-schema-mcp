@@ -1,0 +1,1 @@
+{"assertions":["TWO pages, one invoice per page (splitByPage on the outer forEach)","page 1: Invoice INV-2001, Customer Northwind Traders, 2 lines, shaded totals row 'Total' spanning 2 cells + 1,730.50 (format-number-wrapped sum)","page 2: Invoice INV-2002, 1 line, total 4,750.00 (totals are PER INVOICE, not global)"]}

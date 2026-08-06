@@ -1,0 +1,1 @@
+{"assertions":["table rows are ordered by amount DESCENDING: Midway 15,000.00 first, Zenith 120.00 last (input order was Zenith,Acme,Midway,Bolt)","the paragraph list below the table is alphabetical: Acme Corp, Bolt Industries, Midway Tools, Zenith Supply"]}

@@ -1,0 +1,1 @@
+{"assertions":["THREE pages - one per ticket - each page shows 'Delivery Ticket TK-50x', the shaded header row, and THAT ticket's row only"],"note":"the naive table-level splitByPage renders degenerately ([header alone][TK-501][TK-502+TK-503]) - engine quirk documented in the row pitfalls; split-exp.mts holds the A/B proof"}

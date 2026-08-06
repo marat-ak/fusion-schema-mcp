@@ -1,0 +1,1 @@
+{"assertions":["with sample.xml (PSHOW_COST_FLAG=N): the Cost column is ABSENT - header and cells; only Item and Qty render","with sample-on.xml (PSHOW_COST_FLAG=Y, rendered by verify-extras.mts): the Cost column appears with 0.49/0.12"]}

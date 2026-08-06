@@ -1,0 +1,1 @@
+{"assertions":["A100 (OVERDUE, 1500, hold Y): shows the bold ACTION REQUIRED line, 'High value: 1,500.00', and ON HOLD","A101 (OPEN, 500, hold N): no action line, shows 'Mid value.', no ON HOLD","A102 (PAID, 50, hold N): shows 'Low value.' only"]}
