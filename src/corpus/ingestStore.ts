@@ -185,10 +185,22 @@ const PRICE: Record<string, { in: number; out: number }> = {
   // Message Batches = 50% of the sync rate
   "claude-opus-5@batch": { in: 2.5, out: 12.5 }, "claude-sonnet-5@batch": { in: 1.5, out: 7.5 },
   "claude-haiku-4-5@batch": { in: 0.5, out: 2.5 },
+  // Gemini flash-lite (2.5) published rates + native Batch API half-rate
+  "gemini-flash-lite-latest": { in: 0.1, out: 0.4 }, "gemini-2.5-flash-lite": { in: 0.1, out: 0.4 },
+  "gemini-flash": { in: 0.3, out: 2.5 },
+  "gemini-flash-lite-latest@batch": { in: 0.05, out: 0.2 }, "gemini-2.5-flash-lite@batch": { in: 0.05, out: 0.2 },
 };
 function dollars(model: string, inTok: number, outTok: number, cacheRead: number): number {
   const p = PRICE[model] ?? PRICE["claude-opus-5"];
   return ((inTok - cacheRead) * p.in + cacheRead * p.in * 0.1 + outTok * p.out) / 1e6;
+}
+
+/** Total USD spent across usage rows whose model matches a LIKE pattern (e.g. "gemini%"). */
+export function spentUsd(modelLike: string): number {
+  const d = db();
+  ensureUsage(d);
+  const rows = d.prepare("SELECT model, SUM(input_tokens) i, SUM(output_tokens) o, SUM(cache_read_tokens) cr FROM enrich_usage WHERE model LIKE ? GROUP BY model").all(modelLike) as any[];
+  return rows.reduce((a, r) => a + dollars(r.model, r.i ?? 0, r.o ?? 0, r.cr ?? 0), 0);
 }
 
 /** Aggregate usage + project cost for the remaining reenrich queue and the whole corpus. */

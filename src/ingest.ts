@@ -38,7 +38,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import express from "express";
-import { corpusCount, materialize, materializedIds, exportCorpus, importCorpus, updateEnrichment, reenrichQueue, reenrichCounts, embedTexts, recordUsage, usageStats, type MaterializeRow, type ImportRow } from "./corpus/ingestStore.js";
+import { corpusCount, materialize, materializedIds, exportCorpus, importCorpus, updateEnrichment, reenrichQueue, reenrichCounts, embedTexts, recordUsage, usageStats, spentUsd, type MaterializeRow, type ImportRow } from "./corpus/ingestStore.js";
 import { embed } from "./corpus/embed.js";
 import { enrichAgentBatch } from "./corpus/enrichAdapters.js";
 import { submitBatch, pollJob, runningJobs, allJobs, finishedJobs, reingestJob } from "./corpus/enrichBatchApi.js";
@@ -49,6 +49,7 @@ import { hashSql, hashSqlNormalized, type SqlSource } from "./corpus/sources.js"
 import { enrichOne } from "./corpus/enrichAdapters.js";
 import { getEnrichConfig } from "./corpus/enrichConfig.js";
 import { runGeminiBatches } from "./corpus/geminiBatch.js";
+import { setGeminiControl, getGeminiControl, driveGeminiReenrich, openGeminiJobs, allGeminiJobs } from "./corpus/geminiBatchApi.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./corpus/enrichPrompt.js";
 import { loadFlexfieldsCsv, flexfieldsCount, loadAdfExtensionsCsv, adfCount, loadConfigReportXml } from "./corpus/flexStore.js";
 import type { EnrichRow } from "./corpus/enrichStore.js";
@@ -417,10 +418,43 @@ export function createIngestRouter(): express.Router {
       const sources = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
       const limit = Math.max(1, Number(req.query.limit) || 100);
       const modelOverride = typeof req.query.model === "string" && req.query.model.trim() ? req.query.model.trim() : undefined;
+      const providerOverride = typeof req.query.provider === "string" && req.query.provider.trim() ? req.query.provider.trim() : undefined;
       const BATCH_ITEMS = Math.max(1, Number(req.query.batchItems) || 6);
       const BATCH_CHARS = Math.max(2000, Number(req.query.batchChars) || 14000);
       const cfg = getEnrichConfig();
       const queue = reenrichQueue(sources, limit);
+
+      // PER-ROW provider path (gemini/anthropic/openai): the agent-batch path is subscription-Claude
+      // only; a non-agent provider enriches one row per call via enrichOne (usage recorded inside the
+      // adapter). Used e.g. to enrich the 85k OTBI rows cheaply on gemini-flash-lite.
+      if (providerOverride && providerOverride !== "agent") {
+        // hard spend cap (USD) across this provider's recorded usage — protects a fixed budget.
+        const spendCap = Number(req.query.spendCapUsd ?? process.env.ENRICH_SPEND_CAP_USD ?? 0);
+        const spentSoFar = () => spendCap > 0 ? (spentUsd(`${providerOverride}%`) || 0) : 0;
+        let pdone = 0, pfailed = 0, capped = false;
+        const perrors: string[] = [];
+        const pq = [...queue];
+        const pworkers = Array.from({ length: Math.min(cfg.concurrency, queue.length || 1) }, async () => {
+          for (;;) {
+            if (spendCap > 0 && spentSoFar() >= spendCap) { capped = true; return; }
+            const row = pq.shift();
+            if (!row) return;
+            try {
+              const e = await enrichOne(row.sql, row.title, { model: modelOverride, provider: providerOverride });
+              const vecs = await embed(embedTexts(e.description, e.tablesUsed, e.intents));
+              updateEnrichment(row.id, { description: e.description, intents: e.intents, mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
+              pdone++;
+              if (pdone % 50 === 0) console.error(`[reenrich:${providerOverride}] ${pdone} done, ${pfailed} failed`);
+            } catch (err: any) {
+              pfailed++;
+              if (perrors.length < 8) perrors.push(`${row.id}: ${(err?.message ?? err)}`.slice(0, 180));
+            }
+          }
+        });
+        await Promise.all(pworkers);
+        res.json({ ok: true, provider: providerOverride, model: modelOverride, processed: pdone, failed: pfailed, capped, spentUsd: +(spentUsd(`${providerOverride}%`) || 0).toFixed(2), errors: perrors, ...reenrichCounts(sources) });
+        return;
+      }
 
       // group the queue into batches by char budget + item cap; a huge SQL rides alone.
       const batches: (typeof queue)[] = [];
@@ -479,6 +513,90 @@ export function createIngestRouter(): express.Router {
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
     }
   });
+  // NATIVE Gemini Batch API reenrich (50% cheaper, async) for materialized rows — e.g. the 85k OTBI
+  // corpus on gemini-flash-lite. Fire-and-forget: starts a background drain that loops chunks
+  // through runGeminiBatches, ingests results, records real per-item usage, and STOPS at spendCapUsd.
+  //   POST /ingest/reenrich/gemini-batch?sources=otbi&model=gemini-flash-lite-latest&spendCapUsd=22[&chunk=1000]
+  //   status via GET /ingest/reenrich/status?sources=otbi  + GET /ingest/reenrich/cost
+  // DURABLE native Gemini batch reenrich (persisted jobs + scheduler-driven waves + spend cap).
+  //   POST /ingest/gemini2/start?sources=otbi&model=gemini-flash-lite-latest&spendCapUsd=22&wave=2000
+  //   POST /ingest/gemini2/stop   GET /ingest/gemini2/status
+  router.post("/ingest/gemini2/start", requireAuth, async (req, res) => {
+    try {
+      if (!(process.env.GOOGLE_STUDIO_API_KEY ?? "").trim()) return res.status(400).json({ ok: false, error: "GOOGLE_STUDIO_API_KEY not set" });
+      const sources = String(req.query.sources ?? "otbi").split(",").map((s) => s.trim()).filter(Boolean).join(",");
+      const model = (typeof req.query.model === "string" && req.query.model.trim()) ? req.query.model.trim() : "gemini-flash-lite-latest";
+      const cap = Number(req.query.spendCapUsd ?? process.env.ENRICH_SPEND_CAP_USD ?? 22);
+      const wave = Math.max(100, Number(req.query.wave) || 2000);
+      const batchSize = Math.min(200, Math.max(50, Number(req.query.batchSize) || 100));
+      setGeminiControl({ active: true, sources, model, cap, wave, batch_size: batchSize });
+      const first = await driveGeminiReenrich(); // kick the first wave now
+      res.json({ ok: true, started: true, sources, model, spendCapUsd: cap, wave, batchSize, first });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
+  });
+  router.post("/ingest/gemini2/stop", requireAuth, (_req, res) => {
+    const c = getGeminiControl();
+    if (c) setGeminiControl({ ...c, active: false });
+    res.json({ ok: true, stopped: true });
+  });
+  router.get("/ingest/gemini2/status", requireAuth, (_req, res) => {
+    try {
+      res.json({ ok: true, control: getGeminiControl(), openJobs: openGeminiJobs().length, jobs: allGeminiJobs(), geminiSpentUsd: +spentUsd("gemini%").toFixed(2) });
+    } catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
+  });
+  router.post("/ingest/gemini2/poll", requireAuth, async (_req, res) => {
+    try { res.json({ ok: true, ...(await driveGeminiReenrich()) }); }
+    catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
+  });
+
+  let geminiDrainRunning = false;
+  router.post("/ingest/reenrich/gemini-batch", requireAuth, async (req, res) => {
+    if (geminiDrainRunning) { res.json({ ok: true, note: "already running" }); return; }
+    const sources = String(req.query.sources ?? "otbi").split(",").map((s) => s.trim()).filter(Boolean);
+    const model = (typeof req.query.model === "string" && req.query.model.trim()) ? req.query.model.trim() : "gemini-flash-lite-latest";
+    const spendCap = Number(req.query.spendCapUsd ?? process.env.ENRICH_SPEND_CAP_USD ?? 0);
+    const chunk = Math.max(100, Number(req.query.chunk) || 1000);
+    const apiKey = (process.env.GOOGLE_STUDIO_API_KEY ?? "").trim();
+    if (!apiKey) { res.status(400).json({ ok: false, error: "GOOGLE_STUDIO_API_KEY not set" }); return; }
+    geminiDrainRunning = true;
+    res.json({ ok: true, started: true, sources, model, spendCapUsd: spendCap, chunk, ...reenrichCounts(sources) });
+    // background drain — do NOT await; the HTTP response already returned.
+    void (async () => {
+      const cfg = { ...getEnrichConfig(), provider: "gemini" as const, model, apiKey };
+      try {
+        for (;;) {
+          if (spendCap > 0 && spentUsd("gemini%") >= spendCap) { console.error(`[gemini-batch] spend cap $${spendCap} reached — stopping`); break; }
+          const rows = reenrichQueue(sources, chunk);
+          if (!rows.length) { console.error("[gemini-batch] queue empty — done"); break; }
+          const items = rows.map((r) => {
+            const p = buildEnrichPrompt({ id: r.id, source: "catalog", title: r.title, originalSql: r.sql, sourceHash: "", raw: {} } as any);
+            return { key: r.id, system: p.system, user: p.user };
+          });
+          const results = await runGeminiBatches(items, cfg, { batchSize: 100, concurrency: 4, onProgress: (m) => console.error("[gemini-batch] " + m) });
+          const byId = new Map(rows.map((r) => [r.id, r]));
+          const nowIso = new Date().toISOString();
+          let ok = 0, fail = 0, inTok = 0, outTok = 0;
+          for (const [id, r] of results) {
+            const row = byId.get(id);
+            if (!row || r.error || !r.text) { fail++; continue; }
+            try {
+              const e = parseEnrichReply(r.text, { id, source: "catalog", title: row.title, originalSql: row.sql, sourceHash: "", raw: {} } as any);
+              const vecs = await embed(embedTexts(e.description, e.tablesUsed ?? [], e.intents ?? []));
+              updateEnrichment(id, { description: e.description, intents: e.intents ?? [], mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
+              inTok += r.inTok ?? 0; outTok += r.outTok ?? 0; ok++;
+            } catch { fail++; }
+          }
+          recordUsage({ ts: nowIso, model, source: "otbi-batch", nItems: ok, inputTokens: inTok, outputTokens: outTok, cacheReadTokens: 0, cacheCreationTokens: 0 });
+          console.error(`[gemini-batch] chunk done: ok=${ok} fail=${fail} spent=$${spentUsd("gemini%").toFixed(2)}`);
+        }
+      } catch (e: any) {
+        console.error("[gemini-batch] drain error", e?.message ?? e);
+      } finally {
+        geminiDrainRunning = false;
+      }
+    })();
+  });
+
   router.get("/ingest/reenrich/status", requireAuth, (req, res) => {
     const sources = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
     try { res.json({ ok: true, ...reenrichCounts(sources) }); }
@@ -627,6 +745,14 @@ export function startIngestScheduler(): void {
   };
   const bp = setInterval(() => { void pollBatches(); }, Math.max(ms, 60_000));
   bp.unref?.();
+
+  // durable native-Gemini reenrich: poll open jobs + auto-submit the next wave under the spend cap.
+  const gd = setInterval(() => {
+    void driveGeminiReenrich().then((r) => {
+      if ((r.ingested ?? 0) > 0 || r.submitted || r.stopped) console.error(`[gjob] tick: ${JSON.stringify(r)}`);
+    }).catch((e) => console.error("[gjob] drive error", e?.message ?? e));
+  }, Math.max(ms, 60_000));
+  gd.unref?.();
 
   // BATCH mode: drain the whole backlog via the native Gemini Batch API (concurrent batch jobs,
   // ~50% cheaper, async). The drain loops until empty; the interval just re-kicks it when new

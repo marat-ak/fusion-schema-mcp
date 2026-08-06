@@ -12,7 +12,7 @@ import { GoogleGenAI } from "@google/genai";
 import type { EnrichConfig } from "./enrichConfig.js";
 
 export interface BatchItem { key: string; system?: string; user: string }
-export interface BatchResult { key: string; text?: string; error?: string }
+export interface BatchResult { key: string; text?: string; error?: string; inTok?: number; outTok?: number }
 
 export interface RunBatchOpts {
   batchSize?: number;      // requests per batch job (default 100)
@@ -56,7 +56,8 @@ async function runOneBatch(
     if (!r) return { key: it.key, error: "no response" };
     if (r.error) return { key: it.key, error: JSON.stringify(r.error).slice(0, 160) };
     const text = r.response?.candidates?.[0]?.content?.parts?.map((p: any) => p.text ?? "").join("") ?? "";
-    return { key: it.key, text };
+    const um = r.response?.usageMetadata ?? {};
+    return { key: it.key, text, inTok: Number(um.promptTokenCount ?? 0), outTok: Number(um.candidatesTokenCount ?? 0) };
   });
 }
 

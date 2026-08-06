@@ -16,6 +16,7 @@ import crypto from "node:crypto";
 import type { SqlSource } from "./sources.js";
 import { buildEnrichPrompt, parseEnrichReply, buildBatchEnrichPrompt, parseBatchReply, shapeBatchItem } from "./enrichPrompt.js";
 import { getEnrichConfig, type EnrichConfig } from "./enrichConfig.js";
+import { recordUsage } from "./ingestStore.js";
 
 export interface EnrichResult {
   description: string;
@@ -97,8 +98,17 @@ export async function enrichAgentBatch(
   throw new Error(`agent-llm batch exhausted retries (${lastErr})`);
 }
 
-export async function enrichOne(sql: string, title: string, override?: { model?: string }): Promise<EnrichResult> {
-  const cfg = { ...getEnrichConfig(), ...(override?.model ? { model: override.model } : {}) };
+export async function enrichOne(sql: string, title: string, override?: { model?: string; provider?: string }): Promise<EnrichResult> {
+  const base = getEnrichConfig();
+  const provider = (override?.provider as EnrichConfig["provider"]) || base.provider;
+  const switched = provider !== base.provider; // don't inherit base's key when switching providers
+  const cfg: EnrichConfig = { ...base, provider, ...(override?.model ? { model: override.model } : {}), ...(switched ? { apiKey: "" } : {}) };
+  // fill the SWITCHED provider's own fallback key (base's key belongs to base's provider)
+  if (!cfg.apiKey) {
+    if (provider === "gemini") cfg.apiKey = (process.env.GOOGLE_STUDIO_API_KEY ?? "").trim();
+    else if (provider === "anthropic") cfg.apiKey = (process.env.ENRICH_API_KEY ?? process.env.ANTHROPIC_API_KEY ?? "").trim();
+    else if (provider === "openai") cfg.apiKey = (process.env.OPENAI_API_KEY ?? "").trim();
+  }
   if (!cfg.apiKey && cfg.provider !== "custom" && cfg.provider !== "agent") {
     throw new Error(`no ENRICH_API_KEY configured for provider "${cfg.provider}"`);
   }
@@ -178,6 +188,14 @@ async function enrichGemini(sql: string, title: string, cfg: EnrichConfig, tries
     if (!res.ok) throw new Error(`gemini HTTP ${res.status}: ${JSON.stringify(j).slice(0, 160)}`);
     const text = j.candidates?.[0]?.content?.parts?.map((x: any) => x.text).join("") ?? "";
     const e = parseEnrichReply(text, s);
+    const um = j.usageMetadata ?? {};
+    try {
+      recordUsage({
+        ts: new Date().toISOString(), model, source: "reenrich", nItems: 1,
+        inputTokens: Number(um.promptTokenCount ?? 0), outputTokens: Number(um.candidatesTokenCount ?? 0),
+        cacheReadTokens: 0, cacheCreationTokens: 0, sqlChars: sql.length,
+      });
+    } catch { /* usage table optional */ }
     return { description: e.description, tablesUsed: e.tablesUsed, lookupTypes: e.lookupTypes, intents: e.intents ?? [], mechanics: e.mechanics ?? null };
   }
   throw new Error(`gemini exhausted retries (${lastErr})`);
