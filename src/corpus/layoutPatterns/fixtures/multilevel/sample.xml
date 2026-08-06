@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DATA_DS>
+ <G_A><A_NAME>North Region</A_NAME>
+  <G_B><B_TITLE>Store 1</B_TITLE>
+   <G_C><C_NAME>Apples</C_NAME><C_QTY>10</C_QTY></G_C>
+   <G_C><C_NAME>Pears</C_NAME><C_QTY>4</C_QTY></G_C>
+  </G_B>
+  <G_B><B_TITLE>Store 2</B_TITLE>
+   <G_C><C_NAME>Plums</C_NAME><C_QTY>7</C_QTY></G_C>
+  </G_B>
+ </G_A>
+</DATA_DS>
