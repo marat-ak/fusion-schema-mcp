@@ -8,6 +8,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { buildServer } from "./tools.js";
 import { stats } from "./catalog.js";
 import { createIngestRouter, ingestAuthWarning, startIngestScheduler } from "./ingest.js";
+import { loadLayoutPatterns } from "./corpus/layoutStore.js";
 
 const PORT = Number(process.env.MCP_PORT ?? 8979);
 const HOST = process.env.MCP_HOST ?? "0.0.0.0";
@@ -64,6 +65,8 @@ app.listen(PORT, HOST, () => {
   const s = stats();
   ingestAuthWarning();
   startIngestScheduler();
+  // layout-pattern corpus: (re)load from the repo JSONL when its hash changed (non-fatal)
+  void loadLayoutPatterns().catch((e) => console.error("[layout-corpus] load failed:", e?.message ?? e));
   console.error(
     `[mcp] fusion-schema-mcp listening on http://${HOST}:${PORT}/mcp ` +
       `(tables=${s.tables} columns=${s.columns} fkeys=${s.fkeys} relationships=${s.relationships})`,

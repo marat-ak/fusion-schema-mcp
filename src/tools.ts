@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import * as catalog from "./catalog.js";
 import { queryFlexfields, queryAdfExtensions } from "./corpus/flexStore.js";
+import { findLayoutPattern, getLayoutPattern } from "./corpus/layoutStore.js";
 
 const DEBUG = process.env.MCP_DEBUG === "1" || process.env.MCP_DEBUG === "true";
 
@@ -256,6 +257,49 @@ export function buildServer(): McpServer {
       },
     },
     async (args) => reply("getCustomObjects", args, queryAdfExtensions(args)),
+  );
+
+  server.registerTool(
+    "findLayoutPattern",
+    {
+      title: "Find BIP layout patterns (archetypes / techniques / anti-patterns)",
+      description:
+        "Retrieval over the VERIFIED layout-pattern corpus: report ARCHETYPES (whole-report shapes " +
+        "— call at the structure-alignment step, BEFORE building the data model: each archetype's " +
+        "`requires.dataShape` tells you what group nesting / pre-aggregation the model must " +
+        "provide), TECHNIQUES (render-verified blocks[]/layout-spec recipes you can compose " +
+        "directly — corpus language = your emission language), and ANTI-PATTERNS (constructs that " +
+        "render broken or unmaintainable, with the correct alternative). Pass the user's own " +
+        "wording as intent ('one page per customer with invoice lines and totals', 'pivot by SKU', " +
+        "'dashboard chart left, table right'). `format` (rtf|xpt) filters recipes; a format-" +
+        "exclusive match under the other format returns WITHOUT its recipe plus formatAdvice — " +
+        "resolve the format (ask the user if needed) before building. dslSupport:'unsupported' " +
+        "rows describe real BIP capabilities our generator does NOT cover yet — tell the user " +
+        "honestly instead of silently changing the deliverable. Compose retrieved recipes; the " +
+        "builder validates the composition.",
+      inputSchema: {
+        intent: z.string().describe("natural-language description of the layout need, user's own words"),
+        format: z.enum(["rtf", "xpt"]).optional().describe("target template format, when already chosen"),
+        kinds: z.array(z.enum(["archetype", "technique", "antipattern"])).optional()
+          .describe("filter row kinds (anti-patterns are always scanned regardless)"),
+        limit: z.number().int().min(1).max(8).optional().describe("max patterns (default 4)"),
+        sessionKey: z.string().optional().describe("stable per-session key — the grammar card is attached once per key"),
+      },
+    },
+    async ({ intent, format, kinds, limit, sessionKey }) =>
+      reply("findLayoutPattern", { intent, format, kinds }, await findLayoutPattern(intent, { format, kinds, limit, sessionKey })),
+  );
+
+  server.registerTool(
+    "getLayoutPattern",
+    {
+      title: "Fetch one layout pattern in full (incl. a large recipe)",
+      description:
+        "Returns the complete corpus row for a pattern id from findLayoutPattern — use when a " +
+        "result carried recipeOmitted:true, or to re-read a pattern's full recipe/pitfalls.",
+      inputSchema: { id: z.string().describe("pattern id, e.g. 'lp:technique:rtf-multilevel-blocks'") },
+    },
+    async ({ id }) => reply("getLayoutPattern", { id }, getLayoutPattern(id)),
   );
 
   // Data-model / file authoring tools have moved to the agent (in-process SDK tools). This MCP is

@@ -16,6 +16,8 @@ COPY tsconfig.json ./
 COPY VERSION ./VERSION
 COPY src ./src
 RUN npm run build
+# non-TS corpus assets ride along into dist (tsc copies only .ts): layout-pattern JSONL + fixtures
+RUN cp -r src/corpus/layoutPatterns dist/corpus/layoutPatterns
 
 # Warm the bge-small embedding model into node_modules/.cache so the runtime can embed query intents
 # (findSimilarQueries) and re-embed during provisioning, offline.
