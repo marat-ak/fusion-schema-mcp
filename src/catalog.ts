@@ -411,10 +411,12 @@ async function rerank<T extends { title: string; description: string; intents?: 
 
 /** Full SQL only when it is small enough to be worth inlining; big ones ship mechanics instead. */
 const CLEAN_SQL_INLINE_CAP = Number(process.env.CLEAN_SQL_INLINE_CAP ?? 6000);
-function sqlPayload(cleanSql: string | null): { cleanSql?: string; cleanSqlOmitted?: true; sqlChars?: number } {
+function sqlPayload(cleanSql: string | null): { cleanSql?: string; cleanSqlOmitted?: true; sqlChars?: number; fetchWith?: string } {
   if (!cleanSql) return {};
   if (cleanSql.length <= CLEAN_SQL_INLINE_CAP) return { cleanSql };
-  return { cleanSqlOmitted: true, sqlChars: cleanSql.length };
+  // Big report: don't inline (would flood context) but make the SQL FETCHABLE — the caller pulls the
+  // full text by this match's id. Mechanics alone is NOT enough to adopt/adapt a large report.
+  return { cleanSqlOmitted: true, sqlChars: cleanSql.length, fetchWith: "getReportQuery(id) for the full SQL" };
 }
 
 // If the top matches split across >=2 business domains whose best scores are within this margin,
@@ -567,14 +569,24 @@ export async function findSimilarQueries(
 // ---- exact report-query lookup (by title / subject area) ----
 // Lazily prepared so an un-migrated catalog.sqlite (no report_queries) doesn't crash
 // the whole server at import — same pattern as vecStmts().
-let _rqStmts: { byTitle: any; byArea: any; near: any } | null = null;
+let _rqStmts: { byTitle: any; byId: any; siblings: any; byArea: any; near: any } | null = null;
 function rqStmts() {
   if (!_rqStmts) {
+    const cols = `id, source, title, original_sql, clean_sql, description,
+                  tables_used, joins, filters, lookup_types, security_predicate`;
     _rqStmts = {
+      // A .xdm data model has SEVERAL datasets stored as several rows sharing one title; the MAIN
+      // query is the largest, so return the biggest-SQL row first (the old first-by-rowid returned a
+      // trivial header dataset for AgingFourBucketDm etc.).
       byTitle: db.prepare(
-        `SELECT id, source, title, original_sql, clean_sql, description,
-                tables_used, joins, filters, lookup_types, security_predicate
-         FROM report_queries WHERE title = ?`),
+        `SELECT ${cols} FROM report_queries WHERE title = ?
+         ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC LIMIT 1`),
+      byId: db.prepare(`SELECT ${cols} FROM report_queries WHERE id = ?`),
+      // sibling datasets under the same title (so the caller can fetch the others by id)
+      siblings: db.prepare(
+        `SELECT id, LENGTH(COALESCE(clean_sql, original_sql)) AS sqlChars, description
+         FROM report_queries WHERE title = ?
+         ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC`),
       byArea: db.prepare(
         `SELECT id, source, title, description FROM report_queries
          WHERE title LIKE ? ORDER BY title LIMIT ?`),
@@ -586,13 +598,19 @@ function rqStmts() {
 }
 
 /** Exact query behind a title (OTBI title = "subjectArea.table"). Returns original + clean SQL. */
-export function getReportQuery(title: string) {
-  const { byTitle, near } = rqStmts();
-  const r = byTitle.get(title) as any;
+/** Exact query by TITLE or by ID. Title -> the MAIN (largest) dataset of that .xdm + a `datasets`
+ *  list of sibling datasets (fetch each by id). Id -> that exact row, at FULL size (this is how the
+ *  caller pulls the SQL that findSimilarQueries omitted for being large — it returns the match's id). */
+export function getReportQuery(arg: string) {
+  const { byTitle, byId, siblings, near } = rqStmts();
+  const isId = /^(sql:|view:)/.test(arg);
+  const r = (isId ? byId.get(arg) : byTitle.get(arg)) as any;
   if (!r) {
-    const suggestions = (near.all(`%${title}%`) as any[]).map((x) => x.title);
+    const suggestions = isId ? [] : (near.all(`%${arg}%`) as any[]).map((x) => x.title);
     return { found: false, suggestions };
   }
+  // when a title has multiple datasets, expose the others so nothing stays hidden
+  const sibs = isId ? [] : (siblings.all(r.title) as any[]).filter((x) => x.id !== r.id);
   return {
     found: true, id: r.id, source: r.source, title: r.title,
     originalSql: r.original_sql, cleanSql: r.clean_sql, description: r.description,
@@ -601,6 +619,10 @@ export function getReportQuery(title: string) {
     filters: JSON.parse(r.filters ?? "[]"),
     lookupTypes: JSON.parse(r.lookup_types ?? "[]"),
     securityPredicate: r.security_predicate,
+    ...(sibs.length
+      ? { datasets: sibs.map((s) => ({ id: s.id, sqlChars: s.sqlChars, description: s.description })),
+          note: `This .xdm has ${sibs.length + 1} datasets; returned the largest. Fetch another with getReportQuery(id).` }
+      : {}),
   };
 }
 

@@ -174,18 +174,25 @@ export function buildServer(): McpServer {
   server.registerTool(
     "getReportQuery",
     {
-      title: "Get the exact SQL behind a report / subject-area table",
+      title: "Get the exact SQL behind a report / subject-area table (by title OR id)",
       description:
-        "Exact lookup of a real query by its title. For OTBI the title is 'SubjectArea.Table' " +
-        "(e.g. 'Absence Management - Leave Donations Real Time.Contracts'); for catalog/view it is " +
-        "the report path / view name. Returns the ORIGINAL SQL (raw OTBI physical or human SQL) plus " +
-        "the clean rewrite, description, tables, joins, filters and lookups. If the title isn't found, " +
-        "returns fuzzy suggestions. Use when the user asks 'what is the SELECT behind <subject area> <table>'.",
+        "Exact lookup of a real query, at FULL SIZE (never clipped). Pass EITHER `id` OR `title`.\n" +
+        "- `id` (e.g. 'sql:0b3e…' or 'view:AR_TOTAL_BALANCE_VIEW') returns that EXACT row's full SQL. " +
+        "USE THIS to fetch the SQL that findSimilarQueries OMITTED for being large (it returns each " +
+        "match's `id` with `cleanSqlOmitted:true` + `sqlChars`) — read the mechanics is NOT a " +
+        "substitute for the real SQL when you need to adopt/adapt a big report.\n" +
+        "- `title` (OTBI 'SubjectArea.Table', or a report path / view name) returns the report's MAIN " +
+        "(largest) dataset. A .xdm often has SEVERAL datasets; the reply then carries a `datasets[]` " +
+        "list of the siblings (id + sqlChars) — fetch any of them by `id`. If not found, returns fuzzy " +
+        "suggestions.\n" +
+        "Returns original + clean SQL, description, tables, joins, filters, lookups, security predicate.",
       inputSchema: {
-        title: z.string().describe("Exact title, e.g. 'SubjectArea.Table' or a report path / view name"),
+        id: z.string().optional().describe("Exact corpus id ('sql:…' / 'view:…'), e.g. from a findSimilarQueries match"),
+        title: z.string().optional().describe("Exact title: 'SubjectArea.Table' or a report path / view name"),
       },
     },
-    async ({ title }) => reply("getReportQuery", { title }, catalog.getReportQuery(title)),
+    async ({ id, title }) =>
+      reply("getReportQuery", { id, title }, catalog.getReportQuery(String(id ?? title ?? ""))),
   );
 
   server.registerTool(
