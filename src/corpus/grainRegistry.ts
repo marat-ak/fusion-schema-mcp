@@ -102,6 +102,9 @@ export function rebuildGrainRegistry(d: Database.Database): { rows: number } {
   const now = new Date().toISOString();
   let rows = 0;
   const tx = d.transaction(() => {
+    // full rebuild: clear first, else tables that are no longer multi-row (reclassified as single_row)
+    // keep their stale row (UPSERT never deletes) — e.g. _VL views wrongly left as 'translation'.
+    d.exec("DELETE FROM table_grain");
     for (const [table, s] of sig) {
       const ev = evidence.get(table) ?? 0;
       const isTL = /_TL$/.test(table);
@@ -165,7 +168,7 @@ export function grainRegistryCount(reports: Database.Database): number {
 }
 
 // Bump when the classification logic changes so a redeploy rebuilds the registry.
-const GRAIN_VERSION = 3;
+const GRAIN_VERSION = 4;
 
 /** Startup helper: open a writable reports connection with schema ATTACHed and (re)build the registry
  *  when it's empty, the logic version changed, or force=true. Idempotent; safe to call on every boot. */
