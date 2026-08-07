@@ -116,8 +116,11 @@ export function rebuildGrainRegistry(d: Database.Database): { rows: number } {
           + "Apply the BETWEEN predicate on EVERY date-tracked table in the join — a missing one MULTIPLIES."
           + (s.flag ? ` This table also has ${s.flag}: a key can have several concurrent current rows — add ${s.flag}='Y' to pick one.` : "");
         if (s.flag) signals.push(s.flag);
-      } else if (isTL || s.lang) {
-        grain = "translation"; if (s.lang) signals.push("language");
+      } else if (isTL) {
+        // Only the _TL BASE translation tables multiply per language. _VL views already filter the
+        // session language (they ARE the fix) and a bare `language` column on a base table is an
+        // attribute, not a grain multiplier — so neither is flagged.
+        grain = "translation"; signals.push("_TL"); if (s.lang) signals.push("language");
         dedup = "LANGUAGE = 'US' (or 'USERENV') — or use the sibling _VL view which filters language automatically";
         note = "Translation table (_TL): one row PER INSTALLED LANGUAGE per id. Filter LANGUAGE or join the _VL view, else counts inflate by the number of languages.";
       } else if (s.flag) {
@@ -162,7 +165,7 @@ export function grainRegistryCount(reports: Database.Database): number {
 }
 
 // Bump when the classification logic changes so a redeploy rebuilds the registry.
-const GRAIN_VERSION = 2;
+const GRAIN_VERSION = 3;
 
 /** Startup helper: open a writable reports connection with schema ATTACHed and (re)build the registry
  *  when it's empty, the logic version changed, or force=true. Idempotent; safe to call on every boot. */
