@@ -162,6 +162,12 @@ export function getGeminiControl(): GeminiControl | null {
 // two ticks pass the openGeminiJobs()==0 check before either inserts its jobs and BOTH submit the
 // same wave (double-pay). The in-flight DB guard (NOT_IN_GEMINI_FLIGHT) also protects the queue, but
 // this stops the wasted round-trip entirely.
+// Keep this many batch JOBS in flight at once. The old design drained a whole wave to zero before
+// submitting the next — with Gemini's async batch queue that left the pipeline mostly empty and was
+// slow. We now TOP UP to the target every tick (refill as jobs complete). Overshoot past the spend
+// cap is bounded by the in-flight commitment (~target*batch rows worth), which is fine for a fixed
+// budget. GEMINI_MAX_INFLIGHT_JOBS overrides the default.
+const MAX_INFLIGHT_JOBS = Math.max(1, Number(process.env.GEMINI_MAX_INFLIGHT_JOBS ?? 60));
 let _driveInFlight = false;
 export async function driveGeminiReenrich(): Promise<{ polled: number; ingested: number; submitted?: number; stopped?: string }> {
   if (_driveInFlight) return { polled: 0, ingested: 0, stopped: "already-running" };
@@ -172,9 +178,14 @@ export async function driveGeminiReenrich(): Promise<{ polled: number; ingested:
     if (!ctl || !ctl.active) return poll;
     const sources = ctl.sources.split(",").map((s) => s.trim()).filter(Boolean);
     if (ctl.cap > 0 && spentUsd("gemini%") >= ctl.cap) { setGeminiControl({ ...ctl, active: false }); return { ...poll, stopped: "spend-cap" }; }
-    if (openGeminiJobs().length > 0) return poll; // let the in-flight wave finish before the next
-    const r = await submitGeminiReenrich({ sources, model: ctl.model, limit: ctl.wave, batchSize: ctl.batch_size, spendCapUsd: ctl.cap });
-    if (r.submitted === 0) { setGeminiControl({ ...ctl, active: false }); return { ...poll, stopped: r.skippedForCap ? "spend-cap" : "queue-empty" }; }
+    const open = openGeminiJobs().length;
+    const slots = MAX_INFLIGHT_JOBS - open;
+    if (slots <= 0) return poll; // pipeline saturated — nothing to top up this tick
+    // top up: submit up to `slots` more batches (bounded also by ctl.wave rows per tick)
+    const topUp = Math.min(slots * ctl.batch_size, ctl.wave);
+    const r = await submitGeminiReenrich({ sources, model: ctl.model, limit: topUp, batchSize: ctl.batch_size, spendCapUsd: ctl.cap });
+    // deactivate only when nothing is left to submit AND nothing is still running
+    if (r.submitted === 0 && open === 0) { setGeminiControl({ ...ctl, active: false }); return { ...poll, stopped: r.skippedForCap ? "spend-cap" : "queue-empty" }; }
     return { ...poll, submitted: r.submitted };
   } finally {
     _driveInFlight = false;
