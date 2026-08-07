@@ -14,7 +14,7 @@ import { GoogleGenAI } from "@google/genai";
 import { reportsDbPath } from "../dbPaths.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./enrichPrompt.js";
 import { embedBulk as embed } from "./embed.js";
-import { updateEnrichment, embedTexts, recordUsage, reenrichQueue, spentUsd } from "./ingestStore.js";
+import { updateEnrichment, embedTexts, recordUsage, clearBatchUsage, reenrichQueue, spentUsd } from "./ingestStore.js";
 
 function apiKey(): string {
   const k = (process.env.GOOGLE_STUDIO_API_KEY ?? "").trim();
@@ -124,6 +124,10 @@ export async function pollGeminiJob(name: string): Promise<Record<string, unknow
       inTok += Number(um.promptTokenCount ?? 0); outTok += Number(um.candidatesTokenCount ?? 0); ok++;
     } catch { fail++; }
   }
+  // Idempotent usage: a batch's execution is billed by Google ONCE, but a re-ingest (race, retry,
+  // manual reingest) must NOT record its tokens again — clear any prior usage for this batch_id first
+  // so `spentUsd` (and the spend cap) reflect real per-batch cost, not inflated re-counts.
+  clearBatchUsage(name);
   recordUsage({ ts: new Date().toISOString(), model: BATCH_PRICE_MODEL(model), source: "otbi-batch", nItems: ok, inputTokens: inTok, outputTokens: outTok, cacheReadTokens: 0, cacheCreationTokens: 0, batchId: name });
   d.prepare("UPDATE gjob_jobs SET status = 'done', note = ? WHERE name = ?").run(`ok=${ok} fail=${fail}`, name);
   return { name, status: "done", ingested: ok, failed: fail };
