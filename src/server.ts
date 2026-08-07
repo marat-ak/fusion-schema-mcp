@@ -9,6 +9,7 @@ import { buildServer } from "./tools.js";
 import { stats } from "./catalog.js";
 import { createIngestRouter, ingestAuthWarning, startIngestScheduler } from "./ingest.js";
 import { loadLayoutPatterns } from "./corpus/layoutStore.js";
+import { ensureGrainRegistry } from "./corpus/grainRegistry.js";
 
 const PORT = Number(process.env.MCP_PORT ?? 8979);
 const HOST = process.env.MCP_HOST ?? "0.0.0.0";
@@ -67,6 +68,9 @@ app.listen(PORT, HOST, () => {
   startIngestScheduler();
   // layout-pattern corpus: (re)load from the repo JSONL when its hash changed (non-fatal)
   void loadLayoutPatterns().catch((e) => console.error("[layout-corpus] load failed:", e?.message ?? e));
+  // table-grain registry: build once from schema signals + corpus SQL (non-fatal)
+  try { const g = ensureGrainRegistry(); console.error(`[grain] registry ${g.built ? "built" : "present"}: ${g.rows} multi-row tables`); }
+  catch (e: any) { console.error("[grain] build failed:", e?.message ?? e); }
   // warm the embedder at boot — otherwise the FIRST findSimilarQueries pays the ~30-50s model load
   void import("./corpus/embed.js")
     .then((m) => m.embed(["warm"]))

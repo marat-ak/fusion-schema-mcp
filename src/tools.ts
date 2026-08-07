@@ -196,6 +196,28 @@ export function buildServer(): McpServer {
   );
 
   server.registerTool(
+    "getTableGrain",
+    {
+      title: "Does this table keep ONE row per key or MULTIPLE (history/revisions)?",
+      description:
+        "Grain hint for a table so you don't GUESS whether a driving table is one-row-per-business-key " +
+        "and silently double-count. Returns one of: `effective_dated` (date-tracked `_F`/`_M` table — keeps " +
+        "many rows across time; filter SYSDATE/:as_of BETWEEN effective_start_date AND effective_end_date on " +
+        "EVERY such table, and add a primary/latest flag if present), `latest_flag` (keeps history; current " +
+        "row flagged by latest_rec_flag/latest_flag/current_flag/primary_flag='Y'), `translation` (`_TL` table " +
+        "— one row PER LANGUAGE; filter LANGUAGE='US' or use the `_VL` view), `revision_suspect` (has a " +
+        "revision column but NO standard flag and the corpus rarely dedups it — e.g. DOO_HEADERS_ALL keeps " +
+        "every order revision; you MUST verify grain and dedup via MAX(object_version_number) OVER " +
+        "(PARTITION BY <key>), never assume one row), or `single_row` (default). `dedup` gives the exact " +
+        "filter; `corpusEvidence` = how many real reports treat it so. " +
+        "CALL THIS for every DRIVING/fact table before you write GROUP BY or SUM — validateTable also " +
+        "returns a grainWarning when the table is multi-row.",
+      inputSchema: { table: z.string().describe("Physical table name, e.g. DOO_HEADERS_ALL") },
+    },
+    async ({ table }) => reply("getTableGrain", { table }, catalog.grainFor(String(table)) ?? { grain: "single_row" }),
+  );
+
+  server.registerTool(
     "listQueriesForSubjectArea",
     {
       title: "List all report queries under a subject area",

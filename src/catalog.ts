@@ -5,6 +5,7 @@ import { load as loadVec } from "sqlite-vec";
 import { embed } from "./corpus/embed.js";
 import { textHash, getVecs, putVecs } from "./corpus/colCache.js";
 import { classifyDomain, topDomain } from "./corpus/domain.js";
+import { getTableGrain } from "./corpus/grainRegistry.js";
 import { normName, suggestNames } from "./util.js";
 import { reportsDbPath, schemaDbPath, isSingleFile, sqlQuote } from "./dbPaths.js";
 
@@ -209,13 +210,24 @@ export function validateTable(name: string) {
   const n = normName(name);
   if (NAME_SET.has(n)) {
     const t = qTable.get(n) as any;
+    // Surface the GRAIN hint on every validate so the agent can't miss a multi-row driving table
+    // (date-effective / latest-flag / revision-retained) and assert one-row-per-key by mistake.
+    const g = grainFor(t.name);
     return {
       exists: true,
       table: { name: t.name, type: t.type, module: t.module, remarks: t.remarks },
+      ...(g && g.grain !== "single_row"
+        ? { grainWarning: { grain: g.grain, dedup: g.dedup, note: g.note, corpusEvidence: g.corpusEvidence } }
+        : {}),
       suggestions: [] as string[],
     };
   }
   return { exists: false, table: null, suggestions: suggestNames(n, ALL_NAMES, 5) };
+}
+
+/** Grain hint for a table (case-insensitive) — reads the table_grain registry via the shared db. */
+export function grainFor(name: string) {
+  try { return getTableGrain(db, name); } catch { return null; }
 }
 
 export function validateColumns(table: string, columns: string[]) {
