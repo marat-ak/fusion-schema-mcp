@@ -94,13 +94,23 @@ export function updateEnrichment(
 /** Rows still lacking v2 enrichment for the given sources — the re-enrich worker's queue.
  *  `includeRedo` also catches BATCH-DEGRADED rows: "(no notable mechanics)" on a non-trivial SQL
  *  (>3000 chars) is a known artifact of prompt-batching, not an honest empty. */
-/** Rows already riding an unfinished batch job must not be re-submitted by the next chunk. */
+/** Rows already riding an unfinished ANTHROPIC batch job must not be re-submitted by the next chunk. */
 const NOT_IN_FLIGHT = `id NOT IN (
   SELECT bi.row_id FROM batch_items bi
   JOIN batch_jobs bj ON bj.batch_id = bi.batch_id
   WHERE bj.status NOT IN ('done','failed','canceled'))`;
+/** Same guard for the native GEMINI batch path (gjob_*): a row in any non-terminal gjob (pending or
+ *  SUCCEEDED-but-not-yet-ingested) is still in flight — re-submitting it double-pays. The prior guard
+ *  only covered the Anthropic tables, so the gemini driver was re-queuing in-flight rows (~2.7x dup). */
+const NOT_IN_GEMINI_FLIGHT = `id NOT IN (
+  SELECT gi.row_id FROM gjob_items gi
+  JOIN gjob_jobs gj ON gj.name = gi.name
+  WHERE gj.status NOT IN ('done','JOB_STATE_FAILED','JOB_STATE_CANCELLED','JOB_STATE_EXPIRED'))`;
 function hasBatchTables(d: Database.Database): boolean {
   try { d.prepare("SELECT 1 FROM batch_jobs LIMIT 1").get(); return true; } catch { return false; }
+}
+function hasGjobTables(d: Database.Database): boolean {
+  try { d.prepare("SELECT 1 FROM gjob_jobs LIMIT 1").get(); return true; } catch { return false; }
 }
 
 export function reenrichQueue(sources: string[], limit: number, includeRedo = false): { id: string; title: string; sql: string; source: string }[] {
@@ -109,7 +119,8 @@ export function reenrichQueue(sources: string[], limit: number, includeRedo = fa
   const cond = includeRedo
     ? `(mechanics IS NULL OR (mechanics = '(no notable mechanics)' AND LENGTH(COALESCE(clean_sql, original_sql)) > 3000))`
     : `mechanics IS NULL`;
-  const inflight = hasBatchTables(d) ? ` AND ${NOT_IN_FLIGHT}` : "";
+  const inflight = (hasBatchTables(d) ? ` AND ${NOT_IN_FLIGHT}` : "")
+    + (hasGjobTables(d) ? ` AND ${NOT_IN_GEMINI_FLIGHT}` : "");
   return d.prepare(
     `SELECT id, title, COALESCE(clean_sql, original_sql) AS sql, source
      FROM report_queries WHERE source IN (${ph}) AND ${cond}${inflight}
@@ -121,7 +132,8 @@ export function reenrichQueue(sources: string[], limit: number, includeRedo = fa
 export function redoQueue(sources: string[], limit: number): { id: string; title: string; sql: string; source: string }[] {
   const d = db();
   const ph = sources.map(() => "?").join(",");
-  const inflight = hasBatchTables(d) ? ` AND ${NOT_IN_FLIGHT}` : "";
+  const inflight = (hasBatchTables(d) ? ` AND ${NOT_IN_FLIGHT}` : "")
+    + (hasGjobTables(d) ? ` AND ${NOT_IN_GEMINI_FLIGHT}` : "");
   return d.prepare(
     `SELECT id, title, COALESCE(clean_sql, original_sql) AS sql, source
      FROM report_queries WHERE source IN (${ph})

@@ -154,14 +154,25 @@ export function getGeminiControl(): GeminiControl | null {
  * no jobs are currently open, submit the next wave. Empties naturally: queue done or cap hit → the
  * run marks itself inactive. Fully resumable — all state (jobs, map, control) is on disk.
  */
+// Re-entrancy lock: the scheduler interval AND a manual /start can both call this; without a lock
+// two ticks pass the openGeminiJobs()==0 check before either inserts its jobs and BOTH submit the
+// same wave (double-pay). The in-flight DB guard (NOT_IN_GEMINI_FLIGHT) also protects the queue, but
+// this stops the wasted round-trip entirely.
+let _driveInFlight = false;
 export async function driveGeminiReenrich(): Promise<{ polled: number; ingested: number; submitted?: number; stopped?: string }> {
-  const poll = await pollGeminiJobs();
-  const ctl = getGeminiControl();
-  if (!ctl || !ctl.active) return poll;
-  const sources = ctl.sources.split(",").map((s) => s.trim()).filter(Boolean);
-  if (ctl.cap > 0 && spentUsd("gemini%") >= ctl.cap) { setGeminiControl({ ...ctl, active: false }); return { ...poll, stopped: "spend-cap" }; }
-  if (openGeminiJobs().length > 0) return poll; // let the in-flight wave finish before the next
-  const r = await submitGeminiReenrich({ sources, model: ctl.model, limit: ctl.wave, batchSize: ctl.batch_size, spendCapUsd: ctl.cap });
-  if (r.submitted === 0) { setGeminiControl({ ...ctl, active: false }); return { ...poll, stopped: r.skippedForCap ? "spend-cap" : "queue-empty" }; }
-  return { ...poll, submitted: r.submitted };
+  if (_driveInFlight) return { polled: 0, ingested: 0, stopped: "already-running" };
+  _driveInFlight = true;
+  try {
+    const poll = await pollGeminiJobs();
+    const ctl = getGeminiControl();
+    if (!ctl || !ctl.active) return poll;
+    const sources = ctl.sources.split(",").map((s) => s.trim()).filter(Boolean);
+    if (ctl.cap > 0 && spentUsd("gemini%") >= ctl.cap) { setGeminiControl({ ...ctl, active: false }); return { ...poll, stopped: "spend-cap" }; }
+    if (openGeminiJobs().length > 0) return poll; // let the in-flight wave finish before the next
+    const r = await submitGeminiReenrich({ sources, model: ctl.model, limit: ctl.wave, batchSize: ctl.batch_size, spendCapUsd: ctl.cap });
+    if (r.submitted === 0) { setGeminiControl({ ...ctl, active: false }); return { ...poll, stopped: r.skippedForCap ? "spend-cap" : "queue-empty" }; }
+    return { ...poll, submitted: r.submitted };
+  } finally {
+    _driveInFlight = false;
+  }
 }
