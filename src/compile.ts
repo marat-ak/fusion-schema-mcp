@@ -25,6 +25,7 @@ import { parse } from "csv-parse";
 import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
 import { nn, toInt } from "./util.js";
+import { decodeXmlEntities, hasXmlEntities } from "./xmlEntities.js";
 import { openEnrichStore } from "./corpus/enrichStore.js";
 import { embed, EMBED_DIM } from "./corpus/embed.js";
 import { readVersionFile } from "./version.js";
@@ -38,6 +39,16 @@ const REPORTS_OUT = process.env.REPORTS_DB ?? path.join(ROOT, "reports.sqlite");
 
 function log(msg: string) {
   console.error(`[compile] ${msg}`);
+}
+
+// XML-entity decode for dictionary text fields (the pod export left &quot;/&apos; in
+// REMARKS/VIEW_TEXT — see xmlEntities.ts). Counted per call site for build verification.
+let decodedCount = 0;
+function dec(v: string | null): string | null {
+  if (v === null) return null;
+  if (!hasXmlEntities(v)) return v;
+  decodedCount++;
+  return decodeXmlEntities(v);
 }
 
 /** Stream a CSV (header row -> object records) and invoke `onRow` per record. */
@@ -147,12 +158,12 @@ async function main() {
       schema: nn(r.TABLE_SCHEM),
       type,
       module: nn(r.APPLICATION_SHORT_NAME),
-      remarks: nn(r.REMARKS),
-      view_text: nn(r.VIEW_TEXT),
+      remarks: dec(nn(r.REMARKS)),
+      view_text: dec(nn(r.VIEW_TEXT)),
     });
   });
   db.exec("COMMIT");
-  log(`META_TABLES: scanned ${tableRows}, kept ${kept.size} TABLE/VIEW`);
+  log(`META_TABLES: scanned ${tableRows}, kept ${kept.size} TABLE/VIEW (entity-decoded values so far: ${decodedCount})`);
 
   // ---- columns (only for kept tables) ----
   const insCol = db.prepare(
@@ -175,13 +186,13 @@ async function main() {
       nn(r.TYPE_NAME) ?? nn(r.DATA_TYPE),
       toInt(r.COLUMN_SIZE),
       nullable,
-      nn(r.REMARKS),
+      dec(nn(r.REMARKS)),
       toInt(r.ORDINAL_POSITION),
     );
     colKept++;
   });
   db.exec("COMMIT");
-  log(`META_COLUMNS: scanned ${colScan}, kept ${colKept}`);
+  log(`META_COLUMNS: scanned ${colScan}, kept ${colKept} (entity-decoded values so far: ${decodedCount})`);
 
   // ---- primary keys ----
   const insPk = db.prepare(
@@ -295,11 +306,11 @@ async function main() {
     let n = 0;
     for (const r of arr) {
       if (!r.fromTable || !r.toTable) continue;
-      insOtbi.run(r.fromTable, r.fromColumn ?? null, r.toTable, r.toColumn ?? null, r.predicate || null);
+      insOtbi.run(r.fromTable, r.fromColumn ?? null, r.toTable, r.toColumn ?? null, dec(r.predicate || null));
       n++;
     }
     db.exec("COMMIT");
-    log(`otbi_relations: kept ${n}`);
+    log(`otbi_relations: kept ${n} (entity-decoded values total: ${decodedCount})`);
   }
 
   // ---- indexes for lookup ----

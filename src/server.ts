@@ -10,6 +10,8 @@ import { stats } from "./catalog.js";
 import { createIngestRouter, ingestAuthWarning, startIngestScheduler } from "./ingest.js";
 import { loadLayoutPatterns } from "./corpus/layoutStore.js";
 import { ensureGrainRegistry } from "./corpus/grainRegistry.js";
+import { ensureUsageGraph } from "./corpus/usageGraph.js";
+import { ensurePredicateRegistry } from "./corpus/predicateMiner.js";
 
 const PORT = Number(process.env.MCP_PORT ?? 8979);
 const HOST = process.env.MCP_HOST ?? "0.0.0.0";
@@ -71,6 +73,12 @@ app.listen(PORT, HOST, () => {
   // table-grain registry: build once from schema signals + corpus SQL (non-fatal)
   try { const g = ensureGrainRegistry(); console.error(`[grain] registry ${g.built ? "built" : "present"}: ${g.rows} multi-row tables`); }
   catch (e: any) { console.error("[grain] build failed:", e?.message ?? e); }
+  // usage graph: reverse index table -> real queries that use it (table-anchored retrieval)
+  try { const u = ensureUsageGraph(); console.error(`[usage] graph ${u.built ? "built" : "present"}: ${u.rows} usages over ${u.tables} tables`); }
+  catch (e: any) { console.error("[usage] build failed:", e?.message ?? e); }
+  // predicate rollup: most-used hardcoded filters per table (structural + discriminator)
+  try { const p = ensurePredicateRegistry(); console.error(`[predicates] rollup ${p.built ? "built" : "present"}: ${p.rows} predicates over ${p.tables} tables`); }
+  catch (e: any) { console.error("[predicates] build failed:", e?.message ?? e); }
   // warm the embedder at boot — otherwise the FIRST findSimilarQueries pays the ~30-50s model load
   void import("./corpus/embed.js")
     .then((m) => m.embed(["warm"]))

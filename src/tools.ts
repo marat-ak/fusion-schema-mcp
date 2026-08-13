@@ -4,6 +4,7 @@ import { z } from "zod";
 import * as catalog from "./catalog.js";
 import { queryFlexfields, queryAdfExtensions } from "./corpus/flexStore.js";
 import { findLayoutPattern, getLayoutPattern } from "./corpus/layoutStore.js";
+import { upsertTableRule, listTableRules, deleteTableRule } from "./corpus/tableRules.js";
 
 const DEBUG = process.env.MCP_DEBUG === "1" || process.env.MCP_DEBUG === "true";
 
@@ -72,25 +73,47 @@ export function buildServer(): McpServer {
     },
     async ({ table, search, like, limit }) =>
       search
-        ? reply("getColumns", { table, search, limit }, await catalog.searchColumns(table, search, limit ?? 20))
+        // semantic branch must carry the corpus stats too — agents often confirm tables ONLY via search
+        ? reply("getColumns", { table, search, limit }, { ...(await catalog.searchColumns(table, search, limit ?? 20)), ...catalog.mostlyUsedStats(table) })
         : reply("getColumns", { table, like, limit }, catalog.getColumns(table, { like, limit })),
   );
 
   server.registerTool(
     "validateTable",
     {
-      title: "Validate a table/view name",
+      title: "Validate table/view name(s)",
       description:
         "Check whether a table/view exists in Fusion. If not, returns fuzzy 'did-you-mean' " +
-        "suggestions — use this to catch EBS-vs-Fusion name drift in a name you think you know.",
+        "suggestions — use this to catch EBS-vs-Fusion name drift in a name you think you know. " +
+        "Pass `names` with your FULL final table list right before writing SQL: each entry returns its " +
+        "grain warning (multi-row/revision tables that need a dedup filter) and the filters real reports " +
+        "apply — address every hint or state why not.",
       inputSchema: {
         name: z.string().optional().describe("Candidate object name to validate"),
         table: z.string().optional().describe("Alias for `name` (matches getColumns/validateColumns param naming)"),
+        names: z.array(z.string()).optional().describe("Validate several tables in one call (the pre-SQL dossier check)"),
       },
     },
-    async ({ name, table }) => {
+    async ({ name, table, names }) => {
+      if (names?.length) {
+        // COMPACT dossier: full validateTable × N tables blew the token cap (8 tables = 130k chars — the
+        // topUsages examples dominate). Keep exists + the decision-critical stats, cap list lengths,
+        // drop usage examples (fetch per-table via getTableUsages when needed).
+        const out = names.map((x) => {
+          const v: any = catalog.validateTable(x);
+          const stats: any = catalog.mostlyUsedStats(x);
+          return {
+            name: x,
+            exists: v.exists,
+            ...(v.suggestions?.length ? { suggestions: v.suggestions.slice(0, 3) } : {}),
+            ...(stats.mostlyUsedFilters ? { mostlyUsedFilters: stats.mostlyUsedFilters.slice(0, 5) } : {}),
+            ...(stats.mostlyUsedJoinFilters ? { mostlyUsedJoinFilters: stats.mostlyUsedJoinFilters.slice(0, 5) } : {}),
+          };
+        });
+        return reply("validateTable", { names }, { tables: out });
+      }
       const n = name ?? table;
-      if (!n) return reply("validateTable", { name: n }, { error: "pass `name` (or `table`)" });
+      if (!n) return reply("validateTable", { name: n }, { error: "pass `name`, `table` or `names`" });
       return reply("validateTable", { name: n }, catalog.validateTable(n));
     },
   );
@@ -214,7 +237,82 @@ export function buildServer(): McpServer {
         "returns a grainWarning when the table is multi-row.",
       inputSchema: { table: z.string().describe("Physical table name, e.g. DOO_HEADERS_ALL") },
     },
-    async ({ table }) => reply("getTableGrain", { table }, catalog.grainFor(String(table)) ?? { grain: "single_row" }),
+    async ({ table }) => {
+      const grain = catalog.grainFor(String(table)) ?? { grain: "single_row" };
+      // Auto-attach the top real usages (brief) so grain + real filters/joins arrive together.
+      const usages = catalog.tableUsages(String(table), { limit: 3, brief: true }).usages;
+      return reply("getTableGrain", { table }, { ...grain, ...(usages.length ? { topUsages: usages } : {}) });
+    },
+  );
+
+  server.registerTool(
+    "getTableUsages",
+    {
+      title: "Real report SQL that USES this table (adopt real joins/filters)",
+      description:
+        "Table-anchored retrieval — the complement to findSimilarQueries (intent-anchored). Given a " +
+        "table you already know, returns the best real report/view/OTBI queries that USE it, ranked " +
+        "for ADOPTION (real hand-written reports & delivered views first — they are proper report-grade " +
+        "examples; per-column OTBI fragments read the table flat and rank lower — then by SQL " +
+        "completeness), each with its filters, joins and SQL (large bodies fetchable by id via " +
+        "getReportQuery). USE THIS after validateTable to copy real join keys and filter idioms instead " +
+        "of guessing. It reaches bip-report and view SQL that have NO structured joins/filters " +
+        "extracted, so it is the only way to see how those real reports actually filter/join a table.",
+      inputSchema: {
+        table: z.string().describe("Exact physical table/view name, e.g. DOO_HEADERS_ALL"),
+        limit: z.number().int().min(1).max(30).optional().describe("Max usages (default 6)"),
+      },
+    },
+    async ({ table, limit }) =>
+      reply("getTableUsages", { table, limit }, catalog.tableUsages(String(table), { limit: limit ?? 6 })),
+  );
+
+  server.registerTool(
+    "upsertTableRule",
+    {
+      title: "Record/override a curated table rule (human knowledge schema/corpus can't provide)",
+      description:
+        "Persist a per-table fact neither the schema nor the corpus can teach — e.g. 'on this tenant " +
+        "DOO_HEADERS_ALL is safely deduped by submitted_flag=Y' (that idiom appears in ~17 of ~98,000 " +
+        "queries and 0 extracted fields, so it is neither mineable nor retrievable). kind='grain' " +
+        "OVERRIDES the derived grain/dedup for the table (pass `grain` and/or `dedup`); kind='note' adds " +
+        "a clarification; kind='caveat' a warning. Curated rules survive ALL metadata redeployments and " +
+        "surface automatically on validateTable + getTableGrain. Pass `id` to update an existing rule; " +
+        "tag `author`.",
+      inputSchema: {
+        id: z.number().int().optional().describe("existing rule id to update; omit to create"),
+        table: z.string().describe("physical table name"),
+        kind: z.enum(["grain", "note", "caveat"]).describe("grain=override classification+dedup, note=clarification, caveat=warning"),
+        column: z.string().optional().describe("column name if column-scoped"),
+        grain: z.string().optional().describe("kind=grain: override category (single_row | latest_flag | effective_dated | translation | revision_suspect)"),
+        dedup: z.string().optional().describe("kind=grain: the exact dedup filter, e.g. submitted_flag='Y'"),
+        note: z.string().optional().describe("free-text body / clarification"),
+        author: z.string().optional().describe("who recorded it"),
+        source: z.enum(["human", "agent"]).optional().describe("provenance (default human)"),
+        enabled: z.boolean().optional().describe("set false to disable without deleting"),
+      },
+    },
+    async (a) => reply("upsertTableRule", a, upsertTableRule(a, new Date().toISOString())),
+  );
+
+  server.registerTool(
+    "listTableRules",
+    {
+      title: "List curated table rules",
+      description: "List curated table rules (includes disabled). Pass `table` to scope to one table, else all.",
+      inputSchema: { table: z.string().optional().describe("physical table name to filter by") },
+    },
+    async ({ table }) => reply("listTableRules", { table }, listTableRules(table)),
+  );
+
+  server.registerTool(
+    "deleteTableRule",
+    {
+      title: "Delete a curated table rule",
+      description: "Delete a curated rule by its id (from listTableRules).",
+      inputSchema: { id: z.number().int().describe("rule id to delete") },
+    },
+    async ({ id }) => reply("deleteTableRule", { id }, deleteTableRule(id)),
   );
 
   server.registerTool(

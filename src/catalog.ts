@@ -6,6 +6,9 @@ import { embed } from "./corpus/embed.js";
 import { textHash, getVecs, putVecs } from "./corpus/colCache.js";
 import { classifyDomain, topDomain } from "./corpus/domain.js";
 import { getTableGrain } from "./corpus/grainRegistry.js";
+import { getTableUsages } from "./corpus/usageGraph.js";
+import { getTableRules } from "./corpus/tableRules.js";
+import { getTablePredicates } from "./corpus/predicateMiner.js";
 import { normName, suggestNames } from "./util.js";
 import { reportsDbPath, schemaDbPath, isSingleFile, sqlQuote } from "./dbPaths.js";
 
@@ -123,6 +126,7 @@ export function getTable(name: string) {
     viewText: t.view_text,
     primaryKey: pk,
     columnCount: cc,
+    ...mostlyUsedStats(n),
   };
 }
 
@@ -151,7 +155,7 @@ export function getColumns(table: string, opts?: { like?: string; limit?: number
     ordinal: r.ordinal,
     isPrimaryKey: pk.has(r.name),
   }));
-  const res: any = { tableExists: true, totalColumns: total, returned: cols.length, columns: cols };
+  const res: any = { tableExists: true, totalColumns: total, returned: cols.length, columns: cols, ...mostlyUsedStats(n) };
   if (truncated) {
     res.note = `Showing ${cols.length} of ${shown}${opts?.like ? ` matching '${opts.like}'` : ""} (table has ${total} columns). ` +
       `Refine with getColumns(table, {like:'...'}), searchColumns for a concept, or validateColumns(table, [...]).`;
@@ -210,24 +214,80 @@ export function validateTable(name: string) {
   const n = normName(name);
   if (NAME_SET.has(n)) {
     const t = qTable.get(n) as any;
-    // Surface the GRAIN hint on every validate so the agent can't miss a multi-row driving table
-    // (date-effective / latest-flag / revision-retained) and assert one-row-per-key by mistake.
-    const g = grainFor(t.name);
+    // Pushed payload = corpus statistics only (user directive): mostlyUsedFilters/mostlyUsedJoinFilters +
+    // brief real-usage examples. Grain classification + curated rules stay PULL-only via getTableGrain.
+    const usages = tableUsages(t.name, { limit: 3, brief: true }).usages;
     return {
       exists: true,
       table: { name: t.name, type: t.type, module: t.module, remarks: t.remarks },
-      ...(g && g.grain !== "single_row"
-        ? { grainWarning: { grain: g.grain, dedup: g.dedup, note: g.note, corpusEvidence: g.corpusEvidence } }
-        : {}),
+      ...mostlyUsedStats(t.name),
+      ...(usages.length ? { topUsages: usages } : {}),
       suggestions: [] as string[],
     };
   }
   return { exists: false, table: null, suggestions: suggestNames(n, ALL_NAMES, 5) };
 }
 
-/** Grain hint for a table (case-insensitive) — reads the table_grain registry via the shared db. */
-export function grainFor(name: string) {
-  try { return getTableGrain(db, name); } catch { return null; }
+/** Grain hint for a table (case-insensitive) — reads the table_grain registry, then folds in curated
+ *  rules (curated OVERRIDES derived). So a human-recorded fact (e.g. dedup by submitted_flag='Y')
+ *  surfaces on both validateTable and getTableGrain without those callers knowing about curation. */
+export function grainFor(name: string): any {
+  let g: any;
+  try { g = getTableGrain(db, name); } catch { return null; }
+  if (!g) return null;
+  const rules = getTableRules(name);
+  if (rules.length) {
+    const gr = rules.find((r) => r.kind === "grain");
+    if (gr) {
+      g = {
+        ...g,
+        grain: gr.grain ?? g.grain,
+        dedup: gr.dedup ?? g.dedup,
+        multiRow: gr.grain ? gr.grain !== "single_row" : g.multiRow,
+        note: (gr.body ? gr.body + " " : "") + (g.note ?? "") + ` [curated grain by ${gr.author}]`,
+        curated: true,
+      };
+    }
+    g.curatedRules = rules.map((r) => ({
+      kind: r.kind, column: r.column, grain: r.grain, dedup: r.dedup, body: r.body, author: r.author, source: r.source,
+    }));
+  }
+  // Most-used hardcoded filters for this table (structural = always-apply, discriminator = pick-by-intent).
+  try {
+    const p = getTablePredicates(db, name);
+    if (p.structural.length || p.discriminator.length) g.commonPredicates = p;
+  } catch { /* registry may not be built yet */ }
+  return g;
+}
+
+/** Corpus usage statistics pushed with EVERY table payload (getTable/getColumns/validateColumns/
+ *  validateTable): what real queries FILTER this table by (mostlyUsedFilters, from x_predicates rolled up
+ *  at import — no skip-lists, counts per canonical query) and which of its columns participate in JOIN
+ *  conditions (mostlyUsedJoinFilters, column-participation share — the model picks the paired field).
+ *  The agent contract: apply each hint, ask the user, or say why not — never silently ignore. */
+export function mostlyUsedStats(name: string) {
+  const n = normName(name);
+  const out: any = {};
+  try {
+    const f = db.prepare(
+      "SELECT column_name AS column, op, literal, occurrences FROM table_predicates WHERE table_name = ? ORDER BY occurrences DESC LIMIT 8",
+    ).all(n);
+    if (f.length) out.mostlyUsedFilters = f;
+  } catch { /* rollup not built yet */ }
+  try {
+    const j = db.prepare(
+      "SELECT column_name AS column, units, share FROM table_join_columns WHERE table_name = ? ORDER BY share DESC LIMIT 8",
+    ).all(n);
+    if (j.length) out.mostlyUsedJoinFilters = j;
+  } catch { /* rollup not built yet */ }
+  return out;
+}
+
+/** Top real-query usages of a table (table-anchored retrieval — the complement to the intent-anchored
+ *  findSimilarQueries). Lets the agent adopt real join/filter idioms, incl. from bip/view sources that
+ *  have no structured predicates/joins extracted. `brief` omits SQL (for auto-attach). */
+export function tableUsages(name: string, opts: { limit?: number; brief?: boolean } = {}) {
+  try { return getTableUsages(db, name, opts); } catch { return { table: normName(name), usageCount: 0, usages: [] }; }
 }
 
 export function validateColumns(table: string, columns: string[]) {
@@ -253,7 +313,17 @@ export function validateColumns(table: string, columns: string[]) {
       suggestions: exists ? [] : suggestNames(c, colNames, 5),
     };
   });
-  return { table: n, tableExists: true, results };
+  // PUSH the grain + most-used-filter knowledge on the tool the agent ALWAYS calls (validateTable already
+  // does this; the Cotton File session showed agents validate columns without ever calling validateTable —
+  // and shipped DOO_HEADERS_ALL without its SUBMITTED_FLAG='Y' revision dedup as a result).
+  // pushed payload carries ONLY corpus statistics (user directive) — grain/curated stay pull-only
+  // via the explicit getTableGrain tool.
+  return {
+    table: n,
+    tableExists: true,
+    results,
+    ...mostlyUsedStats(n),
+  };
 }
 
 export function getIndexes(table: string) {

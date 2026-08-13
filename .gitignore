@@ -24,3 +24,6 @@ samples_*.sql
 # enrichment run artifacts / scratch
 _gem_compare.json
 data/*.jsonl
+
+# GPU enrichment backups (large, rebuildable)
+.gpu-backups/
