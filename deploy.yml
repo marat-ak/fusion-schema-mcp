@@ -1,0 +1,20 @@
+# Deployment self-description (contract: oservices-devops/manifest-schema.md)
+name: fusion-schema-mcp
+kind: service
+contains: []
+needs:
+  always: []
+  per_target:
+    dev: [reranker]      # dev-only GPU rerank helper; fail-open KNN without it
+    prod-vultr: []
+    appliance: []
+  optional: []
+images:
+  - gnimsys/fusion-schema-mcp:latest
+config_ship:
+  - path: fusion-schema-mcp/.env (gitignored)
+    to: "env_file per target; appliance: /data/env/fusion-schema-mcp.env (firstboot, empty ok)"
+    note: "catalog SQLite ships INSIDE the image (build artifact, never git)"
+target_notes:
+  appliance: "ENRICH_INTERVAL=0 (frozen pre-enriched corpus); /data/catalog mount"
+  dev: "corpus enrichment profile services live in root compose under profiles: [corpus]"
