@@ -1,6 +1,6 @@
 #!/bin/bash
 # Wait for the reconfigured endpoint (2 GPU / DP=2 / maxbatch 32768) to come up, then measure throughput.
-set -a; . /mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/.env; set +a
+set -a; . /mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/.env; set +a
 cd /root/enrich-run
 echo "waiting for endpoint ready..."
 code=000

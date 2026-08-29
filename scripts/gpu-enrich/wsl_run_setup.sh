@@ -2,8 +2,8 @@
 # Unpack the bundle into ONE self-contained run folder (like scp+gunzip on a box), using the EDITED scripts.
 # Then validate export wave 0 with NO endpoint. Idempotent.
 set -e
-SRC=/mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/scripts/gpu-enrich
-BUN=/mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/.gpu-backups/box-bundle
+SRC=/mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/scripts/gpu-enrich
+BUN=/mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/.gpu-backups/box-bundle
 R=/root/enrich-run
 mkdir -p "$R"
 

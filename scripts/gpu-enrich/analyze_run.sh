@@ -1,8 +1,8 @@
 #!/bin/bash
 # READ-ONLY analysis: compare the v2 catalog vs the bundle DBs. No writes to any DB, no export, no enrich.
 set -e
-SRC=/mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/scripts/gpu-enrich
-BUN=/mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/.gpu-backups/box-bundle
+SRC=/mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/scripts/gpu-enrich
+BUN=/mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/.gpu-backups/box-bundle
 V2=/opt/fusion-catalog-v2
 R=/root/enrich-run
 mkdir -p "$R"

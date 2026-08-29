@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Boot the server, wait for health, run the live smoke client, then stop. Exit code = smoke result.
 set -uo pipefail
-cd /mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp
+cd /mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp
 
 node dist/server.js > /tmp/mcp-server.log 2>&1 &
 SRV=$!

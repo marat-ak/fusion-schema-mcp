@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build the image and run via compose in the CloudBeaver WSL Docker host, then health-check.
 set -euo pipefail
-cd /mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp
+cd /mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp
 
 echo "=== docker compose build ==="
 docker compose build

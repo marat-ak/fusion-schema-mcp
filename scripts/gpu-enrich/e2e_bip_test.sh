@@ -15,17 +15,17 @@
 # no bridge net) — the exact image/command the task specifies.
 #
 # RUN (full — hits the GPU endpoint, writes the copy DB, costs GPU time):
-#   wsl -d CloudBeaver -u root -e bash -lc 'set -a; . /mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/.env; set +a; bash /mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/scripts/gpu-enrich/e2e_bip_test.sh'
+#   wsl -d CloudBeaver -u root -e bash -lc 'set -a; . /mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/.env; set +a; bash /mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/scripts/gpu-enrich/e2e_bip_test.sh'
 #
 # DRY PREVIEW (read-only: selection + closure only, no copy, no endpoint, no DB write):
-#   wsl -d CloudBeaver -u root -e bash -lc 'DRY_RUN=1 bash /mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/scripts/gpu-enrich/e2e_bip_test.sh'
+#   wsl -d CloudBeaver -u root -e bash -lc 'DRY_RUN=1 bash /mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/scripts/gpu-enrich/e2e_bip_test.sh'
 # =============================================================================================
 set -euo pipefail
 
 SRC=${SRC:-/root/enrich-run}                     # pristine run folder (source of DBs + reuse scripts)
 DIR=${DIR:-/root/enrich-e2e}                     # isolated working copy
-E2E_SRC=${E2E_SRC:-/mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/scripts/gpu-enrich}
-ENVFILE=${ENVFILE:-/mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/.env}
+E2E_SRC=${E2E_SRC:-/mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/scripts/gpu-enrich}
+ENVFILE=${ENVFILE:-/mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/.env}
 N_BIPS=${N_BIPS:-10}
 SELECT_BY=${SELECT_BY:-closure}                  # closure | sqllen | tables  (see e2e_select_closure.py)
 CONC=${CONC:-64}                                 # tiny batches; capped by batch size anyway

@@ -3,8 +3,8 @@
 set -e
 R=/home/marat/gpu-run
 mkdir -p "$R"
-BUN=/mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/.gpu-backups/box-bundle
-SRC=/mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/scripts/gpu-enrich
+BUN=/mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/.gpu-backups/box-bundle
+SRC=/mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/scripts/gpu-enrich
 [ -f "$R/sqls.sqlite" ]   || { echo "gunzip sqls...";   zcat "$BUN/sqls.sqlite.gz"   > "$R/sqls.sqlite"; }
 [ -f "$R/schema.sqlite" ] || { echo "gunzip schema..."; zcat "$BUN/schema.sqlite.gz" > "$R/schema.sqlite"; }
 cp "$BUN/curated_column_remarks.json" "$R/"

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Periodic backup of the live enrichment outputs -> Windows disk. Runs until DONE.flag or container gone.
-BK=/mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/.gpu-backups/run-live
+BK=/mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/.gpu-backups/run-live
 mkdir -p "$BK"
 while true; do
   cp /root/enrich-run/enrich_output.*.jsonl "$BK/" 2>/dev/null

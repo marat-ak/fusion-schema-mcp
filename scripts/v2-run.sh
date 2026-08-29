@@ -4,7 +4,7 @@
 set -e
 exec > >(tee /opt/fusion-catalog-v2/build.log) 2>&1
 
-SRC=/mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp
+SRC=/mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp
 IMG=gnimsys/fusion-schema-mcp:latest
 V2=/opt/fusion-catalog-v2
 

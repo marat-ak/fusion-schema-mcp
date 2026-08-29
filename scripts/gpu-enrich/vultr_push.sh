@@ -6,7 +6,7 @@ K=/root/.ssh/fusion_deploy
 R=/root/enrich-run
 A=/root/enrich-run.tar.gz
 HOST=deploy@136.244.90.237
-SRC_ENV=/mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp/.env
+SRC_ENV=/mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp/.env
 
 # minimal enrich .env (HF creds only) travels with the archive; HF_ENDPOINT_URL is updated on Vultr for the new endpoint
 grep -E '^(HF_ENDPOINT_URL|HF_TOKEN|HF_DP|MAX_NUM_SEQS)=' "$SRC_ENV" > "$R/.env" || true

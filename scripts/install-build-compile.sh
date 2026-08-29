@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install deps, build TS, compile the SQLite catalog. Run in the CloudBeaver WSL distro.
 set -euo pipefail
-cd /mnt/c/Marat/OSaaS/ClaudeShared/CloudBeaver/fusion-schema-mcp
+cd /mnt/c/Marat/OSaaS/ClaudeShared/oservices/fusion-schema-mcp
 
 echo "=== npm install ==="
 npm install
