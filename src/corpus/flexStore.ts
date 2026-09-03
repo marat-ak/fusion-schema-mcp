@@ -1,6 +1,6 @@
 /**
  * DFF/EFF flexfield registry — the customer-admin-provided mapping from business names
- * ("Pallet Qty", context "Tama Australia Cotton File") to physical bindings (flexfield_code,
+ * ("Pallet Qty", context "customer-A requirements doc") to physical bindings (flexfield_code,
  * context_code, ATTRIBUTE_CHARn column, value set). Source of truth for resolving EFF contexts
  * WITHOUT guessing and without needing pod access (works offline).
  *

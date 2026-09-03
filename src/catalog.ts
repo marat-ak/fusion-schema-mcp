@@ -314,7 +314,7 @@ export function validateColumns(table: string, columns: string[]) {
     };
   });
   // PUSH the grain + most-used-filter knowledge on the tool the agent ALWAYS calls (validateTable already
-  // does this; the Cotton File session showed agents validate columns without ever calling validateTable —
+  // does this; the customer-A requirements-doc session showed agents validate columns without ever calling validateTable —
   // and shipped DOO_HEADERS_ALL without its SUBMITTED_FLAG='Y' revision dedup as a result).
   // pushed payload carries ONLY corpus statistics (user directive) — grain/curated stay pull-only
   // via the explicit getTableGrain tool.
