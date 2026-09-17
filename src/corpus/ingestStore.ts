@@ -15,7 +15,7 @@ import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
 import { embedBulk as embed } from "./embed.js";
 import { classifyDomain } from "./domain.js";
-import { reportsDbPath, schemaDbPath, isSingleFile, sqlQuote } from "../dbPaths.js";
+import { reportsDbPath, schemaDbPath, sqlQuote } from "../dbPaths.js";
 
 // SPLIT DBs: the writable corpus connection opens reports.sqlite (report_queries* + vec0) and
 // ATTACHes schema.sqlite read-only so moduleOf() can resolve `FROM tables`. catalog.ts holds a
@@ -31,12 +31,10 @@ function db(): Database.Database {
   const d = new Database(DB_PATH);
   d.pragma("busy_timeout = 10000"); // tolerate the read-only reader connection briefly locking
   loadVec(d);
-  if (!isSingleFile()) {
-    d.exec(`ATTACH DATABASE '${sqlQuote(schemaDbPath())}' AS schemadb`);
-  }
+  d.exec(`ATTACH DATABASE '${sqlQuote(schemaDbPath())}' AS schemadb`);
   // report_queries.reports = JSON list of source reports that use this (deduped) SQL; embedding = the
   // bge-small vector as a BLOB (kept alongside report_queries_vec so the vec index can be rebuilt from
-  // blobs without re-embedding). Added at runtime so pre-split/legacy DBs pick them up without recompile.
+  // blobs without re-embedding). Added at runtime so an older seed picks them up without recompile.
   try { d.exec("ALTER TABLE report_queries ADD COLUMN reports TEXT"); } catch { /* already present */ }
   try { d.exec("ALTER TABLE report_queries ADD COLUMN embedding BLOB"); } catch { /* already present */ }
   // v2 enrichment: NL intents (JSON array) + the once-analyzed mechanics playbook.

@@ -12,6 +12,6 @@ npm run build
 echo "=== compile catalog ==="
 node dist/compile.js
 
-echo "=== catalog file ==="
-ls -la catalog.sqlite
+echo "=== seed files ==="
+ls -la schema.sqlite reports.sqlite
 echo ALL_DONE

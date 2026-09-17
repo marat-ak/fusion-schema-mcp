@@ -14,7 +14,7 @@ import { load as loadVec } from "sqlite-vec";
 import { embed } from "./embed.js";
 import { reportsDbPath } from "../dbPaths.js";
 
-// The report corpus now lives in reports.sqlite (env REPORTS_DB / CATALOG_DB fallback via dbPaths).
+// The report corpus lives in reports.sqlite (env REPORTS_DB via dbPaths).
 const DB = reportsDbPath();
 
 const EX1_SQL = `

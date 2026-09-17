@@ -12,10 +12,11 @@ function top(res: any) {
   return res.ambiguous ? res.candidates?.[0] : res.matches?.[0];
 }
 
-// One shared catalog for the whole file: catalog.ts binds its DB handle at module-eval time
-// from CATALOG_DB, so we seed once and import once.
+// One shared split catalog for the whole file: catalog.ts binds its DB handles at module-eval time
+// from SCHEMA_DB / REPORTS_DB, so we seed once and import once.
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cat-"));
-const dbPath = path.join(dir, "catalog.sqlite");
+const schemaPath = path.join(dir, "schema.sqlite");
+const reportsPath = path.join(dir, "reports.sqlite");
 
 const DOCS = [
   { id: "a", source: "catalog", desc: "unpaid supplier invoices older than 90 days from AP_INVOICES_ALL", tables: ["AP_INVOICES_ALL", "AP_SUPPLIERS"] },
@@ -30,15 +31,17 @@ const DOCS = [
 ];
 
 test("seed the shared catalog", async () => {
-  const db = new Database(dbPath); loadVec(db);
-  db.exec(`CREATE TABLE tables(name TEXT PRIMARY KEY, schema TEXT, type TEXT, module TEXT, remarks TEXT, view_text TEXT);
+  const s = new Database(schemaPath);
+  s.exec(`CREATE TABLE tables(name TEXT PRIMARY KEY, schema TEXT, type TEXT, module TEXT, remarks TEXT, view_text TEXT);
     CREATE TABLE meta(key TEXT, value TEXT);
     CREATE TABLE columns(table_name TEXT, name TEXT, data_type TEXT, size INTEGER, nullable INTEGER, remarks TEXT, ordinal INTEGER);
     CREATE TABLE pkeys(table_name TEXT, column_name TEXT, seq INTEGER);
     CREATE TABLE fkeys(child_table TEXT, parent_table TEXT, column_name TEXT, seq INTEGER, name TEXT);
     CREATE TABLE indexes(table_name TEXT, index_name TEXT, is_unique INTEGER, ordinal INTEGER, column_name TEXT);
-    CREATE TABLE relationships(from_table TEXT, from_col TEXT, to_table TEXT, to_col TEXT, evidence TEXT, occurrences INTEGER, confidence TEXT, predicate TEXT, source TEXT);
-    CREATE TABLE report_queries(id TEXT,source TEXT,title TEXT,original_sql TEXT,clean_sql TEXT,
+    CREATE TABLE relationships(from_table TEXT, from_col TEXT, to_table TEXT, to_col TEXT, evidence TEXT, occurrences INTEGER, confidence TEXT, predicate TEXT, source TEXT);`);
+  s.close();
+  const db = new Database(reportsPath); loadVec(db);
+  db.exec(`CREATE TABLE report_queries(id TEXT,source TEXT,title TEXT,original_sql TEXT,clean_sql TEXT,
       description TEXT,tables_used TEXT,joins TEXT,filters TEXT,lookup_types TEXT,security_predicate TEXT,approved INTEGER);
     CREATE VIRTUAL TABLE report_queries_vec USING vec0(rowid INTEGER PRIMARY KEY, embedding FLOAT[${EMBED_DIM}]);`);
   const vecs = await embed(DOCS.map((d) => d.desc));
@@ -49,7 +52,8 @@ test("seed the shared catalog", async () => {
     db.prepare("INSERT INTO report_queries_vec(rowid, embedding) VALUES (?, ?)").run(BigInt(i + 1), Buffer.from(vecs[i].buffer));
   });
   db.close();
-  process.env.CATALOG_DB = dbPath;
+  process.env.SCHEMA_DB = schemaPath;
+  process.env.REPORTS_DB = reportsPath;
 });
 
 test("ranks the semantically closest row first, and source filter over-fetches", async () => {

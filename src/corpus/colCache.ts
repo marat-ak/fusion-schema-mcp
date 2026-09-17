@@ -11,7 +11,7 @@ import Database from "better-sqlite3";
 import { CACHE_DB } from "../dbPaths.js";
 
 // The column-search embedding cache now lives in its own file cache.sqlite (env CACHE_DB, default
-// <DATA_DIR>/cache.sqlite). COLCACHE_DB is still honoured (via dbPaths) for back-compat.
+// <DATA_DIR>/cache.sqlite).
 const DEFAULT = CACHE_DB;
 
 let _db: Database.Database | null = null;

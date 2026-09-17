@@ -11,7 +11,8 @@ const xml = `<DATA_DS>
 async function render(rtf: string): Promise<Buffer> {
   const url = (process.env.RENDER_URL ?? "http://bip-render:8983").replace(/\/$/, "");
   const res = await fetch(`${url}/render`, { method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.RENDER_TOKEN ?? ""}` },
+    // RENDER_SMOKE_JWT: any decodable JWT — bip-render gates on the forwarded caller JWT (no static token)
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.RENDER_SMOKE_JWT ?? ""}` },
     body: JSON.stringify({ rtf: Buffer.from(rtf, "latin1").toString("base64"), xml: Buffer.from(xml).toString("base64"), format: "pdf" }) });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return Buffer.from(await res.arrayBuffer());

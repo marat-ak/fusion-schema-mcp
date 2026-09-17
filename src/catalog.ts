@@ -10,28 +10,26 @@ import { getTableUsages } from "./corpus/usageGraph.js";
 import { getTableRules } from "./corpus/tableRules.js";
 import { getTablePredicates } from "./corpus/predicateMiner.js";
 import { normName, suggestNames } from "./util.js";
-import { reportsDbPath, schemaDbPath, isSingleFile, sqlQuote } from "./dbPaths.js";
+import { reportsDbPath, schemaDbPath, sqlQuote } from "./dbPaths.js";
 
 // SPLIT DBs: the read layer opens reports.sqlite as the MAIN connection (so the sqlite-vec `vec0`
 // KNN over report_queries_vec runs on a native, non-attached DB — vec0 KNN is unreliable over an
 // ATTACHed database) and ATTACHes schema.sqlite. Table names are unique across the two files, so
-// unqualified queries (FROM tables / FROM report_queries / FROM meta) resolve unchanged. When a
-// legacy single catalog.sqlite is in play (isSingleFile), both paths resolve to it and we skip the
-// ATTACH (every table already lives in main).
+// unqualified queries (FROM tables / FROM report_queries / FROM meta) resolve unchanged.
 const REPORTS_PATH = reportsDbPath();
 const SCHEMA_PATH = schemaDbPath();
 
-if (!fs.existsSync(REPORTS_PATH)) {
-  throw new Error(
-    `reports DB not found at ${REPORTS_PATH}. Provision or migrate first ` +
-      `(node dist/provision.js / node dist/migrate-split.js), or set CATALOG_DB to a legacy catalog.sqlite.`,
-  );
+for (const [label, p] of [["reports", REPORTS_PATH], ["schema", SCHEMA_PATH]] as const) {
+  if (!fs.existsSync(p)) {
+    throw new Error(
+      `${label} DB not found at ${p}. Provision first (node dist/provision.js), or convert a ` +
+        `pre-split catalog.sqlite with node dist/migrate-split.js <catalog.sqlite>.`,
+    );
+  }
 }
 
 const db = new Database(REPORTS_PATH, { readonly: true, fileMustExist: true });
-if (!isSingleFile()) {
-  db.exec(`ATTACH DATABASE '${sqlQuote(SCHEMA_PATH)}' AS schemadb`);
-}
+db.exec(`ATTACH DATABASE '${sqlQuote(SCHEMA_PATH)}' AS schemadb`);
 db.pragma("query_only = true");
 
 // In-memory table-name list for fuzzy did-you-mean (~30k strings, cheap).
@@ -649,7 +647,7 @@ export async function findSimilarQueries(
 }
 
 // ---- exact report-query lookup (by title / subject area) ----
-// Lazily prepared so an un-migrated catalog.sqlite (no report_queries) doesn't crash
+// Lazily prepared so a reports.sqlite without report_queries yet (fresh seed) doesn't crash
 // the whole server at import — same pattern as vecStmts().
 let _rqStmts: { byTitle: any; byId: any; siblings: any; byArea: any; near: any } | null = null;
 function rqStmts() {

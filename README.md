@@ -25,7 +25,7 @@ Oracle DB â€” later round). No agent, no CloudBeaver UI (later rounds).
 `data/` holds the source metadata (copied from `../../Bip/DB_SCHEMA` via
 `scripts/copy-data.sh`): `META_TABLES/COLUMNS/INDEXES/PKEYS/FKEYS.csv` +
 `mined_relationships.json`. The compile step filters junk table rows to `TABLE`/`VIEW` and
-builds `catalog.sqlite` (FTS5 + lookup indexes).
+builds the split seed DBs `schema.sqlite` + `reports.sqlite` (FTS5 + lookup indexes).
 
 ## Build & run (CloudBeaver WSL distro)
 
@@ -35,7 +35,7 @@ All commands run inside the `CloudBeaver` WSL distro. Scripts avoid PowerShellâ†
 # 1. copy source data into ./data (once)
 bash scripts/copy-data.sh
 
-# 2. install deps, build TS, compile catalog.sqlite
+# 2. install deps, build TS, compile schema.sqlite + reports.sqlite
 bash scripts/install-build-compile.sh
 
 # 3. boot + live smoke test (starts server, runs a real MCP client, asserts acceptance criteria)
@@ -50,8 +50,11 @@ docker compose up -d
 curl http://localhost:8979/health
 ```
 
-The multi-stage image compiles the catalog at build time and ships only `dist/` +
-`catalog.sqlite` (the 250MB CSVs are dropped from the runtime image).
+The multi-stage image compiles the catalog at build time and ships only `dist/` + the zipped
+seed DBs under `/app/seed/` (the 250MB CSVs are dropped from the runtime image). On start,
+`entrypoint.sh` runs `provision.js`, which unpacks/upgrades `schema.sqlite` + `reports.sqlite` +
+`cache.sqlite` in the `DATA_DIR` volume. A pre-split single `catalog.sqlite` is converted once
+with `node dist/migrate-split.js <catalog.sqlite> --schema <dir>/schema.sqlite --reports <dir>/reports.sqlite`.
 
 ## Connecting an agent
 
@@ -69,6 +72,9 @@ e.g. Claude Agent SDK / Codex SDK `mcpServers` config, or the MCP inspector.
 |---|---|---|
 | `MCP_PORT` | `8979` | HTTP port |
 | `MCP_HOST` | `0.0.0.0` | bind host |
-| `CATALOG_DB` | `./catalog.sqlite` | catalog path |
-| `DATA_DIR` | `./data` | source CSV/JSON dir (compile step) |
+| `DATA_DIR` | `/app/data` (image) / `./data` (checkout) | dir holding the split DBs; also the source CSV/JSON dir for the compile step |
+| `SCHEMA_DB` | `<DATA_DIR>/schema.sqlite` | schema tables (tables/columns/keys/relationships/meta) |
+| `REPORTS_DB` | `<DATA_DIR>/reports.sqlite` | report corpus (report_queries + fts + vec) |
+| `CACHE_DB` | `<DATA_DIR>/cache.sqlite` | column-search embedding cache |
+| `SEED_DIR` | `/app/seed` | baked seed zips + VERSION read by `provision.js` |
 | `MCP_URL` | `http://127.0.0.1:8979/mcp` | smoke-client target |

@@ -9,16 +9,19 @@ import { EMBED_DIM } from "../src/corpus/embed.js";
 
 test("getReportQuery + listQueriesForSubjectArea: exact title lookup", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rq-"));
-  const dbPath = path.join(dir, "catalog.sqlite");
-  const db = new Database(dbPath); loadVec(db);
-  db.exec(`CREATE TABLE tables(name TEXT PRIMARY KEY, schema TEXT, type TEXT, module TEXT, remarks TEXT, view_text TEXT);
+  const schemaPath = path.join(dir, "schema.sqlite");
+  const reportsPath = path.join(dir, "reports.sqlite");
+  const s = new Database(schemaPath);
+  s.exec(`CREATE TABLE tables(name TEXT PRIMARY KEY, schema TEXT, type TEXT, module TEXT, remarks TEXT, view_text TEXT);
     CREATE TABLE meta(key TEXT, value TEXT);
     CREATE TABLE columns(table_name TEXT,name TEXT,data_type TEXT,size INTEGER,nullable INTEGER,remarks TEXT,ordinal INTEGER);
     CREATE TABLE pkeys(table_name TEXT,column_name TEXT,seq INTEGER);
     CREATE TABLE fkeys(child_table TEXT,parent_table TEXT,column_name TEXT,seq INTEGER,name TEXT);
     CREATE TABLE indexes(table_name TEXT,index_name TEXT,is_unique INTEGER,ordinal INTEGER,column_name TEXT);
-    CREATE TABLE relationships(from_table TEXT,from_col TEXT,to_table TEXT,to_col TEXT,evidence TEXT,occurrences INTEGER,confidence TEXT,predicate TEXT,source TEXT);
-    CREATE TABLE report_queries(id TEXT,source TEXT,title TEXT,original_sql TEXT,clean_sql TEXT,
+    CREATE TABLE relationships(from_table TEXT,from_col TEXT,to_table TEXT,to_col TEXT,evidence TEXT,occurrences INTEGER,confidence TEXT,predicate TEXT,source TEXT);`);
+  s.close();
+  const db = new Database(reportsPath); loadVec(db);
+  db.exec(`CREATE TABLE report_queries(id TEXT,source TEXT,title TEXT,original_sql TEXT,clean_sql TEXT,
       description TEXT,tables_used TEXT,joins TEXT,filters TEXT,lookup_types TEXT,security_predicate TEXT,approved INTEGER);
     CREATE VIRTUAL TABLE report_queries_vec USING vec0(rowid INTEGER PRIMARY KEY, embedding FLOAT[${EMBED_DIM}]);`);
   const ins = db.prepare(`INSERT INTO report_queries(id,source,title,original_sql,clean_sql,description,tables_used,joins,filters,lookup_types) VALUES (?,?,?,?,?,?,?,?,?,?)`);
@@ -26,7 +29,8 @@ test("getReportQuery + listQueriesForSubjectArea: exact title lookup", async () 
   ins.run("otbi:SA__Business Unit", "otbi", "Absence.Business Unit", "SELECT c1 FROM m2", "SELECT NAME FROM HR_ALL_ORGANIZATION_UNITS_F", "business units", '["HR_ALL_ORGANIZATION_UNITS_F"]', "[]", "[]", "[]");
   db.close();
 
-  process.env.CATALOG_DB = dbPath;
+  process.env.SCHEMA_DB = schemaPath;
+  process.env.REPORTS_DB = reportsPath;
   const { getReportQuery, listQueriesForSubjectArea } = await import("../src/catalog.js");
 
   const q = getReportQuery("Absence.Contracts") as any;

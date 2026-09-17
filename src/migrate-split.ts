@@ -9,8 +9,8 @@
  *  - report_queries* -> reports.sqlite, backfilling report_queries.embedding from report_queries_vec
  *    (read each rowid's vector from vec0, store as a BLOB) so future vec rebuilds need no re-embed.
  *
- * Run:  node dist/migrate-split.js [<catalog.sqlite>] [--schema <out>] [--reports <out>]
- * Env:  CATALOG_DB (source, if arg omitted) · SCHEMA_DB / REPORTS_DB (outputs).
+ * Run:  node dist/migrate-split.js <catalog.sqlite> [--schema <out>] [--reports <out>]
+ * The source path is REQUIRED (no env/default). Outputs default to SCHEMA_DB / REPORTS_DB.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -26,10 +26,11 @@ function argVal(flag: string): string | undefined {
   return i >= 0 ? process.argv[i + 1] : undefined;
 }
 
-const SRC =
-  process.argv[2] && !process.argv[2].startsWith("--")
-    ? process.argv[2]
-    : (process.env.CATALOG_DB ?? "catalog.sqlite");
+const SRC = process.argv[2] && !process.argv[2].startsWith("--") ? process.argv[2] : "";
+if (!SRC) {
+  console.error("[migrate-split] usage: node dist/migrate-split.js <catalog.sqlite> [--schema <out>] [--reports <out>]");
+  process.exit(2);
+}
 const SCHEMA_OUT = argVal("--schema") ?? SCHEMA_DB;
 const REPORTS_OUT = argVal("--reports") ?? REPORTS_DB;
 

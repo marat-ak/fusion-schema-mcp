@@ -27,3 +27,7 @@ data/*.jsonl
 
 # GPU enrichment backups (large, rebuildable)
 .gpu-backups/
+
+# python bytecode
+__pycache__/
+*.pyc
