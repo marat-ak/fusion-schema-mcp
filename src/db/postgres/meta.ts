@@ -5,7 +5,7 @@ import type { TableName } from "../base/provider.js";
 import type { PostgresProvider } from "./provider.js";
 
 /** The `ddl_version` header of scripts/pg-import/ddl.sql this code is written against. */
-export const EXPECTED_DDL_VERSION = "1";
+export const EXPECTED_DDL_VERSION = "2"; // v2: punctuation-stripped tsvector (FTS5 tokenizer parity)
 /** The library migrations (./ddl.ts) a serving database must already carry. */
 export const EXPECTED_LIBRARY_VERSION = 1;
 

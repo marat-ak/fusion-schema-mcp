@@ -4,7 +4,7 @@
  *
  *   CATALOG_DB=sqlite     a fresh 5-file sqlite catalog in a temp dir.
  *   CATALOG_DB=postgres   a fresh THROWAWAY database on QA_PG_ADMIN_URL (required), seeded with
- *                         scripts/pg-import/ddl.sql (the landed ddl_version 1) for a test version
+ *                         scripts/pg-import/ddl.sql (whatever ddl_version its header names) for a test version
  *                         schema + `customer` + `meta`, pointed at by meta.active_version.
  *                         Start the server it needs with:
  *                           docker run -d --name qa-pgv -e POSTGRES_PASSWORD=qa \
@@ -36,16 +36,19 @@ function adminUrl(): string {
   return u;
 }
 
-function ddlBlocks(): Record<string, string> {
+function ddlBlocks(): { version: string; blocks: Record<string, string> } {
   const file = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "pg-import", "ddl.sql");
+  const text = fs.readFileSync(file, "utf8");
+  const version = /^-- ddl_version:\s*(\S+)/m.exec(text)?.[1];
+  if (!version) throw new Error("scripts/pg-import/ddl.sql: missing '-- ddl_version:' header");
   const blocks: Record<string, string> = {};
   let cur: string | null = null;
-  for (const line of fs.readFileSync(file, "utf8").split("\n")) {
+  for (const line of text.split("\n")) {
     const m = /^-- @block (\w+)/.exec(line);
     if (m) { cur = m[1]; blocks[cur] = ""; continue; }
     if (cur) blocks[cur] += line + "\n";
   }
-  return blocks;
+  return { version, blocks };
 }
 
 async function createScratchDb(): Promise<string> {
@@ -57,12 +60,13 @@ async function createScratchDb(): Promise<string> {
   const url = new URL(adminUrl());
   url.pathname = `/${name}`;
   const sql = postgres(url.toString(), { max: 1, onnotice: () => {} });
-  const b = ddlBlocks();
+  const { version, blocks: b } = ddlBlocks();
   await sql.unsafe(b.meta);
   await sql.unsafe(b.corpus.replaceAll("{{S}}", TEST_VERSION));
   await sql.unsafe(b.corpus.replaceAll("{{S}}", "customer"));
   await sql.unsafe(b.vendor.replaceAll("{{V}}", TEST_VERSION));
-  await sql`INSERT INTO meta.seeds (version, embedding_model, ddl_version) VALUES (${TEST_VERSION}, 'bge-small-en-v1.5-384', '1')`;
+  // the seed's stamp comes from the DDL header, never a literal — the provider verifies it matches
+  await sql`INSERT INTO meta.seeds (version, embedding_model, ddl_version) VALUES (${TEST_VERSION}, 'bge-small-en-v1.5-384', ${version})`;
   await sql`INSERT INTO meta.active_version (lock, version) VALUES (true, ${TEST_VERSION})`;
   // the fixture plays the upgrade job's part: the SERVING path creates nothing (§0), so the
   // library's customer-side tables are applied HERE, before any provider opens the database.

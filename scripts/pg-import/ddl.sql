@@ -1,5 +1,5 @@
 -- fusion database DDL (spec 2026-09-16 D13, plan decisions 2026-09-18): schema-per-version catalog.
--- ddl_version: 1
+-- ddl_version: 2
 --
 -- Blocks (applied by import.mts, in this order):
 --   @block meta    — schema `meta`: seeds + the single-row active_version pointer
@@ -150,8 +150,14 @@ CREATE SCHEMA IF NOT EXISTS {{V}};
 CREATE TABLE IF NOT EXISTS {{V}}.catalog_meta (key text PRIMARY KEY, value text);
 
 -- Oracle Fusion schema catalog (schema.sqlite). `search` replaces FTS5 tables_fts(name, remarks, module):
--- weights A/B/C keep name > module > remarks for ts_rank; the 'simple' config lowercases and splits
--- on '_' exactly like FTS5 unicode61, so `tok:*` prefix queries port 1:1.
+-- weights A/B/C keep name > module > remarks for ts_rank.
+-- ddl_version 2 (2026-09-18): every source column is punctuation-stripped BEFORE to_tsvector.
+-- Without it the default parser keeps compound tokens the FTS5 unicode61 tokenizer splits —
+-- `supplier/site` stayed ONE `file`-class token, so a "supplier site" search missed 4 of 60 rows.
+-- `[^A-Za-z0-9]+ -> space` is exactly unicode61's rule for this corpus (no non-ASCII LETTER occurs
+-- in name/module/remarks; the 22 rows with non-ASCII punctuation split under both engines), it is
+-- IMMUTABLE and locale-independent (required for a STORED generated column), and the query side
+-- splits caller tokens the same way (src/db/postgres/schema.ts tsTerm).
 CREATE TABLE IF NOT EXISTS {{V}}.tables (
   name      text PRIMARY KEY,
   schema    text,
@@ -160,9 +166,9 @@ CREATE TABLE IF NOT EXISTS {{V}}.tables (
   remarks   text,
   view_text text,
   search    tsvector GENERATED ALWAYS AS (
-              setweight(to_tsvector('simple', coalesce(name, '')),    'A') ||
-              setweight(to_tsvector('simple', coalesce(module, '')),  'B') ||
-              setweight(to_tsvector('simple', coalesce(remarks, '')), 'C')) STORED
+              setweight(to_tsvector('simple', regexp_replace(coalesce(name, ''),    '[^A-Za-z0-9]+', ' ', 'g')), 'A') ||
+              setweight(to_tsvector('simple', regexp_replace(coalesce(module, ''),  '[^A-Za-z0-9]+', ' ', 'g')), 'B') ||
+              setweight(to_tsvector('simple', regexp_replace(coalesce(remarks, ''), '[^A-Za-z0-9]+', ' ', 'g')), 'C')) STORED
 );
 CREATE INDEX IF NOT EXISTS ix_tables_search ON {{V}}.tables USING gin (search);
 
