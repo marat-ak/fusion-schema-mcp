@@ -9,12 +9,11 @@
  * the SAME parseEnrichReply as the sync path, rewrite rows + vectors, and record EXACT per-row
  * usage (the batch result carries usage per request) under model "<model>@batch" (half-rate
  * pricing in usageStats). Failed/expired/billing-errored requests simply stay in the resumable
- * queue (mechanics IS NULL) — resubmit later loses nothing.
+ * queue (mechanics IS NULL) — resubmit later loses nothing. Job persistence: `db().enrich.jobs`.
  */
 import crypto from "node:crypto";
-import Database from "better-sqlite3";
 import fs from "node:fs";
-import { reportsDbPath } from "../dbPaths.js";
+import { db, type BatchJob } from "../db/index.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./enrichPrompt.js";
 import type { SqlSource } from "./sources.js";
 import { embedBulk as embed } from "./embed.js";
@@ -61,26 +60,6 @@ function soloParams(sql: string, title: string, model: string) {
   };
 }
 
-// ---- job/item persistence (reports.sqlite) ----
-let _db: Database.Database | null = null;
-function db(): Database.Database {
-  if (_db) return _db;
-  const d = new Database(reportsDbPath());
-  d.pragma("busy_timeout = 10000");
-  d.exec(`
-    CREATE TABLE IF NOT EXISTS batch_jobs (
-      batch_id TEXT PRIMARY KEY, model TEXT, n INTEGER, submitted_at TEXT,
-      status TEXT, completed_at TEXT, note TEXT
-    );
-    CREATE TABLE IF NOT EXISTS batch_items (
-      batch_id TEXT, custom_id TEXT, row_id TEXT,
-      PRIMARY KEY (batch_id, custom_id)
-    );
-  `);
-  _db = d;
-  return d;
-}
-
 const cid = (rowId: string) => crypto.createHash("sha256").update(rowId).digest("hex").slice(0, 32);
 
 export async function submitBatch(rows: { id: string; title: string; sql: string }[], model: string): Promise<{ batchId: string; count: number }> {
@@ -89,54 +68,48 @@ export async function submitBatch(rows: { id: string; title: string; sql: string
   const res = await fetch(API, { method: "POST", headers: HDRS(), body: JSON.stringify({ requests }) });
   const j: any = await res.json();
   if (!res.ok) throw new Error(`batch submit HTTP ${res.status}: ${JSON.stringify(j).slice(0, 300)}`);
-  const d = db();
-  const tx = d.transaction(() => {
-    d.prepare("INSERT INTO batch_jobs (batch_id, model, n, submitted_at, status) VALUES (?,?,?,?,?)")
-      .run(j.id, model, rows.length, new Date().toISOString(), j.processing_status ?? "in_progress");
-    const ins = d.prepare("INSERT OR REPLACE INTO batch_items (batch_id, custom_id, row_id) VALUES (?,?,?)");
-    for (const r of rows) ins.run(j.id, cid(r.id), r.id);
-  });
-  tx();
+  await db().enrich.jobs.insertBatchJob(
+    { batchId: j.id, model, n: rows.length, submittedAt: new Date().toISOString(), status: j.processing_status ?? "in_progress" },
+    rows.map((r) => ({ customId: cid(r.id), rowId: r.id })),
+  );
   return { batchId: j.id, count: rows.length };
 }
 
-export function runningJobs(): { batch_id: string; model: string; n: number; status: string; submitted_at: string }[] {
-  return db().prepare("SELECT batch_id, model, n, status, submitted_at FROM batch_jobs WHERE status NOT IN ('done','failed','canceled')").all() as any[];
+export async function runningJobs(): Promise<BatchJob[]> {
+  return db().enrich.jobs.runningBatchJobs();
 }
-export function finishedJobs(): { batch_id: string }[] {
-  return db().prepare("SELECT batch_id FROM batch_jobs WHERE status = 'done'").all() as any[];
+export async function finishedJobs(): Promise<{ batch_id: string }[]> {
+  return db().enrich.jobs.finishedBatchJobs();
 }
 
 /** Re-fetch a FINISHED job's results and re-run ingest with the current parser (results_url stays
  *  valid ~29 days). Free — no model calls. Recovers rows a past parser bug wrote as placeholders. */
 export async function reingestJob(batchId: string): Promise<Record<string, unknown>> {
-  db().prepare("UPDATE batch_jobs SET status = 'ended' WHERE batch_id = ?").run(batchId); // let pollJob re-ingest
+  await db().enrich.jobs.setBatchStatus(batchId, "ended"); // let pollJob re-ingest
   return pollJob(batchId);
 }
 
-export function allJobs(): unknown[] {
-  return db().prepare("SELECT * FROM batch_jobs ORDER BY submitted_at DESC LIMIT 20").all();
+export async function allJobs(): Promise<unknown[]> {
+  return db().enrich.jobs.allBatchJobs();
 }
 
 /** Poll one job; when ended, ingest its results. Returns a status summary. */
 export async function pollJob(batchId: string): Promise<Record<string, unknown>> {
-  const d = db();
+  const jobs = db().enrich.jobs;
   const res = await fetch(`${API}/${batchId}`, { headers: HDRS() });
   const j: any = await res.json();
   if (!res.ok) throw new Error(`batch poll HTTP ${res.status}: ${JSON.stringify(j).slice(0, 200)}`);
   const status = j.processing_status;
-  d.prepare("UPDATE batch_jobs SET status = ? WHERE batch_id = ?").run(status, batchId);
+  await jobs.setBatchStatus(batchId, status);
   if (status !== "ended") return { batchId, status, counts: j.request_counts };
 
   // ended -> stream results and ingest
   const rr = await fetch(j.results_url, { headers: HDRS() });
   if (!rr.ok) throw new Error(`results fetch HTTP ${rr.status}`);
   const text = await rr.text();
-  const map = new Map<string, string>(
-    (d.prepare("SELECT custom_id, row_id FROM batch_items WHERE batch_id = ?").all(batchId) as any[]).map((x) => [x.custom_id, x.row_id]),
-  );
-  const model = (d.prepare("SELECT model FROM batch_jobs WHERE batch_id = ?").get(batchId) as any)?.model ?? "claude-opus-5";
-  clearBatchUsage(batchId); // replaying results after a mid-ingest crash must not double-count usage
+  const map = new Map<string, string>((await jobs.batchItems(batchId)).map((x) => [x.custom_id, x.row_id]));
+  const model = (await jobs.batchModel(batchId)) ?? "claude-opus-5";
+  await clearBatchUsage(batchId); // replaying results after a mid-ingest crash must not double-count usage
   let ok = 0, failed = 0;
   const nowIso = new Date().toISOString();
   for (const line of text.split("\n")) {
@@ -152,9 +125,9 @@ export async function pollJob(batchId: string): Promise<Record<string, unknown>>
       const body = (msg.content ?? []).map((c: any) => c.text ?? "").join("");
       const e = parseEnrichReply(body, asSource("", rowId));
       const vecs = await embed(embedTexts(e.description, e.tablesUsed ?? [], e.intents ?? []));
-      updateEnrichment(rowId, { description: e.description, intents: e.intents ?? [], mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
+      await updateEnrichment(rowId, { description: e.description, intents: e.intents ?? [], mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
       const u = msg.usage ?? {};
-      recordUsage({
+      await recordUsage({
         ts: nowIso, model: `${model}@batch`, source: "batch", nItems: 1, batchId,
         inputTokens: Number(u.input_tokens ?? 0), outputTokens: Number(u.output_tokens ?? 0),
         cacheReadTokens: Number(u.cache_read_input_tokens ?? 0), cacheCreationTokens: Number(u.cache_creation_input_tokens ?? 0),
@@ -162,7 +135,6 @@ export async function pollJob(batchId: string): Promise<Record<string, unknown>>
       ok++;
     } catch { failed++; }
   }
-  d.prepare("UPDATE batch_jobs SET status = 'done', completed_at = ?, note = ? WHERE batch_id = ?")
-    .run(new Date().toISOString(), `ok=${ok} failed=${failed}`, batchId);
+  await jobs.finishBatchJob(batchId, new Date().toISOString(), `ok=${ok} failed=${failed}`);
   return { batchId, status: "done", ingested: ok, failed };
 }

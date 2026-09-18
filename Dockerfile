@@ -15,6 +15,9 @@ RUN npm install
 COPY tsconfig.json ./
 COPY VERSION ./VERSION
 COPY src ./src
+# tests + the no-SQL-outside-db gate run in THIS stage (`docker run --rm -e CATALOG_DB=sqlite <build-image> npm test`)
+COPY test ./test
+COPY scripts/no-sql-outside-db.sh ./scripts/no-sql-outside-db.sh
 RUN npm run build
 # non-TS corpus assets ride along into dist (tsc copies only .ts): layout-pattern JSONL + fixtures.
 # shard-* dirs are curation provenance (experiments, render-check PNGs) — merged into the main
@@ -31,6 +34,9 @@ RUN node -e "import('@xenova/transformers').then(async t=>{const p=await t.pipel
 # real corpus is populated at runtime by the poller /ingest or restored via migrate-split). Then zip
 # the seeds so provision.js can unpack them into the /app/data volume on first start.
 COPY data ./data
+# compile reads the CSVs from DATA_DIR (required, no default) through the catalog DB library
+ENV DATA_DIR=/app/data
+ENV CATALOG_DB=sqlite
 RUN npm run compile && node dist/zip-seed.js
 
 # ---- runtime stage: node + dist + node_modules (model cache) + baked seed; DBs live on a volume ----
@@ -41,6 +47,8 @@ ENV MCP_PORT=8979
 ENV MCP_HOST=0.0.0.0
 ENV DATA_DIR=/app/data
 ENV SEED_DIR=/app/seed
+# the catalog DB provider (src/db): required, no default
+ENV CATALOG_DB=sqlite
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist

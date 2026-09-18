@@ -7,14 +7,15 @@
  * the job done. A per-run spend cap (checked before each new submit) protects a fixed budget.
  *
  * submit() only CREATES jobs (fast) — polling/ingest is the scheduler's job, so no long-lived
- * in-memory loop that a restart could kill.
+ * in-memory loop that a restart could kill. Job persistence: `db().enrich.jobs`.
  */
-import Database from "better-sqlite3";
 import { GoogleGenAI } from "@google/genai";
-import { reportsDbPath } from "../dbPaths.js";
+import { db, type GeminiJob, type GeminiControl } from "../db/index.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./enrichPrompt.js";
 import { embedBulk as embed } from "./embed.js";
 import { updateEnrichment, embedTexts, recordUsage, clearBatchUsage, reenrichQueue, spentUsd } from "./ingestStore.js";
+
+export type { GeminiControl };
 
 function apiKey(): string {
   const k = (process.env.GOOGLE_STUDIO_API_KEY ?? "").trim();
@@ -22,27 +23,6 @@ function apiKey(): string {
   return k;
 }
 const ai = () => new GoogleGenAI({ apiKey: apiKey() });
-
-let _db: Database.Database | null = null;
-function db(): Database.Database {
-  if (_db) return _db;
-  const d = new Database(reportsDbPath());
-  d.pragma("busy_timeout = 10000");
-  d.exec(`
-    CREATE TABLE IF NOT EXISTS gjob_jobs (
-      name TEXT PRIMARY KEY, model TEXT, n INTEGER, submitted_at TEXT, status TEXT, note TEXT
-    );
-    CREATE TABLE IF NOT EXISTS gjob_items (
-      name TEXT, idx INTEGER, row_id TEXT, PRIMARY KEY (name, idx)
-    );
-    CREATE TABLE IF NOT EXISTS gjob_control (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
-      active INTEGER, sources TEXT, model TEXT, cap REAL, wave INTEGER, batch_size INTEGER
-    );
-  `);
-  _db = d;
-  return d;
-}
 
 const COMPLETED = new Set(["JOB_STATE_SUCCEEDED", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_EXPIRED"]);
 const BATCH_PRICE_MODEL = (m: string) => `${m}@batch`; // half-rate row in ingestStore PRICE
@@ -54,14 +34,11 @@ export async function submitGeminiReenrich(opts: {
 }): Promise<{ submitted: number; jobs: string[]; skippedForCap?: boolean }> {
   const batchSize = Math.min(Math.max(opts.batchSize ?? 100, 1), 200);
   const cap = opts.spendCapUsd ?? 0;
-  if (cap > 0 && spentUsd("gemini%") >= cap) return { submitted: 0, jobs: [], skippedForCap: true };
+  if (cap > 0 && (await spentUsd("gemini%")) >= cap) return { submitted: 0, jobs: [], skippedForCap: true };
 
-  const rows = reenrichQueue(opts.sources, opts.limit);
+  const rows = await reenrichQueue(opts.sources, opts.limit);
   if (!rows.length) return { submitted: 0, jobs: [] };
   const client = ai();
-  const d = db();
-  const insJob = d.prepare("INSERT OR REPLACE INTO gjob_jobs (name, model, n, submitted_at, status) VALUES (?,?,?,?,?)");
-  const insItem = d.prepare("INSERT OR REPLACE INTO gjob_items (name, idx, row_id) VALUES (?,?,?)");
   const nowIso = new Date().toISOString();
   const jobs: string[] = [];
 
@@ -73,40 +50,39 @@ export async function submitGeminiReenrich(opts: {
     });
     const job = await client.batches.create({ model: opts.model, src: src as any, config: { displayName: `otbi-${chunk.length}` } });
     const name = job.name!;
-    const tx = d.transaction(() => {
-      insJob.run(name, opts.model, chunk.length, nowIso, job.state ?? "JOB_STATE_PENDING");
-      chunk.forEach((r, k) => insItem.run(name, k, r.id));
-    });
-    tx();
+    await db().enrich.jobs.insertGeminiJob(
+      { name, model: opts.model, n: chunk.length, submittedAt: nowIso, status: job.state ?? "JOB_STATE_PENDING" },
+      chunk.map((r, k) => ({ idx: k, rowId: r.id })),
+    );
     jobs.push(name);
   }
   return { submitted: rows.length, jobs };
 }
 
-export function openGeminiJobs(): { name: string; model: string; n: number }[] {
-  return db().prepare("SELECT name, model, n FROM gjob_jobs WHERE status NOT IN ('done','JOB_STATE_FAILED','JOB_STATE_CANCELLED','JOB_STATE_EXPIRED')").all() as any[];
+export async function openGeminiJobs(): Promise<GeminiJob[]> {
+  return db().enrich.jobs.openGeminiJobs();
 }
-export function allGeminiJobs(): unknown[] {
-  return db().prepare("SELECT name, model, n, status, note, submitted_at FROM gjob_jobs ORDER BY submitted_at DESC LIMIT 40").all();
+export async function allGeminiJobs(): Promise<unknown[]> {
+  return db().enrich.jobs.allGeminiJobs();
 }
 
 /** Poll one persisted job; when SUCCEEDED, ingest its responses (idempotent) and mark done. */
 export async function pollGeminiJob(name: string): Promise<Record<string, unknown>> {
-  const d = db();
+  const jobs = db().enrich.jobs;
   const client = ai();
   const bj: any = await client.batches.get({ name });
-  d.prepare("UPDATE gjob_jobs SET status = ? WHERE name = ?").run(bj.state, name);
+  await jobs.setGeminiStatus(name, bj.state);
   if (!COMPLETED.has(bj.state)) return { name, status: bj.state };
   if (bj.state !== "JOB_STATE_SUCCEEDED") {
-    d.prepare("UPDATE gjob_jobs SET status = 'done', note = ? WHERE name = ?").run(String(bj.state), name);
+    await jobs.finishGeminiJob(name, String(bj.state));
     return { name, status: bj.state, ingested: 0 };
   }
   const inl: any[] = bj.dest?.inlinedResponses ?? [];
-  const map = new Map<number, string>((d.prepare("SELECT idx, row_id FROM gjob_items WHERE name = ?").all(name) as any[]).map((x) => [x.idx, x.row_id]));
-  const model = (d.prepare("SELECT model FROM gjob_jobs WHERE name = ?").get(name) as any)?.model ?? "gemini-flash-lite-latest";
+  const map = new Map<number, string>((await jobs.geminiItems(name)).map((x) => [x.idx, x.row_id]));
+  const model = (await jobs.geminiModel(name)) ?? "gemini-flash-lite-latest";
   const rowMeta = new Map<string, { title: string; sql: string }>();
   for (const rid of map.values()) {
-    const m = d.prepare("SELECT title, COALESCE(clean_sql, original_sql) sql FROM report_queries WHERE id = ?").get(rid) as any;
+    const m = await db().corpus.titleAndSql(rid);
     if (m) rowMeta.set(rid, m);
   }
   let ok = 0, fail = 0, inTok = 0, outTok = 0;
@@ -120,23 +96,23 @@ export async function pollGeminiJob(name: string): Promise<Record<string, unknow
     try {
       const e = parseEnrichReply(text, { id: rid, source: "catalog", title: meta.title, originalSql: meta.sql, sourceHash: "", raw: {} } as any);
       const vecs = await embed(embedTexts(e.description, e.tablesUsed ?? [], e.intents ?? []));
-      updateEnrichment(rid, { description: e.description, intents: e.intents ?? [], mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
+      await updateEnrichment(rid, { description: e.description, intents: e.intents ?? [], mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
       inTok += Number(um.promptTokenCount ?? 0); outTok += Number(um.candidatesTokenCount ?? 0); ok++;
     } catch { fail++; }
   }
   // Idempotent usage: a batch's execution is billed by Google ONCE, but a re-ingest (race, retry,
   // manual reingest) must NOT record its tokens again — clear any prior usage for this batch_id first
   // so `spentUsd` (and the spend cap) reflect real per-batch cost, not inflated re-counts.
-  clearBatchUsage(name);
-  recordUsage({ ts: new Date().toISOString(), model: BATCH_PRICE_MODEL(model), source: "otbi-batch", nItems: ok, inputTokens: inTok, outputTokens: outTok, cacheReadTokens: 0, cacheCreationTokens: 0, batchId: name });
-  d.prepare("UPDATE gjob_jobs SET status = 'done', note = ? WHERE name = ?").run(`ok=${ok} fail=${fail}`, name);
+  await clearBatchUsage(name);
+  await recordUsage({ ts: new Date().toISOString(), model: BATCH_PRICE_MODEL(model), source: "otbi-batch", nItems: ok, inputTokens: inTok, outputTokens: outTok, cacheReadTokens: 0, cacheCreationTokens: 0, batchId: name });
+  await jobs.finishGeminiJob(name, `ok=${ok} fail=${fail}`);
   return { name, status: "done", ingested: ok, failed: fail };
 }
 
 /** Poll every open job (called by the scheduler). */
 export async function pollGeminiJobs(): Promise<{ polled: number; ingested: number }> {
   let ingested = 0, polled = 0;
-  for (const j of openGeminiJobs()) {
+  for (const j of await openGeminiJobs()) {
     try { const r = await pollGeminiJob(j.name); polled++; ingested += Number((r as any).ingested ?? 0); }
     catch (e: any) { console.error("[gjob] poll error", j.name, e?.message ?? e); }
   }
@@ -144,13 +120,11 @@ export async function pollGeminiJobs(): Promise<{ polled: number; ingested: numb
 }
 
 // ---- self-driving control (durable across restarts) ----
-export interface GeminiControl { active: number; sources: string; model: string; cap: number; wave: number; batch_size: number }
-export function setGeminiControl(c: Omit<GeminiControl, "active"> & { active: boolean }): void {
-  db().prepare("INSERT OR REPLACE INTO gjob_control (id, active, sources, model, cap, wave, batch_size) VALUES (1,?,?,?,?,?,?)")
-    .run(c.active ? 1 : 0, c.sources, c.model, c.cap, c.wave, c.batch_size);
+export async function setGeminiControl(c: Omit<GeminiControl, "active"> & { active: boolean | number }): Promise<void> {
+  await db().enrich.jobs.setGeminiControl({ ...c, active: c.active ? 1 : 0 });
 }
-export function getGeminiControl(): GeminiControl | null {
-  return (db().prepare("SELECT active, sources, model, cap, wave, batch_size FROM gjob_control WHERE id = 1").get() as any) ?? null;
+export async function getGeminiControl(): Promise<GeminiControl | null> {
+  return db().enrich.jobs.getGeminiControl();
 }
 
 /**
@@ -174,18 +148,18 @@ export async function driveGeminiReenrich(): Promise<{ polled: number; ingested:
   _driveInFlight = true;
   try {
     const poll = await pollGeminiJobs();
-    const ctl = getGeminiControl();
+    const ctl = await getGeminiControl();
     if (!ctl || !ctl.active) return poll;
     const sources = ctl.sources.split(",").map((s) => s.trim()).filter(Boolean);
-    if (ctl.cap > 0 && spentUsd("gemini%") >= ctl.cap) { setGeminiControl({ ...ctl, active: false }); return { ...poll, stopped: "spend-cap" }; }
-    const open = openGeminiJobs().length;
+    if (ctl.cap > 0 && (await spentUsd("gemini%")) >= ctl.cap) { await setGeminiControl({ ...ctl, active: false }); return { ...poll, stopped: "spend-cap" }; }
+    const open = (await openGeminiJobs()).length;
     const slots = MAX_INFLIGHT_JOBS - open;
     if (slots <= 0) return poll; // pipeline saturated — nothing to top up this tick
     // top up: submit up to `slots` more batches (bounded also by ctl.wave rows per tick)
     const topUp = Math.min(slots * ctl.batch_size, ctl.wave);
     const r = await submitGeminiReenrich({ sources, model: ctl.model, limit: topUp, batchSize: ctl.batch_size, spendCapUsd: ctl.cap });
     // deactivate only when nothing is left to submit AND nothing is still running
-    if (r.submitted === 0 && open === 0) { setGeminiControl({ ...ctl, active: false }); return { ...poll, stopped: r.skippedForCap ? "spend-cap" : "queue-empty" }; }
+    if (r.submitted === 0 && open === 0) { await setGeminiControl({ ...ctl, active: false }); return { ...poll, stopped: r.skippedForCap ? "spend-cap" : "queue-empty" }; }
     return { ...poll, submitted: r.submitted };
   } finally {
     _driveInFlight = false;

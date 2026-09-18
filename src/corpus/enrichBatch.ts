@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import { scanSources } from "./sources.js";
-import { openEnrichStore } from "./enrichStore.js";
+import { openCatalogDb, configFromEnv } from "../db/index.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./enrichPrompt.js";
 
 // Haiku 4.5 Batch API rates (50% off standard $1/$5 per 1M): $0.50 in / $2.50 out.
@@ -20,9 +20,9 @@ async function main() {
   const BUDGET = process.env.BUDGET_USD ? Number(process.env.BUDGET_USD) : Infinity;
 
   const sources = scanSources({ limit });
-  const store = openEnrichStore();
-  const pending = store.pendingIds(sources);
-  for (const s of pending) store.upsertSource(s); // record source rows first (resume-safe)
+  const store = (await openCatalogDb(configFromEnv())).enrich;
+  const pending = await store.pendingIds(sources);
+  for (const s of pending) await store.upsertSource(s); // record source rows first (resume-safe)
   console.error(`[enrich] ${sources.length} sources scanned, ${pending.length} pending, budget=$${BUDGET === Infinity ? "∞" : BUDGET}`);
   if (pending.length === 0) { console.error("[enrich] nothing to do"); return; }
 
@@ -78,7 +78,7 @@ async function main() {
       cIn += usage?.input_tokens ?? 0;
       cOut += usage?.output_tokens ?? 0;
       const text = (res.result.message.content.find((b: any) => b.type === "text") as any)?.text ?? "";
-      try { store.setEnrichment(s.id, parseEnrichReply(text, s)); ok++; cOk++; }
+      try { await store.setEnrichment(s.id, parseEnrichReply(text, s)); ok++; cOk++; }
       catch (e) { console.error(`[enrich] parse fail ${s.id}: ${(e as Error).message}`); bad++; cBad++; badIds.push(s.id); }
     }
 
@@ -95,7 +95,7 @@ async function main() {
     console.error(`[enrich] chunk done ok=${cOk} bad=${cBad} | in=${cIn} out=${cOut} cost=$${chunkCost.toFixed(4)} | CUM rows=${rowsDone} cost=$${cumCost.toFixed(4)} ($${stat.perRowUsd}/row)`);
   }
 
-  const stillPending = store.pendingIds(sources).length;
+  const stillPending = (await store.pendingIds(sources)).length;
   console.error(`[enrich] DONE ok=${ok} bad=${bad} | total in=${cumIn} out=${cumOut} cost=$${cumCost.toFixed(4)} | still pending=${stillPending}`);
   if (rowsDone) {
     const perRow = cumCost / rowsDone;

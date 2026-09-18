@@ -1,9 +1,9 @@
 /**
- * REST ingest API — DECOUPLED, STAGED pipeline feeding the report-SQL corpus (report_queries +
- * report_queries_vec in catalog.sqlite) at runtime, without touching the MCP transport.
+ * REST ingest API — DECOUPLED, STAGED pipeline feeding the report-SQL corpus (the catalog DB's
+ * corpus group) at runtime, without touching the MCP transport.
  *
  *   [1] STAGE      POST /ingest — accept the EXACT ready_catalog JSON shape and land each SQL as a
- *                  PENDING staging row (enrich.sqlite). No model call → fast + non-blocking. NOT
+ *                  PENDING staging row (the enrich group). No model call → fast + non-blocking. NOT
  *                  searchable yet.
  *   [2] ENRICH     A background worker (periodic + POST /ingest/enrich) picks PENDING rows and calls
  *                  the provider adapter (enrichAdapters.enrichOne) → { description, tablesUsed,
@@ -34,17 +34,14 @@
  * Scheduler: every ENRICH_INTERVAL ms (default 60000) run enrich-then-materialize for anything
  * outstanding. Provider/creds come from getEnrichConfig() (enrichConfig.ts).
  */
-import path from "node:path";
-import fs from "node:fs";
-import { fileURLToPath } from "node:url";
 import express from "express";
+import { db, type EnrichApi, type EnrichRow } from "./db/index.js";
 import { corpusCount, materialize, materializedIds, exportCorpus, importCorpus, updateEnrichment, reenrichQueue, reenrichCounts, embedTexts, recordUsage, usageStats, spentUsd, type MaterializeRow, type ImportRow } from "./corpus/ingestStore.js";
 import { embed } from "./corpus/embed.js";
 import { enrichAgentBatch } from "./corpus/enrichAdapters.js";
 import { submitBatch, pollJob, runningJobs, allJobs, finishedJobs, reingestJob } from "./corpus/enrichBatchApi.js";
 import { redoQueue } from "./corpus/ingestStore.js";
 import { extractModels } from "./corpus/extractArchive.js";
-import { openEnrichStore, type EnrichStore } from "./corpus/enrichStore.js";
 import { hashSql, hashSqlNormalized, type SqlSource } from "./corpus/sources.js";
 import { enrichOne } from "./corpus/enrichAdapters.js";
 import { getEnrichConfig } from "./corpus/enrichConfig.js";
@@ -52,9 +49,7 @@ import { runGeminiBatches } from "./corpus/geminiBatch.js";
 import { setGeminiControl, getGeminiControl, driveGeminiReenrich, openGeminiJobs, allGeminiJobs } from "./corpus/geminiBatchApi.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./corpus/enrichPrompt.js";
 import { loadFlexfieldsCsv, flexfieldsCount, loadAdfExtensionsCsv, adfCount, loadConfigReportXml } from "./corpus/flexStore.js";
-import type { EnrichRow } from "./corpus/enrichStore.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN = process.env.INGEST_TOKEN;
 
 /** Bearer-token guard; open (with a warning) when INGEST_TOKEN is unset. */
@@ -66,15 +61,10 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
   res.status(401).json({ ok: false, error: "unauthorized" });
 }
 
-// ---- staging store (singleton) ----------------------------------------------------------------
-let _store: EnrichStore | null = null;
+// ---- staging store = the catalog DB's enrich group (opened once at boot by server.ts) ----------
+type EnrichStore = EnrichApi;
 function getStore(): EnrichStore {
-  if (!_store) {
-    const dbPath = process.env.ENRICH_DB ?? path.resolve(__dirname, "../data/enrich.sqlite");
-    fs.mkdirSync(path.dirname(dbPath), { recursive: true }); // better-sqlite3 needs the dir to exist
-    _store = openEnrichStore(dbPath);
-  }
-  return _store;
+  return db().enrich;
 }
 
 // ---- ready_catalog parsing + staging ----------------------------------------------------------
@@ -108,20 +98,20 @@ function collectReports(body: any): ReadyCatalogReport[] {
  * many reports (e.g. an LOV "list of ledgers") is staged and enriched ONCE; each report that uses
  * it is recorded as a reference. Returns { staged: total SQLs seen, unique: brand-new SQLs added }.
  */
-function stageReport(store: EnrichStore, r: ReadyCatalogReport): { staged: number; unique: number } {
+async function stageReport(store: EnrichStore, r: ReadyCatalogReport): Promise<{ staged: number; unique: number }> {
   const sqls = reportSqls(r);
   if (sqls.length === 0) return { staged: 0, unique: 0 };
   const title = reportTitle(r);
   const reportPath = (r.reportPath ?? r.path ?? title) || undefined;
   let unique = 0;
-  sqls.forEach((sql, i) => {
+  for (const [i, sql] of sqls.entries()) {
     const id = `sql:${hashSqlNormalized(sql)}`;
     const src: SqlSource = {
       id, source: "catalog", title: title || id,
       originalSql: sql, sourceHash: hashSql(sql), raw: {},
     };
-    if (store.stageSql(src, { path: reportPath, title: title || undefined, index: i })) unique++;
-  });
+    if (await store.stage(src, { path: reportPath, title: title || undefined, index: i })) unique++;
+  }
   return { staged: sqls.length, unique };
 }
 
@@ -131,11 +121,11 @@ let enrichRunning = false;
 /** Run the enrich worker over PENDING staging rows via a concurrency-limited pool.
  *  `limit` (>0) caps how many pending rows this run processes — used for controlled test batches. */
 async function runEnrich(store: EnrichStore, limit?: number): Promise<{ enriched: number; failed: number; pending: number; skipped?: string }> {
-  if (enrichRunning) return { enriched: 0, failed: 0, pending: store.counts().pending, skipped: "already running" };
+  if (enrichRunning) return { enriched: 0, failed: 0, pending: (await store.counts()).pending, skipped: "already running" };
   enrichRunning = true;
   try {
     const cfg = getEnrichConfig();
-    let pend = store.pendingRows();
+    let pend = await store.pendingRows();
     if (limit && limit > 0) pend = pend.slice(0, limit);
     if (pend.length === 0) return { enriched: 0, failed: 0, pending: 0 };
     if (!cfg.apiKey && cfg.provider !== "custom") {
@@ -150,7 +140,7 @@ async function runEnrich(store: EnrichStore, limit?: number): Promise<{ enriched
         const row = pend[i];
         try {
           const e = await enrichOne(row.originalSql, row.title);
-          store.setEnrichment(row.id, {
+          await store.setEnrichment(row.id, {
             intents: e.intents, mechanics: e.mechanics,
             cleanSql: row.originalSql, description: e.description,
             tablesUsed: e.tablesUsed, lookupTypes: e.lookupTypes,
@@ -165,7 +155,7 @@ async function runEnrich(store: EnrichStore, limit?: number): Promise<{ enriched
     };
     await Promise.all(Array.from({ length: Math.min(cfg.concurrency, pend.length) }, worker));
     console.error(`[ingest] enrich done: enriched=${enriched} failed=${failed} (provider=${cfg.provider})`);
-    return { enriched, failed, pending: store.counts().pending };
+    return { enriched, failed, pending: (await store.counts()).pending };
   } finally {
     enrichRunning = false;
   }
@@ -192,7 +182,7 @@ async function drainViaBatches(store: EnrichStore): Promise<void> {
     const batchSize = Number(process.env.ENRICH_BATCH_SIZE ?? 100) || 100;
     const concurrency = Number(process.env.ENRICH_BATCH_CONCURRENCY ?? 4) || 4;
     for (;;) {
-      const pend = store.pendingRows();
+      const pend = await store.pendingRows();
       if (!pend.length) break;
       const rows = new Map(pend.map((r) => [r.id, r] as const));
       const items = pend.map((r) => { const p = buildEnrichPrompt(rowSource(r)); return { key: r.id, system: p.system, user: p.user }; });
@@ -207,7 +197,7 @@ async function drainViaBatches(store: EnrichStore): Promise<void> {
         if (res.text) {
           try {
             const e = parseEnrichReply(res.text, rowSource(row));
-            store.setEnrichment(key, {
+            await store.setEnrichment(key, {
               cleanSql: e.cleanSql, description: e.description, tablesUsed: e.tablesUsed,
               lookupTypes: e.lookupTypes, joins: e.joins, filters: e.filters, securityPredicate: e.securityPredicate,
             });
@@ -228,9 +218,9 @@ async function drainViaBatches(store: EnrichStore): Promise<void> {
 
 /** Materialize enriched staging rows not yet in report_queries (force=true re-does all). */
 async function runMaterialize(store: EnrichStore, force = false): Promise<{ inserted: number; replaced: number }> {
-  const have = force ? new Set<string>() : materializedIds();
+  const have = force ? new Set<string>() : await materializedIds();
   const rows: MaterializeRow[] = [];
-  for (const r of store.iterateEnriched()) {
+  for await (const r of store.iterateEnriched()) {
     if (!force && have.has(r.id)) continue;
     rows.push({
       id: r.id, title: r.title, originalSql: r.originalSql, cleanSql: r.cleanSql,
@@ -246,8 +236,8 @@ async function runMaterialize(store: EnrichStore, force = false): Promise<{ inse
   return res;
 }
 
-function safeCorpusCount(): number | null {
-  try { return corpusCount(); } catch { return null; }
+async function safeCorpusCount(): Promise<number | null> {
+  try { return await corpusCount(); } catch { return null; }
 }
 
 // ---- router -----------------------------------------------------------------------------------
@@ -256,8 +246,8 @@ export function createIngestRouter(): express.Router {
 
   router.get("/ingest/health", async (_req, res) => {
     try {
-      const c = getStore().counts();
-      res.json({ ok: true, pending: c.pending, enriched: c.enriched, materialized: safeCorpusCount() });
+      const c = await getStore().counts();
+      res.json({ ok: true, pending: c.pending, enriched: c.enriched, materialized: await safeCorpusCount() });
     } catch (e: any) {
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
     }
@@ -272,10 +262,10 @@ export function createIngestRouter(): express.Router {
       const store = getStore();
       let staged = 0, unique = 0, reportsStaged = 0;
       for (const r of reports) {
-        const n = stageReport(store, r);
+        const n = await stageReport(store, r);
         if (n.staged > 0) { staged += n.staged; unique += n.unique; reportsStaged++; }
       }
-      const c = store.counts();
+      const c = await store.counts();
       res.json({ ok: true, reports: reportsStaged, staged, unique, deduped: staged - unique, pending: c.pending, enriched: c.enriched });
     } catch (e: any) {
       console.error("[ingest] stage error", e);
@@ -311,10 +301,10 @@ export function createIngestRouter(): express.Router {
         const models = extractModels(bytes, "");
         const sqls = models.flatMap((m) => m.physicalSqls);
         if (sqls.length === 0) {
-          return res.json({ ok: true, models: models.length, staged: 0, note: "no physical SQL found", ...getStore().counts() });
+          return res.json({ ok: true, models: models.length, staged: 0, note: "no physical SQL found", ...(await getStore().counts()) });
         }
-        const st = stageReport(getStore(), { title: groupKey, reportPath: groupKey, sqls });
-        const c = getStore().counts();
+        const st = await stageReport(getStore(), { title: groupKey, reportPath: groupKey, sqls });
+        const c = await getStore().counts();
         res.json({ ok: true, models: models.length, staged: st.staged, unique: st.unique, pending: c.pending, enriched: c.enriched });
       } catch (e: any) {
         console.error("[ingest] /catalog error", e);
@@ -335,7 +325,7 @@ export function createIngestRouter(): express.Router {
     try {
       const force = req.query.force === "1" || req.query.force === "true";
       const r = await runMaterialize(getStore(), force);
-      res.json({ ok: true, ...r, materialized: safeCorpusCount() });
+      res.json({ ok: true, ...r, materialized: await safeCorpusCount() });
     } catch (e: any) {
       console.error("[ingest] /materialize error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
@@ -350,15 +340,15 @@ export function createIngestRouter(): express.Router {
       const csv = typeof req.body === "string" ? req.body : "";
       if (!csv.trim()) return res.status(400).json({ ok: false, error: "empty body — POST the registry CSV" });
       const source = typeof req.query.source === "string" && req.query.source.trim() ? req.query.source.trim() : "admin-export";
-      const r = loadFlexfieldsCsv(csv, source);
-      res.json({ ok: true, source, ...r, ...flexfieldsCount() });
+      const r = await loadFlexfieldsCsv(csv, source);
+      res.json({ ok: true, source, ...r, ...(await flexfieldsCount()) });
     } catch (e: any) {
       console.error("[ingest] /flexfields error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
     }
   });
-  router.get("/ingest/flexfields/health", requireAuth, (_req, res) => {
-    try { res.json({ ok: true, ...flexfieldsCount(), adf: adfCount() }); }
+  router.get("/ingest/flexfields/health", requireAuth, async (_req, res) => {
+    try { res.json({ ok: true, ...(await flexfieldsCount()), adf: await adfCount() }); }
     catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
   });
 
@@ -368,8 +358,8 @@ export function createIngestRouter(): express.Router {
       const csv = typeof req.body === "string" ? req.body : "";
       if (!csv.trim()) return res.status(400).json({ ok: false, error: "empty body — POST the ADF-extensions CSV" });
       const source = typeof req.query.source === "string" && req.query.source.trim() ? req.query.source.trim() : "admin-export";
-      const r = loadAdfExtensionsCsv(csv, source);
-      res.json({ ok: true, source, ...r, ...adfCount() });
+      const r = await loadAdfExtensionsCsv(csv, source);
+      res.json({ ok: true, source, ...r, ...(await adfCount()) });
     } catch (e: any) {
       console.error("[ingest] /adf-extensions error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
@@ -412,7 +402,7 @@ export function createIngestRouter(): express.Router {
       const guard = await usageGuard();
       if (guard.blocked) {
         const sources0 = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
-        res.json({ ok: true, skipped: "usage-guard", guardReason: guard.reason, fiveHourUtilizationPct: guard.utilization, sevenDayUtilizationPct: guard.weekly, processed: 0, failed: 0, ...reenrichCounts(sources0) });
+        res.json({ ok: true, skipped: "usage-guard", guardReason: guard.reason, fiveHourUtilizationPct: guard.utilization, sevenDayUtilizationPct: guard.weekly, processed: 0, failed: 0, ...(await reenrichCounts(sources0)) });
         return;
       }
       const sources = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
@@ -422,7 +412,7 @@ export function createIngestRouter(): express.Router {
       const BATCH_ITEMS = Math.max(1, Number(req.query.batchItems) || 6);
       const BATCH_CHARS = Math.max(2000, Number(req.query.batchChars) || 14000);
       const cfg = getEnrichConfig();
-      const queue = reenrichQueue(sources, limit);
+      const queue = await reenrichQueue(sources, limit);
 
       // PER-ROW provider path (gemini/anthropic/openai): the agent-batch path is subscription-Claude
       // only; a non-agent provider enriches one row per call via enrichOne (usage recorded inside the
@@ -430,19 +420,19 @@ export function createIngestRouter(): express.Router {
       if (providerOverride && providerOverride !== "agent") {
         // hard spend cap (USD) across this provider's recorded usage — protects a fixed budget.
         const spendCap = Number(req.query.spendCapUsd ?? process.env.ENRICH_SPEND_CAP_USD ?? 0);
-        const spentSoFar = () => spendCap > 0 ? (spentUsd(`${providerOverride}%`) || 0) : 0;
+        const spentSoFar = async () => spendCap > 0 ? ((await spentUsd(`${providerOverride}%`)) || 0) : 0;
         let pdone = 0, pfailed = 0, capped = false;
         const perrors: string[] = [];
         const pq = [...queue];
         const pworkers = Array.from({ length: Math.min(cfg.concurrency, queue.length || 1) }, async () => {
           for (;;) {
-            if (spendCap > 0 && spentSoFar() >= spendCap) { capped = true; return; }
+            if (spendCap > 0 && (await spentSoFar()) >= spendCap) { capped = true; return; }
             const row = pq.shift();
             if (!row) return;
             try {
               const e = await enrichOne(row.sql, row.title, { model: modelOverride, provider: providerOverride });
               const vecs = await embed(embedTexts(e.description, e.tablesUsed, e.intents));
-              updateEnrichment(row.id, { description: e.description, intents: e.intents, mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
+              await updateEnrichment(row.id, { description: e.description, intents: e.intents, mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
               pdone++;
               if (pdone % 50 === 0) console.error(`[reenrich:${providerOverride}] ${pdone} done, ${pfailed} failed`);
             } catch (err: any) {
@@ -452,7 +442,7 @@ export function createIngestRouter(): express.Router {
           }
         });
         await Promise.all(pworkers);
-        res.json({ ok: true, provider: providerOverride, model: modelOverride, processed: pdone, failed: pfailed, capped, spentUsd: +(spentUsd(`${providerOverride}%`) || 0).toFixed(2), errors: perrors, ...reenrichCounts(sources) });
+        res.json({ ok: true, provider: providerOverride, model: modelOverride, processed: pdone, failed: pfailed, capped, spentUsd: +((await spentUsd(`${providerOverride}%`)) || 0).toFixed(2), errors: perrors, ...(await reenrichCounts(sources)) });
         return;
       }
 
@@ -471,7 +461,7 @@ export function createIngestRouter(): express.Router {
       const nowIso = new Date().toISOString();
       const persist = async (row: typeof queue[number], e: { description: string; intents: string[]; mechanics: string | null }) => {
         const vecs = await embed(embedTexts(e.description, [], e.intents));
-        updateEnrichment(row.id, { description: e.description, intents: e.intents, mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
+        await updateEnrichment(row.id, { description: e.description, intents: e.intents, mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
         done++;
       };
       const bq = [...batches];
@@ -482,7 +472,7 @@ export function createIngestRouter(): express.Router {
           try {
             const { results, usage, model } = await enrichAgentBatch(batch.map((r) => ({ sql: r.sql, title: r.title })), { model: modelOverride });
             calls++;
-            recordUsage({
+            await recordUsage({
               ts: nowIso, model, source: batch[0]?.source, nItems: batch.length,
               inputTokens: usage.input_tokens, outputTokens: usage.output_tokens,
               cacheReadTokens: usage.cache_read_input_tokens, cacheCreationTokens: usage.cache_creation_input_tokens,
@@ -495,7 +485,7 @@ export function createIngestRouter(): express.Router {
               try {
                 const { results, usage, model } = await enrichAgentBatch([{ sql: row.sql, title: row.title }], { model: modelOverride });
                 calls++;
-                recordUsage({ ts: nowIso, model, source: row.source, nItems: 1, inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, cacheReadTokens: usage.cache_read_input_tokens, cacheCreationTokens: usage.cache_creation_input_tokens, sqlChars: row.sql?.length ?? 0 });
+                await recordUsage({ ts: nowIso, model, source: row.source, nItems: 1, inputTokens: usage.input_tokens, outputTokens: usage.output_tokens, cacheReadTokens: usage.cache_read_input_tokens, cacheCreationTokens: usage.cache_creation_input_tokens, sqlChars: row.sql?.length ?? 0 });
                 await persist(row, results[0]);
               } catch (err2: any) {
                 failed++;
@@ -507,7 +497,7 @@ export function createIngestRouter(): express.Router {
         }
       });
       await Promise.all(workers);
-      res.json({ ok: true, provider: cfg.provider, model: modelOverride ?? cfg.model, batches: batches.length, calls, processed: done, failed, errors, ...reenrichCounts(sources) });
+      res.json({ ok: true, provider: cfg.provider, model: modelOverride ?? cfg.model, batches: batches.length, calls, processed: done, failed, errors, ...(await reenrichCounts(sources)) });
     } catch (e: any) {
       console.error("[ingest] /reenrich error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
@@ -529,19 +519,19 @@ export function createIngestRouter(): express.Router {
       const cap = Number(req.query.spendCapUsd ?? process.env.ENRICH_SPEND_CAP_USD ?? 22);
       const wave = Math.max(100, Number(req.query.wave) || 2000);
       const batchSize = Math.min(200, Math.max(50, Number(req.query.batchSize) || 100));
-      setGeminiControl({ active: true, sources, model, cap, wave, batch_size: batchSize });
+      await setGeminiControl({ active: true, sources, model, cap, wave, batch_size: batchSize });
       const first = await driveGeminiReenrich(); // kick the first wave now
       res.json({ ok: true, started: true, sources, model, spendCapUsd: cap, wave, batchSize, first });
     } catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
   });
-  router.post("/ingest/gemini2/stop", requireAuth, (_req, res) => {
-    const c = getGeminiControl();
-    if (c) setGeminiControl({ ...c, active: false });
+  router.post("/ingest/gemini2/stop", requireAuth, async (_req, res) => {
+    const c = await getGeminiControl();
+    if (c) await setGeminiControl({ ...c, active: false });
     res.json({ ok: true, stopped: true });
   });
-  router.get("/ingest/gemini2/status", requireAuth, (_req, res) => {
+  router.get("/ingest/gemini2/status", requireAuth, async (_req, res) => {
     try {
-      res.json({ ok: true, control: getGeminiControl(), openJobs: openGeminiJobs().length, jobs: allGeminiJobs(), geminiSpentUsd: +spentUsd("gemini%").toFixed(2) });
+      res.json({ ok: true, control: await getGeminiControl(), openJobs: (await openGeminiJobs()).length, jobs: await allGeminiJobs(), geminiSpentUsd: +(await spentUsd("gemini%")).toFixed(2) });
     } catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
   });
   router.post("/ingest/gemini2/poll", requireAuth, async (_req, res) => {
@@ -559,14 +549,14 @@ export function createIngestRouter(): express.Router {
     const apiKey = (process.env.GOOGLE_STUDIO_API_KEY ?? "").trim();
     if (!apiKey) { res.status(400).json({ ok: false, error: "GOOGLE_STUDIO_API_KEY not set" }); return; }
     geminiDrainRunning = true;
-    res.json({ ok: true, started: true, sources, model, spendCapUsd: spendCap, chunk, ...reenrichCounts(sources) });
+    res.json({ ok: true, started: true, sources, model, spendCapUsd: spendCap, chunk, ...(await reenrichCounts(sources)) });
     // background drain — do NOT await; the HTTP response already returned.
     void (async () => {
       const cfg = { ...getEnrichConfig(), provider: "gemini" as const, model, apiKey };
       try {
         for (;;) {
-          if (spendCap > 0 && spentUsd("gemini%") >= spendCap) { console.error(`[gemini-batch] spend cap $${spendCap} reached — stopping`); break; }
-          const rows = reenrichQueue(sources, chunk);
+          if (spendCap > 0 && (await spentUsd("gemini%")) >= spendCap) { console.error(`[gemini-batch] spend cap $${spendCap} reached — stopping`); break; }
+          const rows = await reenrichQueue(sources, chunk);
           if (!rows.length) { console.error("[gemini-batch] queue empty — done"); break; }
           const items = rows.map((r) => {
             const p = buildEnrichPrompt({ id: r.id, source: "catalog", title: r.title, originalSql: r.sql, sourceHash: "", raw: {} } as any);
@@ -582,12 +572,12 @@ export function createIngestRouter(): express.Router {
             try {
               const e = parseEnrichReply(r.text, { id, source: "catalog", title: row.title, originalSql: row.sql, sourceHash: "", raw: {} } as any);
               const vecs = await embed(embedTexts(e.description, e.tablesUsed ?? [], e.intents ?? []));
-              updateEnrichment(id, { description: e.description, intents: e.intents ?? [], mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
+              await updateEnrichment(id, { description: e.description, intents: e.intents ?? [], mechanics: e.mechanics ?? "(no notable mechanics)" }, vecs);
               inTok += r.inTok ?? 0; outTok += r.outTok ?? 0; ok++;
             } catch { fail++; }
           }
-          recordUsage({ ts: nowIso, model, source: "otbi-batch", nItems: ok, inputTokens: inTok, outputTokens: outTok, cacheReadTokens: 0, cacheCreationTokens: 0 });
-          console.error(`[gemini-batch] chunk done: ok=${ok} fail=${fail} spent=$${spentUsd("gemini%").toFixed(2)}`);
+          await recordUsage({ ts: nowIso, model, source: "otbi-batch", nItems: ok, inputTokens: inTok, outputTokens: outTok, cacheReadTokens: 0, cacheCreationTokens: 0 });
+          console.error(`[gemini-batch] chunk done: ok=${ok} fail=${fail} spent=$${(await spentUsd("gemini%")).toFixed(2)}`);
         }
       } catch (e: any) {
         console.error("[gemini-batch] drain error", e?.message ?? e);
@@ -597,14 +587,14 @@ export function createIngestRouter(): express.Router {
     })();
   });
 
-  router.get("/ingest/reenrich/status", requireAuth, (req, res) => {
+  router.get("/ingest/reenrich/status", requireAuth, async (req, res) => {
     const sources = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
-    try { res.json({ ok: true, ...reenrichCounts(sources) }); }
+    try { res.json({ ok: true, ...(await reenrichCounts(sources)) }); }
     catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
   });
-  router.get("/ingest/reenrich/cost", requireAuth, (req, res) => {
+  router.get("/ingest/reenrich/cost", requireAuth, async (req, res) => {
     const sources = String(req.query.sources ?? "bip-report,view,otbi").split(",").map((s) => s.trim()).filter(Boolean);
-    try { res.json({ ok: true, ...(usageStats(sources) as object) }); }
+    try { res.json({ ok: true, ...((await usageStats(sources)) as object) }); }
     catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
   });
 
@@ -622,7 +612,7 @@ export function createIngestRouter(): express.Router {
       const redoOnly = req.query.redo === "1" || req.query.redo === "true";
       // full submit deliberately EXCLUDES redo rows (mechanics IS NULL only) so running the redo
       // job and the full job concurrently can never double-pay for the same row.
-      const rows = redoOnly ? redoQueue(sources, limit) : reenrichQueue(sources, limit, false);
+      const rows = redoOnly ? await redoQueue(sources, limit) : await reenrichQueue(sources, limit, false);
       if (!rows.length) { res.json({ ok: true, submitted: 0, note: "queue empty" }); return; }
       const chars = rows.reduce((a, r) => a + (r.sql?.length ?? 0), 0);
       // estimate at @batch half-rate from observed shape: input ≈ sql/4 + 900 prompt tokens,
@@ -644,15 +634,15 @@ export function createIngestRouter(): express.Router {
   router.post("/ingest/batch/poll", requireAuth, async (_req, res) => {
     try {
       const out: unknown[] = [];
-      for (const j of runningJobs()) out.push(await pollJob(j.batch_id));
+      for (const j of await runningJobs()) out.push(await pollJob(j.batch_id));
       res.json({ ok: true, jobs: out });
     } catch (e: any) {
       console.error("[ingest] /batch/poll error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
     }
   });
-  router.get("/ingest/batch/status", requireAuth, (_req, res) => {
-    try { res.json({ ok: true, jobs: allJobs() }); }
+  router.get("/ingest/batch/status", requireAuth, async (_req, res) => {
+    try { res.json({ ok: true, jobs: await allJobs() }); }
     catch (e: any) { res.status(500).json({ ok: false, error: e?.message ?? String(e) }); }
   });
   // Re-parse + re-ingest FINISHED jobs from their stored results (free — no model calls). Recovers
@@ -660,7 +650,7 @@ export function createIngestRouter(): express.Router {
   router.post("/ingest/batch/reingest", requireAuth, async (_req, res) => {
     try {
       const out: unknown[] = [];
-      for (const j of finishedJobs()) out.push(await reingestJob(j.batch_id));
+      for (const j of await finishedJobs()) out.push(await reingestJob(j.batch_id));
       res.json({ ok: true, jobs: out });
     } catch (e: any) {
       console.error("[ingest] /batch/reingest error", e);
@@ -674,8 +664,8 @@ export function createIngestRouter(): express.Router {
     try {
       const xml = typeof req.body === "string" ? req.body : "";
       if (!xml.includes("<ReportModel")) return res.status(400).json({ ok: false, error: "expected an App Composer ConfigurationReport XML body" });
-      const r = loadConfigReportXml(xml);
-      res.json({ ok: true, ...r, ...adfCount() });
+      const r = await loadConfigReportXml(xml);
+      res.json({ ok: true, ...r, ...(await adfCount()) });
     } catch (e: any) {
       console.error("[ingest] /config-report error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
@@ -686,14 +676,14 @@ export function createIngestRouter(): express.Router {
   //   GET  /ingest/export?scope=data|full[&source=bip-report]  -> streams NDJSON (one row/line)
   //   POST /ingest/import   (NDJSON or JSON array body)          -> insert/replace, re-embed if needed
   // scope=data omits embeddings (import re-embeds locally, no Gemini); full carries them verbatim.
-  router.get("/ingest/export", requireAuth, (req, res) => {
+  router.get("/ingest/export", requireAuth, async (req, res) => {
     const scope = req.query.scope === "full" ? "full" : "data";
     const source = typeof req.query.source === "string" ? req.query.source : undefined;
     res.setHeader("content-type", "application/x-ndjson; charset=utf-8");
     res.setHeader("content-disposition", `attachment; filename="corpus-${scope}${source ? "-" + source : ""}.ndjson"`);
     try {
       let n = 0;
-      for (const row of exportCorpus(scope, source)) { res.write(JSON.stringify(row) + "\n"); n++; }
+      for await (const row of exportCorpus(scope, source)) { res.write(JSON.stringify(row) + "\n"); n++; }
       if (process.env.MCP_DEBUG) console.error(`[ingest] export scope=${scope} source=${source ?? "*"} rows=${n}`);
       res.end();
     } catch (e: any) {
@@ -714,7 +704,7 @@ export function createIngestRouter(): express.Router {
         const r = await importCorpus(rows.slice(i, i + 500));
         imported += r.imported; replaced += r.replaced; embedded += r.embedded;
       }
-      res.json({ ok: true, imported, replaced, embedded, materialized: safeCorpusCount() });
+      res.json({ ok: true, imported, replaced, embedded, materialized: await safeCorpusCount() });
     } catch (e: any) {
       console.error("[ingest] /import error", e);
       res.status(500).json({ ok: false, error: e?.message ?? String(e) });
@@ -737,7 +727,7 @@ export function startIngestScheduler(): void {
   // poll them each tick and ingest finished results (submit is manual via /ingest/batch/submit).
   const pollBatches = async () => {
     try {
-      for (const j of runningJobs()) {
+      for (const j of await runningJobs()) {
         const r = await pollJob(j.batch_id);
         if ((r as any).status === "done") console.error(`[batch] ${j.batch_id} done: ingested=${(r as any).ingested} failed=${(r as any).failed}`);
       }
@@ -771,7 +761,7 @@ export function startIngestScheduler(): void {
   const batch = Number(process.env.ENRICH_BATCH ?? 200) || undefined;
   const tick = async () => {
     try {
-      if (store.counts().pending > 0) await runEnrich(store, batch);
+      if ((await store.counts()).pending > 0) await runEnrich(store, batch);
       await runMaterialize(store);
     } catch (e) {
       console.error("[ingest] scheduler tick error", e);

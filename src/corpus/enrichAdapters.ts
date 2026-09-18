@@ -190,7 +190,7 @@ async function enrichGemini(sql: string, title: string, cfg: EnrichConfig, tries
     const e = parseEnrichReply(text, s);
     const um = j.usageMetadata ?? {};
     try {
-      recordUsage({
+      await recordUsage({
         ts: new Date().toISOString(), model, source: "reenrich", nItems: 1,
         inputTokens: Number(um.promptTokenCount ?? 0), outputTokens: Number(um.candidatesTokenCount ?? 0),
         cacheReadTokens: 0, cacheCreationTokens: 0, sqlChars: sql.length,

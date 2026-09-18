@@ -10,13 +10,20 @@
  *    (read each rowid's vector from vec0, store as a BLOB) so future vec rebuilds need no re-embed.
  *
  * Run:  node dist/migrate-split.js <catalog.sqlite> [--schema <out>] [--reports <out>]
- * The source path is REQUIRED (no env/default). Outputs default to SCHEMA_DB / REPORTS_DB.
+ * The source path is REQUIRED (no env/default). Outputs default to SCHEMA_DB / REPORTS_DB under
+ * DATA_DIR (src/db/sqlite/paths.ts).
+ *
+ * GATE EXEMPTION (scripts/no-sql-outside-db.sh): this is the ONE file outside src/db allowed to hold
+ * SQL / better-sqlite3 — a one-shot, sqlite-only converter for a box still holding the pre-split
+ * catalog.sqlite; deleted in step 3 of the DB-library plan (docs/superpowers/plans/
+ * 2026-09-18-fusion-db-access-library.md). Its output has the library's canonical report_queries
+ * shape (reports/embedding/intents/mechanics columns); report_queries_fts is no longer built.
  */
 import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
-import { SCHEMA_DB, REPORTS_DB, sqlQuote } from "./dbPaths.js";
+import { sqliteFilesFromEnv, sqlQuote } from "./db/sqlite/paths.js";
 import { EMBED_DIM } from "./corpus/embed.js";
 import { readVersionFile } from "./version.js";
 
@@ -31,8 +38,9 @@ if (!SRC) {
   console.error("[migrate-split] usage: node dist/migrate-split.js <catalog.sqlite> [--schema <out>] [--reports <out>]");
   process.exit(2);
 }
-const SCHEMA_OUT = argVal("--schema") ?? SCHEMA_DB;
-const REPORTS_OUT = argVal("--reports") ?? REPORTS_DB;
+const outs = argVal("--schema") && argVal("--reports") ? null : sqliteFilesFromEnv();
+const SCHEMA_OUT = argVal("--schema") ?? outs!.schema;
+const REPORTS_OUT = argVal("--reports") ?? outs!.reports;
 
 function buildSchema() {
   log(`building schema.sqlite from ${SRC} ...`);
@@ -114,9 +122,8 @@ function buildReports() {
       id TEXT PRIMARY KEY, source TEXT, title TEXT,
       original_sql TEXT, clean_sql TEXT, description TEXT,
       tables_used TEXT, joins TEXT, filters TEXT, lookup_types TEXT,
-      security_predicate TEXT, approved INTEGER, reports TEXT, embedding BLOB
+      security_predicate TEXT, approved INTEGER, reports TEXT, embedding BLOB, intents TEXT, mechanics TEXT
     );
-    CREATE VIRTUAL TABLE report_queries_fts USING fts5(title, description, tables_used, content='');
     CREATE VIRTUAL TABLE report_queries_vec USING vec0(rowid INTEGER PRIMARY KEY, embedding FLOAT[${EMBED_DIM}]);
   `);
 
@@ -137,7 +144,6 @@ function buildReports() {
        tables_used, joins, filters, lookup_types, security_predicate, approved, reports, embedding)
     VALUES (@rowid,@id,@source,@title,@original_sql,@clean_sql,@description,
             @tables_used,@joins,@filters,@lookup_types,@security_predicate,@approved,@reports,@embedding)`);
-  const insFts = r.prepare("INSERT INTO report_queries_fts (rowid, title, description, tables_used) VALUES (?,?,?,?)");
   const insVec = r.prepare("INSERT INTO report_queries_vec (rowid, embedding) VALUES (?, ?)");
 
   let n = 0, backfilled = 0, withVec = 0;
@@ -158,9 +164,6 @@ function buildReports() {
           lookup_types: row.lookup_types, security_predicate: row.security_predicate,
           approved: row.approved ?? 1, reports: row.reports ?? "[]", embedding: emb,
         });
-        let tu = "";
-        try { const a = JSON.parse(row.tables_used ?? "[]"); tu = Array.isArray(a) ? a.join(" ") : ""; } catch { /* */ }
-        insFts.run(BigInt(row.rowid), row.title, row.description, tu);
         if (emb) { insVec.run(BigInt(row.rowid), emb); withVec++; }
       }
     });

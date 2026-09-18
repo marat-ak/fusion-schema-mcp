@@ -165,16 +165,12 @@ const tx2 = s2.transaction(() => {
   for (const [id, res] of results) upd.run(JSON.stringify(res), lowConf(res) ? 1 : 0, id);
 });
 tx2();
-// contentless FTS5 (title, description, tables_used) — rebuilt whole, matches compile.ts shape
-s2.exec("INSERT INTO report_queries_fts(report_queries_fts) VALUES('delete-all')");
-s2.exec("INSERT INTO report_queries_fts(rowid,title,description,tables_used) SELECT rowid,title,description,tables_used FROM report_queries");
 const counts = s2.prepare("SELECT source, COUNT(*) n, SUM(low_confidence) lc FROM report_queries GROUP BY source ORDER BY n DESC").all();
 console.log("[import] serving corpus now:", counts.map(c => `${c.source}=${c.n}(lowConf ${c.lc ?? 0})`).join("  "));
 try {   // vec0 tables need the sqlite-vec extension (loaded in materialize's connection, not this plain one)
   console.log("[import] vec rows:", s2.prepare("SELECT COUNT(*) n FROM report_queries_vec").get().n,
               " multi:", s2.prepare("SELECT COUNT(*) n FROM report_queries_vec_multi").get().n);
 } catch { console.log("[import] vec counts skipped (vec0 ext not loaded here — vectors written by materialize)"); }
-console.log("[import] fts:", s2.prepare("SELECT COUNT(*) n FROM report_queries_fts").get().n);
 // ---- LAST STEP: table-level corpus stats from the round-0 facts (all SQLs now imported) -------
 // mostlyUsedFilters source: table_predicates rebuilt DIRECTLY from x_predicates — no regex round-trip,
 // NO skip-lists (pseudocolumns, every op, every literal count; the agent judges relevance, not us).

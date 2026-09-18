@@ -1,6 +1,6 @@
 import type { SqlSource } from "./sources.js";
 import { otbiMeta } from "./otbiMeta.js";
-import type { Enrichment } from "./enrichStore.js";
+import type { Enrichment } from "../db/index.js";
 
 const SYSTEM_OTBI =
   "You rewrite Oracle BI machine-generated SQL into clean, readable, human-style Oracle SQL " +

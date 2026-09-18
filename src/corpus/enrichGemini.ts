@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { scanSources, type SqlSource } from "./sources.js";
-import { openEnrichStore } from "./enrichStore.js";
+import { openCatalogDb, configFromEnv } from "../db/index.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./enrichPrompt.js";
 
 // Gemini Flash-Lite. Rates are env-overridable; defaults are a conservative non-batch
@@ -65,9 +65,9 @@ async function main() {
 
   let sources = scanSources({ limit });
   if (only) sources = sources.filter((s) => s.source === only);
-  const store = openEnrichStore();
-  let pending = store.pendingIds(sources);
-  for (const s of pending) store.upsertSource(s);
+  const store = (await openCatalogDb(configFromEnv())).enrich;
+  let pending = await store.pendingIds(sources);
+  for (const s of pending) await store.upsertSource(s);
   console.error(`[gemini] model=${MODEL} | ${sources.length} sources${only ? ` (${only})` : ""}, ${pending.length} pending | concurrency=${CONCURRENCY} budget=$${BUDGET === Infinity ? "∞" : BUDGET}`);
   if (pending.length === 0) { console.error("[gemini] nothing to do"); return; }
 
@@ -83,7 +83,7 @@ async function main() {
       const s = pending[i];
       const r = await callGemini(s);
       if (!r) { bad++; continue; }
-      store.setEnrichment(s.id, r.enrichment);
+      await store.setEnrichment(s.id, r.enrichment);
       ok++; cumIn += r.usage.inTok; cumOut += r.usage.outTok;
       cumCost = cumIn * IN_RATE + cumOut * OUT_RATE;
       if (ok % 50 === 0 || cumCost >= BUDGET) {
@@ -97,7 +97,7 @@ async function main() {
 
   await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
 
-  const stillPending = store.pendingIds(sources).length;
+  const stillPending = (await store.pendingIds(sources)).length;
   console.error(`[gemini] DONE ok=${ok} bad=${bad} | in=${cumIn} out=${cumOut} cost≈$${cumCost.toFixed(4)} | still pending=${stillPending}`);
   if (ok) {
     const perRow = cumCost / ok;

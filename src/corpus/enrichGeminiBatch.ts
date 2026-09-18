@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { GoogleGenAI } from "@google/genai";
 import { scanSources, type SqlSource } from "./sources.js";
-import { openEnrichStore } from "./enrichStore.js";
+import { openCatalogDb, configFromEnv } from "../db/index.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./enrichPrompt.js";
 
 // Gemini Batch API = 50% off. 3.1 Flash-Lite batch: $0.125 in / $0.75 out per 1M.
@@ -33,9 +33,9 @@ async function main() {
 
   let sources = scanSources({ limit });
   if (only) sources = sources.filter((s) => s.source === only);
-  const store = openEnrichStore();
-  const pending = store.pendingIds(sources);
-  for (const s of pending) store.upsertSource(s);
+  const store = (await openCatalogDb(configFromEnv())).enrich;
+  const pending = await store.pendingIds(sources);
+  for (const s of pending) await store.upsertSource(s);
   console.error(`[gbatch] model=${MODEL} | ${sources.length} sources${only ? ` (${only})` : ""}, ${pending.length} pending | chunk=${CHUNK} budget=$${BUDGET === Infinity ? "∞" : BUDGET}`);
   if (pending.length === 0) { console.error("[gbatch] nothing to do"); return; }
 
@@ -77,7 +77,7 @@ async function main() {
       const text = resp?.candidates?.[0]?.content?.parts?.map((p: any) => p.text).join("") ?? "";
       const u = resp?.usageMetadata ?? {};
       cIn += u.promptTokenCount ?? 0; cOut += (u.candidatesTokenCount ?? 0) + (u.thoughtsTokenCount ?? 0);
-      try { store.setEnrichment(s.id, parseEnrichReply(text, s)); ok++; }
+      try { await store.setEnrichment(s.id, parseEnrichReply(text, s)); ok++; }
       catch (e) { console.error(`[gbatch] parse fail ${s.id}: ${(e as Error).message}`); bad++; }
     }
     cumIn += cIn; cumOut += cOut; cumCost = cumIn * IN_RATE + cumOut * OUT_RATE;
@@ -91,7 +91,7 @@ async function main() {
     return false;
   }
 
-  const stillPending = store.pendingIds(sources).length;
+  const stillPending = (await store.pendingIds(sources)).length;
   console.error(`[gbatch] DONE ok=${ok} bad=${bad} | in=${cumIn} out=${cumOut} cost≈$${cumCost.toFixed(4)} | still pending=${stillPending}`);
   if (ok) console.error(`[gbatch] ≈$${(cumCost / ok).toFixed(6)}/row → remaining ${stillPending} ≈ $${((cumCost / ok) * stillPending).toFixed(2)}`);
 }

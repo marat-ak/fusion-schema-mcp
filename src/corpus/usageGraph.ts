@@ -10,9 +10,9 @@
  * Built at runtime from report_queries (idempotent, version-gated) so it stays in sync with the
  * runtime-ingested corpus. Ranked for ADOPTION: real reports/views outrank per-column OTBI fragments
  * (which read tables flat — bad templates), then by SQL completeness. Stored capped per table.
+ * Storage: `db().registries` (kind "usage").
  */
-import Database from "better-sqlite3";
-import { reportsDbPath, schemaDbPath, sqlQuote } from "../dbPaths.js";
+import { db, type UsageRegistryRow } from "../db/index.js";
 
 // Keep at most this many usages per table (bounds storage; heavy-fan-in tables are used by ~58k
 // queries — we only ever want the best few dozen real examples for adoption).
@@ -46,25 +46,9 @@ function parseArr(s: string | null): string[] {
   try { const a = JSON.parse(s); return Array.isArray(a) ? a.map(String) : []; } catch { return []; }
 }
 
-/** (Re)build table_usages from report_queries.tables_used. `d` = a WRITABLE reports connection. */
-export function rebuildUsageGraph(d: Database.Database): { rows: number; tables: number } {
-  d.exec(`
-    CREATE TABLE IF NOT EXISTS table_usages (
-      table_name TEXT NOT NULL,
-      query_id   TEXT NOT NULL,
-      source     TEXT,
-      title      TEXT,
-      sql_chars  INTEGER NOT NULL DEFAULT 0,
-      score      INTEGER NOT NULL DEFAULT 0
-    )`);
-  d.exec("CREATE INDEX IF NOT EXISTS ix_table_usages ON table_usages(table_name, score DESC)");
-
-  const rows = d.prepare(
-    `SELECT id, source, title, tables_used,
-            LENGTH(COALESCE(clean_sql, original_sql, '')) AS sql_chars
-     FROM report_queries
-     WHERE tables_used IS NOT NULL AND tables_used <> '[]'`,
-  ).all() as { id: string; source: string; title: string; tables_used: string; sql_chars: number }[];
+/** (Re)build table_usages from report_queries.tables_used. */
+export async function rebuildUsageGraph(): Promise<{ rows: number; tables: number }> {
+  const rows = await db().corpus.rowsForUsage();
 
   // table -> array of candidate usages; we keep only the top MAX_USAGES_PER_TABLE by score.
   const byTable = new Map<string, { id: string; source: string; title: string; sql_chars: number; score: number }[]>();
@@ -81,43 +65,26 @@ export function rebuildUsageGraph(d: Database.Database): { rows: number; tables:
     }
   }
 
-  const ins = d.prepare(
-    "INSERT INTO table_usages (table_name, query_id, source, title, sql_chars, score) VALUES (?,?,?,?,?,?)",
-  );
-  let total = 0;
-  const tx = d.transaction(() => {
-    d.exec("DELETE FROM table_usages");
-    for (const [table, arr] of byTable) {
-      arr.sort((a, b) => b.score - a.score);
-      for (const u of arr.slice(0, MAX_USAGES_PER_TABLE)) {
-        ins.run(table, u.id, u.source, u.title, u.sql_chars, u.score);
-        total++;
-      }
+  const out: UsageRegistryRow[] = [];
+  for (const [table, arr] of byTable) {
+    arr.sort((a, b) => b.score - a.score);
+    for (const u of arr.slice(0, MAX_USAGES_PER_TABLE)) {
+      out.push({ table_name: table, query_id: u.id, source: u.source, title: u.title, sql_chars: u.sql_chars, score: u.score });
     }
-  });
-  tx();
-  return { rows: total, tables: byTable.size };
+  }
+  const r = await db().registries.replaceAll("usage", out);
+  return { rows: r.rows, tables: byTable.size };
 }
 
 /** Read the top real-query usages for a table (case-insensitive). `brief` omits SQL (auto-attach). */
-export function getTableUsages(
-  reports: Database.Database,
+export async function getTableUsages(
   table: string,
   opts: { limit?: number; brief?: boolean } = {},
-): { table: string; usageCount: number; usages: UsageDigest[] } {
+): Promise<{ table: string; usageCount: number; usages: UsageDigest[] }> {
   const t = table.toUpperCase();
   const limit = Math.max(1, Math.min(opts.limit ?? 5, MAX_USAGES_PER_TABLE));
-  let total = 0;
-  try {
-    total = (reports.prepare("SELECT COUNT(*) c FROM table_usages WHERE table_name = ?").get(t) as any)?.c ?? 0;
-  } catch { return { table: t, usageCount: 0, usages: [] }; }
-
-  const rows = reports.prepare(
-    `SELECT u.query_id AS id, u.source, u.title, u.sql_chars,
-            r.filters, r.joins, r.clean_sql, r.original_sql
-     FROM table_usages u JOIN report_queries r ON r.id = u.query_id
-     WHERE u.table_name = ? ORDER BY u.score DESC LIMIT ?`,
-  ).all(t, limit) as any[];
+  const total = await db().registries.usageCount(t);
+  const rows = await db().registries.usages(t, limit);
 
   const usages: UsageDigest[] = rows.map((r) => {
     const base: UsageDigest = {
@@ -133,26 +100,15 @@ export function getTableUsages(
   return { table: t, usageCount: total, usages };
 }
 
-export function usageGraphCount(reports: Database.Database): number {
-  try { return (reports.prepare("SELECT COUNT(*) c FROM table_usages").get() as any).c; } catch { return 0; }
-}
-
 // Bump when the build logic / ranking changes so a redeploy rebuilds the index.
 const USAGE_VERSION = 1;
 
 /** Startup helper: (re)build table_usages when empty, the logic version changed, or force=true. */
-export function ensureUsageGraph(force = false): { built: boolean; rows: number; tables: number } {
-  const d = new Database(reportsDbPath());
-  try {
-    d.exec(`ATTACH DATABASE '${sqlQuote(schemaDbPath())}' AS schemadb`);
-    d.exec("CREATE TABLE IF NOT EXISTS usage_meta (k TEXT PRIMARY KEY, v TEXT)");
-    const ver = (d.prepare("SELECT v FROM usage_meta WHERE k='version'").get() as any)?.v;
-    const have = usageGraphCount(d);
-    if (have > 0 && ver === String(USAGE_VERSION) && !force) return { built: false, rows: have, tables: 0 };
-    const r = rebuildUsageGraph(d);
-    d.prepare("INSERT INTO usage_meta (k,v) VALUES ('version',?) ON CONFLICT(k) DO UPDATE SET v=excluded.v").run(String(USAGE_VERSION));
-    return { built: true, rows: r.rows, tables: r.tables };
-  } finally {
-    d.close();
-  }
+export async function ensureUsageGraph(force = false): Promise<{ built: boolean; rows: number; tables: number }> {
+  const ver = await db().registries.version("usage");
+  const have = await db().registries.count("usage");
+  if (have > 0 && ver === String(USAGE_VERSION) && !force) return { built: false, rows: have, tables: 0 };
+  const r = await rebuildUsageGraph();
+  await db().registries.setVersion("usage", String(USAGE_VERSION));
+  return { built: true, rows: r.rows, tables: r.tables };
 }

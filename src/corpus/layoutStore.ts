@@ -7,7 +7,7 @@
  * (dsl_support:"unsupported") — the honesty layer + a demand sensor for builder features.
  *
  * Source of truth: repo-versioned JSONL (src/corpus/layoutPatterns/patterns.jsonl) + fixtures/
- * beside it. Loaded (and embedded) into reports.sqlite at startup when the JSONL content hash
+ * beside it. Loaded (and embedded) into the catalog DB at startup when the JSONL content hash
  * changes. Retrieval mirrors the SQL corpus: multi-vector KNN (one vec per intent + one for
  * description), dedup by pattern, optional TEI rerank, structured filters (kind/format/dslSupport)
  * post-KNN. Payload discipline: recipes over RECIPE_INLINE_CAP ship as recipeOmitted with a
@@ -18,38 +18,13 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import Database from "better-sqlite3";
-import { load as loadVec } from "sqlite-vec";
-import { reportsDbPath } from "../dbPaths.js";
+import { db, type LayoutPatternRow } from "../db/index.js";
 import { embed } from "./embed.js";
+
+export type { LayoutPatternRow };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PATTERNS_JSONL = process.env.LAYOUT_PATTERNS_FILE ?? path.resolve(__dirname, "layoutPatterns/patterns.jsonl");
-
-export interface LayoutPatternRow {
-  id: string;                 // 'lp:technique:rtf-multilevel-blocks'
-  kind: "archetype" | "technique" | "antipattern";
-  name: string;
-  format: "rtf" | "xpt" | "both" | "any";
-  formatExclusive?: boolean;  // true => this shape is ONLY possible in `format` (drives formatAdvice)
-  dslSupport: "supported" | "partial" | "unsupported" | "n/a";
-  description: string;
-  whenToUse: string;
-  intents: string[];
-  requires?: Record<string, unknown>;
-  composition?: { nestsIn?: string[]; contains?: string[]; conflicts?: string[]; notes?: string };
-  recipe?: unknown;           // blocks[]/layout-spec fragment; absent for unsupported/antipattern
-  fixtureRef?: string;
-  pitfalls?: string[];
-  // antipattern-only:
-  trigger?: string;
-  why?: string;
-  instead?: string[];
-  alternative?: string;
-  sourceRefs?: unknown;
-  verified: "render" | "pod" | "builder" | "prose";
-  dslVersion?: string;
-}
 
 /** ~300-token nesting-matrix card, attached once per session (first findLayoutPattern response). */
 export const GRAMMAR_CARD = `LAYOUT COMPOSITION GRAMMAR (blocks[] / xpt) — the hard rules:
@@ -62,37 +37,12 @@ export const GRAMMAR_CARD = `LAYOUT COMPOSITION GRAMMAR (blocks[] / xpt) — the
 - format masks (date/number/currency) belong on EVERY date/amount column, incl. expr columns.
 - Aggregation belongs in SQL (PIVOT/ROLLUP/window) or a datamodel group-aggregate — NEVER a wide per-cell XSLT pivot in the template.`;
 
-// ---- db ----
-let _db: Database.Database | null = null;
-function db(): Database.Database {
-  if (_db) return _db;
-  const d = new Database(reportsDbPath());
-  d.pragma("busy_timeout = 10000");
-  loadVec(d);
-  d.exec(`
-    CREATE TABLE IF NOT EXISTS layout_patterns (
-      rowid INTEGER PRIMARY KEY,
-      id TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL,
-      format TEXT NOT NULL, format_exclusive INTEGER DEFAULT 0, dsl_support TEXT NOT NULL,
-      description TEXT NOT NULL, when_to_use TEXT NOT NULL, intents TEXT NOT NULL,
-      requires TEXT, composition TEXT, recipe TEXT, fixture_ref TEXT, pitfalls TEXT,
-      trigger TEXT, why TEXT, instead TEXT, alternative TEXT,
-      source_refs TEXT, verified TEXT NOT NULL, dsl_version TEXT, verified_at TEXT
-    );
-    CREATE VIRTUAL TABLE IF NOT EXISTS layout_patterns_vec USING vec0(embedding float[384], +prowid INTEGER);
-    CREATE TABLE IF NOT EXISTS layout_meta (k TEXT PRIMARY KEY, v TEXT);
-  `);
-  _db = d;
-  return d;
-}
-
 // ---- load/compile from JSONL (hash-gated) ----
 export async function loadLayoutPatterns(force = false): Promise<{ loaded: number; skipped?: string }> {
-  const d = db();
   if (!fs.existsSync(PATTERNS_JSONL)) return { loaded: 0, skipped: "no patterns.jsonl" };
   const raw = fs.readFileSync(PATTERNS_JSONL, "utf8");
   const hash = crypto.createHash("sha256").update(raw).digest("hex").slice(0, 16);
-  const prev = (d.prepare("SELECT v FROM layout_meta WHERE k = 'jsonl_hash'").get() as any)?.v;
+  const prev = await db().layout.jsonlHash();
   if (!force && prev === hash) return { loaded: 0, skipped: "unchanged" };
 
   const rows: LayoutPatternRow[] = raw.split("\n").filter((l) => l.trim()).map((l) => JSON.parse(l));
@@ -105,31 +55,11 @@ export async function loadLayoutPatterns(force = false): Promise<{ loaded: numbe
     for (const it of r.intents ?? []) texts.push(it);
   }
   const vecs = await embed(texts);
-
-  const ins = d.prepare(`INSERT OR REPLACE INTO layout_patterns
-    (id, kind, name, format, format_exclusive, dsl_support, description, when_to_use, intents,
-     requires, composition, recipe, fixture_ref, pitfalls, trigger, why, instead, alternative,
-     source_refs, verified, dsl_version, verified_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
-  const insVec = d.prepare("INSERT INTO layout_patterns_vec (embedding, prowid) VALUES (?, ?)");
-  const J = (v: unknown) => (v == null ? null : JSON.stringify(v));
-  const tx = d.transaction(() => {
-    d.exec("DELETE FROM layout_patterns; DELETE FROM layout_patterns_vec;");
-    rows.forEach((r, i) => {
-      ins.run(
-        r.id, r.kind, r.name, r.format, r.formatExclusive ? 1 : 0, r.dslSupport,
-        r.description, r.whenToUse, JSON.stringify(r.intents ?? []),
-        J(r.requires), J(r.composition), J(r.recipe), r.fixtureRef ?? null, J(r.pitfalls),
-        r.trigger ?? null, r.why ?? null, J(r.instead), r.alternative ?? null,
-        J(r.sourceRefs), r.verified, r.dslVersion ?? null, new Date().toISOString(),
-      );
-      const prowid = (d.prepare("SELECT rowid FROM layout_patterns WHERE id = ?").get(r.id) as any).rowid;
-      const n = 1 + (r.intents?.length ?? 0);
-      for (let k = 0; k < n; k++) insVec.run(Buffer.from(vecs[offsets[i] + k].buffer), BigInt(prowid));
-    });
-    d.prepare("INSERT OR REPLACE INTO layout_meta (k, v) VALUES ('jsonl_hash', ?)").run(hash);
+  const perRow = rows.map((r, i) => {
+    const n = 1 + (r.intents?.length ?? 0);
+    return Array.from({ length: n }, (_v, k) => vecs[offsets[i] + k]);
   });
-  tx();
+  await db().layout.replaceAll(rows, perRow, hash);
   console.error(`[layout-corpus] loaded ${rows.length} patterns (hash ${hash})`);
   return { loaded: rows.length };
 }
@@ -168,20 +98,14 @@ export interface FindLayoutOpts {
 }
 
 export async function findLayoutPattern(intent: string, opts: FindLayoutOpts = {}): Promise<Record<string, unknown>> {
-  const d = db();
   const limit = Math.min(Math.max(opts.limit ?? 4, 1), 8);
   const [vec] = await embed([intent]);
   const K = 40;
-  const hits = d.prepare(
-    `SELECT p.*, v.distance FROM
-       (SELECT prowid, distance FROM layout_patterns_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?) v
-     JOIN layout_patterns p ON p.rowid = v.prowid
-     ORDER BY v.distance`,
-  ).all(Buffer.from(vec.buffer), K) as any[];
+  const hits = await db().layout.knn(vec, K);
 
   // dedup by pattern (multi-vector), keep best distance
   const seen = new Map<number, any>();
-  for (const h of hits) if (!seen.has(h.rowid)) seen.set(h.rowid, h);
+  for (const h of hits) if (!seen.has(h.rid)) seen.set(h.rid, h);
   let cands = [...seen.values()].map((r) => ({ ...r, score: +(1 - (r.distance * r.distance) / 2).toFixed(3) }));
 
   // optional rerank via TEI (same fail-open contract as the SQL path)
@@ -226,18 +150,14 @@ function finish(patterns: unknown[], antis: any[], formatAdvice: string | null, 
   };
 }
 
-export function getLayoutPattern(id: string): Record<string, unknown> | { error: string } {
-  const r = db().prepare("SELECT * FROM layout_patterns WHERE id = ?").get(id) as any;
+export async function getLayoutPattern(id: string): Promise<Record<string, unknown> | { error: string }> {
+  const r = await db().layout.get(id);
   if (!r) return { error: `no layout pattern '${id}'` };
   const p = toPayload(r, true);
   if ((p as any).recipeOmitted) { // getter always inlines
-    return { ...p, recipeOmitted: undefined, fetchWith: undefined, recipe: JSON.parse(r.recipe) };
+    return { ...p, recipeOmitted: undefined, fetchWith: undefined, recipe: JSON.parse(r.recipe!) };
   }
   return p;
-}
-
-export function layoutCorpusCount(): number {
-  try { return (db().prepare("SELECT COUNT(*) c FROM layout_patterns").get() as any).c; } catch { return 0; }
 }
 
 // ---- rerank (duplicated small helper; catalog.ts's is private) ----

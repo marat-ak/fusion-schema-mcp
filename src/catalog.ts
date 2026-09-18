@@ -1,7 +1,5 @@
-/** Query layer over the split DBs (reports.sqlite main + schema.sqlite attached). Names normalized. */
-import fs from "node:fs";
-import Database from "better-sqlite3";
-import { load as loadVec } from "sqlite-vec";
+/** Query layer over the catalog DB (typed CatalogProvider — no SQL here). Names normalized. */
+import { db } from "./db/index.js";
 import { embed } from "./corpus/embed.js";
 import { textHash, getVecs, putVecs } from "./corpus/colCache.js";
 import { classifyDomain, topDomain } from "./corpus/domain.js";
@@ -10,97 +8,32 @@ import { getTableUsages } from "./corpus/usageGraph.js";
 import { getTableRules } from "./corpus/tableRules.js";
 import { getTablePredicates } from "./corpus/predicateMiner.js";
 import { normName, suggestNames } from "./util.js";
-import { reportsDbPath, schemaDbPath, sqlQuote } from "./dbPaths.js";
 
-// SPLIT DBs: the read layer opens reports.sqlite as the MAIN connection (so the sqlite-vec `vec0`
-// KNN over report_queries_vec runs on a native, non-attached DB — vec0 KNN is unreliable over an
-// ATTACHed database) and ATTACHes schema.sqlite. Table names are unique across the two files, so
-// unqualified queries (FROM tables / FROM report_queries / FROM meta) resolve unchanged.
-const REPORTS_PATH = reportsDbPath();
-const SCHEMA_PATH = schemaDbPath();
-
-for (const [label, p] of [["reports", REPORTS_PATH], ["schema", SCHEMA_PATH]] as const) {
-  if (!fs.existsSync(p)) {
-    throw new Error(
-      `${label} DB not found at ${p}. Provision first (node dist/provision.js), or convert a ` +
-        `pre-split catalog.sqlite with node dist/migrate-split.js <catalog.sqlite>.`,
-    );
-  }
+// In-memory table-name list for fuzzy did-you-mean (~30k strings, cheap): the provider's snapshot,
+// materialized as an array once per snapshot instance.
+let _namesArr: string[] = [];
+let _namesSet: ReadonlySet<string> | null = null;
+function nameSet(): ReadonlySet<string> { return db().schema.tableNames(); }
+function allNames(): string[] {
+  const s = nameSet();
+  if (s !== _namesSet) { _namesSet = s; _namesArr = [...s]; }
+  return _namesArr;
 }
 
-const db = new Database(REPORTS_PATH, { readonly: true, fileMustExist: true });
-db.exec(`ATTACH DATABASE '${sqlQuote(SCHEMA_PATH)}' AS schemadb`);
-db.pragma("query_only = true");
-
-// In-memory table-name list for fuzzy did-you-mean (~30k strings, cheap).
-const ALL_NAMES: string[] = db
-  .prepare("SELECT name FROM tables")
-  .all()
-  .map((r: any) => r.name as string);
-const NAME_SET = new Set(ALL_NAMES);
-
-export function stats() {
-  const rows = db.prepare("SELECT key, value FROM meta").all() as {
-    key: string;
-    value: string;
-  }[];
-  return Object.fromEntries(rows.map((r) => [r.key, r.value]));
+export async function stats() {
+  return db().meta.stats();
 }
-
-// ---- prepared statements ----
-const qTable = db.prepare(
-  "SELECT name, schema, type, module, remarks, view_text FROM tables WHERE name = ?",
-);
-const qPk = db.prepare(
-  "SELECT column_name FROM pkeys WHERE table_name = ? ORDER BY seq",
-);
-const qColCount = db.prepare(
-  "SELECT COUNT(*) AS n FROM columns WHERE table_name = ?",
-);
-const qColumns = db.prepare(
-  `SELECT name, data_type, size, nullable, remarks, ordinal
-   FROM columns WHERE table_name = ? ORDER BY ordinal`,
-);
-const qIndexes = db.prepare(
-  `SELECT index_name, is_unique, ordinal, column_name
-   FROM indexes WHERE table_name = ? ORDER BY index_name, ordinal`,
-);
-const qFkOut = db.prepare(
-  `SELECT parent_table AS other, column_name AS col, name FROM fkeys WHERE child_table = ?`,
-);
-const qFkIn = db.prepare(
-  `SELECT child_table AS other, column_name AS col, name FROM fkeys WHERE parent_table = ?`,
-);
-const qRelFrom = db.prepare(
-  `SELECT to_table AS other, from_col, to_col, evidence, occurrences, confidence
-   FROM relationships WHERE from_table = ?`,
-);
-const qRelTo = db.prepare(
-  `SELECT from_table AS other, from_col, to_col, evidence, occurrences, confidence
-   FROM relationships WHERE to_table = ?`,
-);
 
 function ftsSanitize(query: string): string[] {
   return (query.match(/[A-Za-z0-9_]+/g) ?? []).map((t) => t.toUpperCase());
 }
 
-export function searchTables(query: string, limit = 20) {
+export async function searchTables(query: string, limit = 20) {
   const tokens = ftsSanitize(query);
   if (tokens.length === 0) return [];
-  const run = (join: string) => {
-    // tokens are pure [A-Za-z0-9_], safe as bareword prefix queries
-    const match = tokens.map((t) => `${t}*`).join(join);
-    return db
-      .prepare(
-        `SELECT t.name, t.type, t.module, t.remarks
-         FROM tables_fts f JOIN tables t ON t.rowid = f.rowid
-         WHERE tables_fts MATCH ? ORDER BY rank LIMIT ?`,
-      )
-      .all(match, limit) as any[];
-  };
   // AND first (precise); fall back to OR if nothing matches.
-  let rows = run(" AND ");
-  if (rows.length === 0 && tokens.length > 1) rows = run(" OR ");
+  let rows = await db().schema.searchTables(tokens, "and", limit);
+  if (rows.length === 0 && tokens.length > 1) rows = await db().schema.searchTables(tokens, "or", limit);
   return rows.map((r) => ({
     name: r.name,
     type: r.type,
@@ -109,12 +42,12 @@ export function searchTables(query: string, limit = 20) {
   }));
 }
 
-export function getTable(name: string) {
+export async function getTable(name: string) {
   const n = normName(name);
-  const t = qTable.get(n) as any;
+  const t = await db().schema.getTable(n);
   if (!t) return null;
-  const pk = (qPk.all(n) as any[]).map((r) => r.column_name);
-  const cc = (qColCount.get(n) as any).n as number;
+  const pk = await db().schema.primaryKey(n);
+  const cc = await db().schema.columnCount(n);
   return {
     name: t.name,
     schema: t.schema,
@@ -124,15 +57,15 @@ export function getTable(name: string) {
     viewText: t.view_text,
     primaryKey: pk,
     columnCount: cc,
-    ...mostlyUsedStats(n),
+    ...(await mostlyUsedStats(n)),
   };
 }
 
-export function getColumns(table: string, opts?: { like?: string; limit?: number }) {
+export async function getColumns(table: string, opts?: { like?: string; limit?: number }) {
   const n = normName(table);
-  if (!NAME_SET.has(n)) return { tableExists: false, columns: [] as any[] };
-  const pk = new Set((qPk.all(n) as any[]).map((r) => r.column_name));
-  let rows = qColumns.all(n) as any[];
+  if (!nameSet().has(n)) return { tableExists: false, columns: [] as any[] };
+  const pk = new Set(await db().schema.primaryKey(n));
+  let rows: any[] = await db().schema.columns(n);
   const total = rows.length;
   if (opts?.like) {
     const p = opts.like.toUpperCase();
@@ -153,7 +86,7 @@ export function getColumns(table: string, opts?: { like?: string; limit?: number
     ordinal: r.ordinal,
     isPrimaryKey: pk.has(r.name),
   }));
-  const res: any = { tableExists: true, totalColumns: total, returned: cols.length, columns: cols, ...mostlyUsedStats(n) };
+  const res: any = { tableExists: true, totalColumns: total, returned: cols.length, columns: cols, ...(await mostlyUsedStats(n)) };
   if (truncated) {
     res.note = `Showing ${cols.length} of ${shown}${opts?.like ? ` matching '${opts.like}'` : ""} (table has ${total} columns). ` +
       `Refine with getColumns(table, {like:'...'}), searchColumns for a concept, or validateColumns(table, [...]).`;
@@ -175,21 +108,21 @@ function cosine(a: Float32Array, b: Float32Array): number {
  */
 export async function searchColumns(table: string, query: string, limit = 20) {
   const n = normName(table);
-  if (!NAME_SET.has(n)) return { tableExists: false, columns: [] as any[] };
-  const pk = new Set((qPk.all(n) as any[]).map((r) => r.column_name));
-  const rows = qColumns.all(n) as any[];
+  if (!nameSet().has(n)) return { tableExists: false, columns: [] as any[] };
+  const pk = new Set(await db().schema.primaryKey(n));
+  const rows: any[] = await db().schema.columns(n);
   if (!rows.length) return { tableExists: true, totalColumns: 0, columns: [] };
 
   // Column text is static → cache its embedding by content hash; only embed cache misses + the query.
   const texts = rows.map((r) => `${r.name}: ${r.remarks ?? ""}`.replace(/\s+/g, " ").trim().slice(0, 220));
   const hashes = texts.map(textHash);
-  const cached = getVecs(hashes);
+  const cached = await getVecs(hashes);
   const missIdx = hashes.map((h, i) => (cached.has(h) ? -1 : i)).filter((i) => i >= 0);
   if (missIdx.length) {
     const fresh = await embed(missIdx.map((i) => texts[i]));
     const toStore: { hash: string; vec: Float32Array }[] = [];
     missIdx.forEach((i, k) => { cached.set(hashes[i], fresh[k]); toStore.push({ hash: hashes[i], vec: fresh[k] }); });
-    putVecs(toStore);
+    await putVecs(toStore);
   }
   const qv = (await embed([query]))[0];
   const scored = rows
@@ -208,32 +141,32 @@ export async function searchColumns(table: string, query: string, limit = 20) {
   return { tableExists: true, totalColumns: rows.length, query, columns };
 }
 
-export function validateTable(name: string) {
+export async function validateTable(name: string) {
   const n = normName(name);
-  if (NAME_SET.has(n)) {
-    const t = qTable.get(n) as any;
+  if (nameSet().has(n)) {
+    const t = (await db().schema.getTable(n))!;
     // Pushed payload = corpus statistics only (user directive): mostlyUsedFilters/mostlyUsedJoinFilters +
     // brief real-usage examples. Grain classification + curated rules stay PULL-only via getTableGrain.
-    const usages = tableUsages(t.name, { limit: 3, brief: true }).usages;
+    const usages = (await tableUsages(t.name, { limit: 3, brief: true })).usages;
     return {
       exists: true,
       table: { name: t.name, type: t.type, module: t.module, remarks: t.remarks },
-      ...mostlyUsedStats(t.name),
+      ...(await mostlyUsedStats(t.name)),
       ...(usages.length ? { topUsages: usages } : {}),
       suggestions: [] as string[],
     };
   }
-  return { exists: false, table: null, suggestions: suggestNames(n, ALL_NAMES, 5) };
+  return { exists: false, table: null, suggestions: suggestNames(n, allNames(), 5) };
 }
 
 /** Grain hint for a table (case-insensitive) — reads the table_grain registry, then folds in curated
  *  rules (curated OVERRIDES derived). So a human-recorded fact (e.g. dedup by submitted_flag='Y')
  *  surfaces on both validateTable and getTableGrain without those callers knowing about curation. */
-export function grainFor(name: string): any {
+export async function grainFor(name: string): Promise<any> {
   let g: any;
-  try { g = getTableGrain(db, name); } catch { return null; }
+  try { g = await getTableGrain(name); } catch { return null; }
   if (!g) return null;
-  const rules = getTableRules(name);
+  const rules = await getTableRules(name);
   if (rules.length) {
     const gr = rules.find((r) => r.kind === "grain");
     if (gr) {
@@ -251,10 +184,8 @@ export function grainFor(name: string): any {
     }));
   }
   // Most-used hardcoded filters for this table (structural = always-apply, discriminator = pick-by-intent).
-  try {
-    const p = getTablePredicates(db, name);
-    if (p.structural.length || p.discriminator.length) g.commonPredicates = p;
-  } catch { /* registry may not be built yet */ }
+  const p = await getTablePredicates(name);
+  if (p.structural.length || p.discriminator.length) g.commonPredicates = p;
   return g;
 }
 
@@ -263,43 +194,35 @@ export function grainFor(name: string): any {
  *  at import — no skip-lists, counts per canonical query) and which of its columns participate in JOIN
  *  conditions (mostlyUsedJoinFilters, column-participation share — the model picks the paired field).
  *  The agent contract: apply each hint, ask the user, or say why not — never silently ignore. */
-export function mostlyUsedStats(name: string) {
+export async function mostlyUsedStats(name: string) {
   const n = normName(name);
   const out: any = {};
-  try {
-    const f = db.prepare(
-      "SELECT column_name AS column, op, literal, occurrences FROM table_predicates WHERE table_name = ? ORDER BY occurrences DESC LIMIT 8",
-    ).all(n);
-    if (f.length) out.mostlyUsedFilters = f;
-  } catch { /* rollup not built yet */ }
-  try {
-    const j = db.prepare(
-      "SELECT column_name AS column, units, share FROM table_join_columns WHERE table_name = ? ORDER BY share DESC LIMIT 8",
-    ).all(n);
-    if (j.length) out.mostlyUsedJoinFilters = j;
-  } catch { /* rollup not built yet */ }
+  const f = await db().registries.topPredicates(n, 8);
+  if (f.length) out.mostlyUsedFilters = f;
+  const j = await db().corpus.joinColumnStats(n, 8);
+  if (j.length) out.mostlyUsedJoinFilters = j;
   return out;
 }
 
 /** Top real-query usages of a table (table-anchored retrieval — the complement to the intent-anchored
  *  findSimilarQueries). Lets the agent adopt real join/filter idioms, incl. from bip/view sources that
  *  have no structured predicates/joins extracted. `brief` omits SQL (for auto-attach). */
-export function tableUsages(name: string, opts: { limit?: number; brief?: boolean } = {}) {
-  try { return getTableUsages(db, name, opts); } catch { return { table: normName(name), usageCount: 0, usages: [] }; }
+export async function tableUsages(name: string, opts: { limit?: number; brief?: boolean } = {}) {
+  try { return await getTableUsages(name, opts); } catch { return { table: normName(name), usageCount: 0, usages: [] }; }
 }
 
-export function validateColumns(table: string, columns: string[]) {
+export async function validateColumns(table: string, columns: string[]) {
   const n = normName(table);
-  const tableExists = NAME_SET.has(n);
+  const tableExists = nameSet().has(n);
   if (!tableExists) {
     return {
       table: n,
       tableExists: false,
-      tableSuggestions: suggestNames(n, ALL_NAMES, 5),
+      tableSuggestions: suggestNames(n, allNames(), 5),
       results: [] as any[],
     };
   }
-  const cols = qColumns.all(n) as any[];
+  const cols = await db().schema.columns(n);
   const colNames = cols.map((c) => c.name as string);
   const colSet = new Set(colNames);
   const results = columns.map((raw) => {
@@ -320,14 +243,14 @@ export function validateColumns(table: string, columns: string[]) {
     table: n,
     tableExists: true,
     results,
-    ...mostlyUsedStats(n),
+    ...(await mostlyUsedStats(n)),
   };
 }
 
-export function getIndexes(table: string) {
+export async function getIndexes(table: string) {
   const n = normName(table);
-  if (!NAME_SET.has(n)) return { tableExists: false, indexes: [] as any[] };
-  const rows = qIndexes.all(n) as any[];
+  if (!nameSet().has(n)) return { tableExists: false, indexes: [] as any[] };
+  const rows = await db().schema.indexes(n);
   const byName = new Map<string, { indexName: string; unique: boolean; columns: string[] }>();
   for (const r of rows) {
     let e = byName.get(r.index_name);
@@ -342,13 +265,14 @@ export function getIndexes(table: string) {
 
 const CONF_RANK: Record<string, number> = { HIGH: 0, MEDIUM: 1, LOW: 2 };
 
-export function getRelatedTables(table: string) {
+export async function getRelatedTables(table: string) {
   const n = normName(table);
-  if (!NAME_SET.has(n)) {
-    return { tableExists: false, suggestions: suggestNames(n, ALL_NAMES, 5), related: [] as any[] };
+  if (!nameSet().has(n)) {
+    return { tableExists: false, suggestions: suggestNames(n, allNames(), 5), related: [] as any[] };
   }
   const out: any[] = [];
-  for (const r of qFkOut.all(n) as any[]) {
+  const fk = await db().schema.fkeys(n);
+  for (const r of fk.out) {
     out.push({
       relatedTable: r.other,
       fromColumn: r.col,
@@ -358,7 +282,7 @@ export function getRelatedTables(table: string) {
       name: r.name,
     });
   }
-  for (const r of qFkIn.all(n) as any[]) {
+  for (const r of fk.in) {
     out.push({
       relatedTable: r.other,
       fromColumn: r.col,
@@ -368,7 +292,8 @@ export function getRelatedTables(table: string) {
       name: r.name,
     });
   }
-  for (const r of qRelFrom.all(n) as any[]) {
+  const rel = await db().schema.relationships(n);
+  for (const r of rel.from) {
     out.push({
       relatedTable: r.other,
       fromColumn: r.from_col,
@@ -380,7 +305,7 @@ export function getRelatedTables(table: string) {
       confidence: r.confidence,
     });
   }
-  for (const r of qRelTo.all(n) as any[]) {
+  for (const r of rel.to) {
     out.push({
       relatedTable: r.other,
       fromColumn: r.to_col,
@@ -400,53 +325,6 @@ export function getRelatedTables(table: string) {
     return (b.occurrences ?? 0) - (a.occurrences ?? 0);
   });
   return { tableExists: true, related: out };
-}
-
-const SRC_OVERFETCH = 40;
-const RQ_COLS = `rq.id, rq.source, rq.title, rq.description, rq.clean_sql,
-                rq.tables_used, rq.joins, rq.filters, rq.lookup_types,
-                rq.intents, rq.mechanics`;
-let _vecStmts: { qVec: any; qVecSrc: any; qMulti: any; qMultiSrc: any; multiCount: any } | null = null;
-function vecStmts() {
-  if (!_vecStmts) {
-    loadVec(db);
-    _vecStmts = {
-      qVec: db.prepare(
-        `SELECT ${RQ_COLS}, v.distance AS distance
-         FROM report_queries_vec v
-         JOIN report_queries rq ON rq.rowid = v.rowid
-         WHERE v.embedding MATCH ? AND k = ?
-         ORDER BY v.distance`),
-      qVecSrc: db.prepare(
-        `SELECT ${RQ_COLS}, v.distance AS distance
-         FROM report_queries_vec v
-         JOIN report_queries rq ON rq.rowid = v.rowid
-         WHERE v.embedding MATCH ? AND k = ? AND rq.source = ?
-         ORDER BY v.distance
-         LIMIT ?`),
-      // multi-vector KNN: one vec row per intent PHRASING -> dedup by query row in JS.
-      // NB: the KNN must live in a bare subquery — joining/filtering the vec0 aux column inside
-      // the KNN query itself is an "illegal WHERE constraint" for sqlite-vec.
-      // the inner LIMIT (same value as k) blocks SQLite's subquery flattening, which would
-      // otherwise push the JOIN constraint into vec0 and fail ("illegal WHERE constraint").
-      qMulti: db.prepare(
-        `SELECT ${RQ_COLS}, rq.rowid AS qrid, v.distance AS distance
-         FROM (SELECT qrowid, distance FROM report_queries_vec_multi
-               WHERE embedding MATCH ? ORDER BY distance LIMIT ?) v
-         JOIN report_queries rq ON rq.rowid = v.qrowid
-         ORDER BY v.distance`),
-      qMultiSrc: db.prepare(
-        `SELECT ${RQ_COLS}, rq.rowid AS qrid, v.distance AS distance
-         FROM (SELECT qrowid, distance FROM report_queries_vec_multi
-               WHERE embedding MATCH ? ORDER BY distance LIMIT ?) v
-         JOIN report_queries rq ON rq.rowid = v.qrowid
-         WHERE rq.source = ?
-         ORDER BY v.distance
-         LIMIT ?`),
-      multiCount: db.prepare("SELECT COUNT(*) AS c FROM report_queries_vec_multi"),
-    };
-  }
-  return _vecStmts;
 }
 
 /**
@@ -504,15 +382,17 @@ function sqlPayload(cleanSql: string | null): { cleanSql?: string; cleanSqlOmitt
 const DOMAIN_AMBIGUITY_MARGIN = 0.10;
 
 // Table -> Fusion application module (tables.module = META_TABLES.APPLICATION_SHORT_NAME).
-// Authoritative signal for classifyDomain; cached per process.
-let _qModule: any = null;
+// Authoritative signal for classifyDomain; cached per process. Resolved through the async API up
+// front for every candidate table, then read synchronously by classifyDomain.
 const _moduleCache = new Map<string, string | undefined>();
+async function resolveModules(tables: Iterable<string>): Promise<void> {
+  for (const t of tables) {
+    const n = normName(t);
+    if (!_moduleCache.has(n)) _moduleCache.set(n, await db().schema.moduleOf(n));
+  }
+}
 function moduleOf(table: string): string | undefined {
-  if (_moduleCache.has(table)) return _moduleCache.get(table);
-  _qModule ??= db.prepare("SELECT module FROM tables WHERE name = ?");
-  const mod = (_qModule.get(normName(table)) as any)?.module ?? undefined;
-  _moduleCache.set(table, mod);
-  return mod;
+  return _moduleCache.get(normName(table));
 }
 
 // domain-filter matching: want "Financials" hits all Financials/*, want "AP" or
@@ -555,37 +435,34 @@ export async function findSimilarQueries(
 ) {
   const limit = opts.limit ?? 5;
   const [vec] = await embed([intent]);
-  const blob = Buffer.from(vec.buffer);
-  const { qVec, qVecSrc, qMulti, qMultiSrc, multiCount } = vecStmts();
   const K = Math.max(limit * 6, 24); // overfetch so we can classify + domain-filter
   // Prefer the multi-vector index (per-intent phrasings) once populated; dedup phrasing hits by
   // query row keeping the BEST distance. Fall back to the legacy 1-vector index when empty.
   let rawRows: any[];
-  const useMulti = ((multiCount.get() as any)?.c ?? 0) > 0;
+  const useMulti = await db().corpus.hasMultiVectors();
   if (useMulti) {
     const KM = K * 3; // several phrasings of the same query may occupy top slots
-    const hits = (opts.source ? qMultiSrc.all(blob, KM, opts.source, KM) : qMulti.all(blob, KM)) as any[];
+    const hits = await db().corpus.knn(vec, KM, { source: opts.source, multi: true });
     const seen = new Map<number, any>();
-    for (const h of hits) if (!seen.has(h.qrid)) seen.set(h.qrid, h);
+    for (const h of hits) if (!seen.has(h.qrid!)) seen.set(h.qrid!, h);
     rawRows = [...seen.values()].slice(0, K);
   } else {
-    rawRows = (opts.source ? qVecSrc.all(blob, K, opts.source, K) : qVec.all(blob, K)) as any[];
+    rawRows = await db().corpus.knn(vec, K, { source: opts.source });
   }
 
-  let enriched = rawRows.map((r) => {
-    const tablesUsed = JSON.parse(r.tables_used ?? "[]");
-    return {
-      id: r.id, source: r.source, title: r.title, description: r.description,
-      cleanSql: r.clean_sql, tablesUsed,
-      joins: JSON.parse(r.joins ?? "[]"),
-      filters: JSON.parse(r.filters ?? "[]"),
-      lookupTypes: JSON.parse(r.lookup_types ?? "[]"),
-      intents: JSON.parse(r.intents ?? "[]"),
-      mechanics: r.mechanics ?? null,
-      score: 1 - (r.distance * r.distance) / 2,
-      domain: classifyDomain(tablesUsed, r.title, moduleOf),
-    };
-  });
+  const parsed = rawRows.map((r) => ({ r, tablesUsed: JSON.parse(r.tables_used ?? "[]") as string[] }));
+  await resolveModules(parsed.flatMap((x) => x.tablesUsed));
+  let enriched = parsed.map(({ r, tablesUsed }) => ({
+    id: r.id, source: r.source, title: r.title, description: r.description,
+    cleanSql: r.clean_sql, tablesUsed,
+    joins: JSON.parse(r.joins ?? "[]"),
+    filters: JSON.parse(r.filters ?? "[]"),
+    lookupTypes: JSON.parse(r.lookup_types ?? "[]"),
+    intents: JSON.parse(r.intents ?? "[]"),
+    mechanics: r.mechanics ?? null,
+    score: 1 - (r.distance * r.distance) / 2,
+    domain: classifyDomain(tablesUsed, r.title, moduleOf),
+  }));
   // two-stage: cross-encoder reorders the overfetch before domain logic + slicing (fail-open)
   enriched = await rerank(intent, enriched);
 
@@ -647,50 +524,19 @@ export async function findSimilarQueries(
 }
 
 // ---- exact report-query lookup (by title / subject area) ----
-// Lazily prepared so a reports.sqlite without report_queries yet (fresh seed) doesn't crash
-// the whole server at import — same pattern as vecStmts().
-let _rqStmts: { byTitle: any; byId: any; siblings: any; byArea: any; near: any } | null = null;
-function rqStmts() {
-  if (!_rqStmts) {
-    const cols = `id, source, title, original_sql, clean_sql, description,
-                  tables_used, joins, filters, lookup_types, security_predicate`;
-    _rqStmts = {
-      // A .xdm data model has SEVERAL datasets stored as several rows sharing one title; the MAIN
-      // query is the largest, so return the biggest-SQL row first (the old first-by-rowid returned a
-      // trivial header dataset for AgingFourBucketDm etc.).
-      byTitle: db.prepare(
-        `SELECT ${cols} FROM report_queries WHERE title = ?
-         ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC LIMIT 1`),
-      byId: db.prepare(`SELECT ${cols} FROM report_queries WHERE id = ?`),
-      // sibling datasets under the same title (so the caller can fetch the others by id)
-      siblings: db.prepare(
-        `SELECT id, LENGTH(COALESCE(clean_sql, original_sql)) AS sqlChars, description
-         FROM report_queries WHERE title = ?
-         ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC`),
-      byArea: db.prepare(
-        `SELECT id, source, title, description FROM report_queries
-         WHERE title LIKE ? ORDER BY title LIMIT ?`),
-      near: db.prepare(
-        `SELECT title FROM report_queries WHERE title LIKE ? ORDER BY title LIMIT 8`),
-    };
-  }
-  return _rqStmts;
-}
 
-/** Exact query behind a title (OTBI title = "subjectArea.table"). Returns original + clean SQL. */
 /** Exact query by TITLE or by ID. Title -> the MAIN (largest) dataset of that .xdm + a `datasets`
  *  list of sibling datasets (fetch each by id). Id -> that exact row, at FULL size (this is how the
  *  caller pulls the SQL that findSimilarQueries omitted for being large — it returns the match's id). */
-export function getReportQuery(arg: string) {
-  const { byTitle, byId, siblings, near } = rqStmts();
+export async function getReportQuery(arg: string) {
   const isId = /^(sql:|view:)/.test(arg);
-  const r = (isId ? byId.get(arg) : byTitle.get(arg)) as any;
+  const r = isId ? await db().corpus.byId(arg) : await db().corpus.byTitle(arg);
   if (!r) {
-    const suggestions = isId ? [] : (near.all(`%${arg}%`) as any[]).map((x) => x.title);
+    const suggestions = isId ? [] : await db().corpus.nearTitles(`%${arg}%`);
     return { found: false, suggestions };
   }
   // when a title has multiple datasets, expose the others so nothing stays hidden
-  const sibs = isId ? [] : (siblings.all(r.title) as any[]).filter((x) => x.id !== r.id);
+  const sibs = isId ? [] : (await db().corpus.siblings(r.title)).filter((x) => x.id !== r.id);
   return {
     found: true, id: r.id, source: r.source, title: r.title,
     originalSql: r.original_sql, cleanSql: r.clean_sql, description: r.description,
@@ -707,9 +553,8 @@ export function getReportQuery(arg: string) {
 }
 
 /** All report queries under a subject area (OTBI). Matches "<area>.*" then falls back to "<area>%". */
-export function listQueriesForSubjectArea(area: string, limit = 100) {
-  const { byArea } = rqStmts();
-  let rows = byArea.all(`${area}.%`, limit) as any[];
-  if (rows.length === 0) rows = byArea.all(`${area}%`, limit) as any[];
+export async function listQueriesForSubjectArea(area: string, limit = 100) {
+  let rows = await db().corpus.byTitlePrefix(`${area}.%`, limit);
+  if (rows.length === 0) rows = await db().corpus.byTitlePrefix(`${area}%`, limit);
   return rows.map((r) => ({ id: r.id, source: r.source, title: r.title, description: r.description }));
 }

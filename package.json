@@ -20,7 +20,7 @@
     "dev": "tsx src/server.ts",
     "smoke": "node dist/smoke.js",
     "smoke:dev": "tsx src/smoke.ts",
-    "test": "tsx --test test/*.test.ts",
+    "test": "sh scripts/no-sql-outside-db.sh && tsx --test test/*.test.ts",
     "enrich": "tsx src/corpus/enrichBatch.ts"
   },
   "dependencies": {
