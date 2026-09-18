@@ -1,10 +1,10 @@
--- ddl_version: 1
+-- ddl_version: 2
 --
 -- DEV-ONLY raw layer: schema `raw` in the `fusion_dev` database on `stack-db`.
--- This is the UNFILTERED landing zone for the three upstream artefacts (the unit inventory, the
--- staging enrichment store, the vendor metadata CSVs). Nothing here is served: compile.ts's
--- filtering / dedup / entity-decoding is deliberately NOT applied, every source row and every
--- source column survives.
+-- This is the UNFILTERED landing zone for the four upstream artefacts (the unit inventory, the
+-- staging enrichment store, the vendor metadata CSVs, the corpus vectors). Nothing here is served:
+-- compile.ts's filtering / dedup / entity-decoding is deliberately NOT applied, every source row
+-- and every source column survives.
 --
 -- The loader (load.mts) discovers the table list by scanning this file for `CREATE TABLE raw.<x>`,
 -- so this file is the single source of the shape. Order matters: sql_units before its children.
@@ -83,6 +83,37 @@ CREATE TABLE raw.unit_refs (
 );
 CREATE INDEX ix_raw_unit_refs_unit ON raw.unit_refs (unit_id);
 CREATE INDEX ix_raw_unit_refs_path ON raw.unit_refs (path);
+
+-- ---------------------------------------------------------------- embeddings (computed ONCE, here)
+-- The vendor corpus vectors, lifted verbatim out of the SQLite catalog (`reports.sqlite`) so that
+-- they are stored durably in raw and ship inside the release dump: no customer ever re-embeds the
+-- vendor corpus. Nothing is re-computed on load - every vector is the exact 384-float blob that
+-- sqlite-vec holds, converted to pgvector.
+--
+-- Identity is (owner_kind, owner_id, slot):
+--   owner_kind 'unit'   -> report_queries.id,    slot 0 = description + LF + 'Tables: ' + the
+--                          comma-joined tables_used list (embedTexts(), src/corpus/ingestStore.ts)
+--   owner_kind 'layout' -> layout_patterns.id,   slot 0 = `${name}. ${description}`
+--   slot 1..n           -> the n-th intent phrase, in the order embedTexts()/loadLayoutPatterns()
+--                          produced it. Slot order = vec0 rowid order within the owner, verified
+--                          empirically by the loader (see load.mts, step 5).
+--
+-- text_hash = md5 of the EXACT string that was passed to embed(), so an incremental refresh
+-- re-embeds only the slots whose text changed. It is NULL where that string is not derivable from
+-- what the catalog stores: slot 0 of a unit has three writer call-sites that passed DIFFERENT
+-- `tables` arguments (src/ingest.ts embeds `e.tablesUsed`, `[]`, or the stored list) and
+-- updateEnrichment never wrote the fresh list back, so the loader VERIFIES each unit slot 0 by
+-- re-embedding the reconstructed text and only stores the hash when the vector comes back
+-- identical. A NULL hash is a row an incremental refresh must re-embed rather than trust.
+CREATE TABLE raw.embeddings (
+  owner_kind text        NOT NULL,          -- unit | layout
+  owner_id   text        NOT NULL,          -- report_queries.id | layout_patterns.id
+  slot       smallint    NOT NULL,          -- 0 = description slot, 1..n = intent slots
+  text_hash  text,                          -- md5 of the embedded string; NULL = not derivable
+  model      text        NOT NULL,          -- the embedding model, verbatim from embedWorker.ts
+  embedding  vector(384) NOT NULL,
+  PRIMARY KEY (owner_kind, owner_id, slot)
+);
 
 -- ---------------------------------------------------------------- vendor metadata (CSV, as-is)
 -- One column per CSV column, in file order, lowercased. text everywhere except columns proven
