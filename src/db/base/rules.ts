@@ -31,11 +31,14 @@ export class BaseRules implements RulesApi {
     }
     const info = await this.p.run(
       `INSERT INTO ${this.tr()} (table_name, scope, column_name, kind, grain, dedup, body, author, source, enabled, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)${this.returning()}`,
       [table, scope, column, a.kind, a.grain ?? null, a.dedup ?? null, a.note ?? "",
        a.author ?? "unknown", a.source ?? "human", enabled, nowIso]);
     return (await this.byId(Number(info.lastInsertRowid)))!;
   }
+
+  /** Providers without a lastInsertRowid append a RETURNING clause here. */
+  protected returning(): string { return ""; }
 
   async byId(id: number): Promise<T.TableRule | null> {
     const rows = await this.p.q<any>(`SELECT * FROM ${this.tr()} WHERE id=?`, [id]);
@@ -50,7 +53,7 @@ export class BaseRules implements RulesApi {
   /** Enabled curated rules for a table (case-insensitive), newest first. */
   async forTable(table: string): Promise<T.TableRule[]> {
     const rows = await this.p.q<any>(
-      `SELECT * FROM ${this.tr()} WHERE table_name=? AND enabled=1 ORDER BY updated_at DESC, id DESC`, [table.toUpperCase()]);
+      `SELECT * FROM ${this.tr()} WHERE table_name=? AND enabled=1 ORDER BY updated_at${this.p.coll()} DESC, id DESC`, [table.toUpperCase()]);
     return rows.map(rowToRule);
   }
 
@@ -58,7 +61,7 @@ export class BaseRules implements RulesApi {
   async list(table?: string): Promise<T.TableRule[]> {
     const rows = table
       ? await this.p.q<any>(`SELECT * FROM ${this.tr()} WHERE table_name=? ORDER BY id DESC`, [table.toUpperCase()])
-      : await this.p.q<any>(`SELECT * FROM ${this.tr()} ORDER BY table_name, id DESC`);
+      : await this.p.q<any>(`SELECT * FROM ${this.tr()} ORDER BY table_name${this.p.coll()}, id DESC`);
     return rows.map(rowToRule);
   }
 }

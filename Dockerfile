@@ -18,6 +18,8 @@ COPY src ./src
 # tests + the no-SQL-outside-db gate run in THIS stage (`docker run --rm -e CATALOG_DB=sqlite <build-image> npm test`)
 COPY test ./test
 COPY scripts/no-sql-outside-db.sh ./scripts/no-sql-outside-db.sh
+# the landed Postgres DDL (ddl_version 1) — the contract suite seeds its throwaway database from it
+COPY scripts/pg-import/ddl.sql ./scripts/pg-import/ddl.sql
 RUN npm run build
 # non-TS corpus assets ride along into dist (tsc copies only .ts): layout-pattern JSONL + fixtures.
 # shard-* dirs are curation provenance (experiments, render-check PNGs) — merged into the main

@@ -7,9 +7,9 @@ export class BaseFlex implements FlexApi {
   constructor(protected p: BaseProvider) {}
 
   /** Upsert text per snapshot table (portable ON CONFLICT; sqlite overrides with INSERT OR REPLACE). */
-  protected upsertSql(kind: T.FlexKind): string {
+  protected upsertSql(kind: T.FlexKind, tbl = this.p.t(kind)): string {
     if (kind === "flexfields") {
-      return `INSERT INTO ${this.p.t("flexfields")}
+      return `INSERT INTO ${tbl}
         (application_id, flexfield_type, flexfield_code, deployment_status, context_code,
          context_enabled, multirow, translatable, segment_code, column_name, sequence_number,
          segment_name, prompt, display_type, value_set_id, required, segment_enabled, source, loaded_at)
@@ -20,7 +20,7 @@ export class BaseFlex implements FlexApi {
         segment_name=excluded.segment_name, prompt=excluded.prompt, display_type=excluded.display_type,
         value_set_id=excluded.value_set_id, required=excluded.required, segment_enabled=excluded.segment_enabled, loaded_at=excluded.loaded_at`;
     }
-    return `INSERT INTO ${this.p.t("adf_extensions")}
+    return `INSERT INTO ${tbl}
         (object_name, table_name, context_column_name, attribute_name, column_name, display_hint, source, loaded_at)
       VALUES (?,?,?,?,?,?,?,?)
       ON CONFLICT(object_name, table_name, attribute_name, column_name, source) DO UPDATE SET
@@ -49,7 +49,7 @@ export class BaseFlex implements FlexApi {
     }
     const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
     return this.p.q<any>(
-      `SELECT * FROM ${this.p.t("flexfields")} ${where} ORDER BY flexfield_type, flexfield_code, context_code, sequence_number LIMIT ${limit}`, bind);
+      `SELECT * FROM ${this.p.t("flexfields")} ${where} ORDER BY flexfield_type${this.p.coll()}, flexfield_code${this.p.coll()}, context_code${this.p.coll()}, sequence_number LIMIT ${limit}`, bind);
   }
 
   async queryAdf(q: T.AdfQuery, limit: number): Promise<any[]> {
@@ -66,7 +66,7 @@ export class BaseFlex implements FlexApi {
     }
     const where = cond.length ? `WHERE ${cond.join(" AND ")}` : "";
     return this.p.q<any>(
-      `SELECT * FROM ${this.p.t("adf_extensions")} ${where} ORDER BY object_name IS NULL, object_name, table_name, attribute_name LIMIT ${limit}`, bind);
+      `SELECT * FROM ${this.p.t("adf_extensions")} ${where} ORDER BY object_name IS NULL, object_name${this.p.coll()}, table_name${this.p.coll()}, attribute_name${this.p.coll()} LIMIT ${limit}`, bind);
   }
 
   async flexfieldsCount(): Promise<T.FlexCounts> {
@@ -86,8 +86,8 @@ export class BaseFlex implements FlexApi {
     return { total, customObjects, builtinTables };
   }
 
-  protected insertConfigReportSql(): string {
-    return `INSERT INTO ${this.p.t("adf_extensions")}
+  protected insertConfigReportSql(tbl = this.p.t("adf_extensions")): string {
+    return `INSERT INTO ${tbl}
       (object_name, table_name, context_column_name, attribute_name, column_name,
        display_hint, object_display, field_display, source, loaded_at)
     VALUES (?,?,?,?,?,?,?,?,?,?)

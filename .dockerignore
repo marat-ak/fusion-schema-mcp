@@ -27,5 +27,8 @@ data/*.jsonl
 _gem_compare.json
 **/*_gem_compare.json
 
-# dev-only: the SQLite -> Postgres catalog importer (D13) never ships in the image
-scripts/pg-import/
+# dev-only: the SQLite -> Postgres catalog importer (D13) never ships in the image. Its ddl.sql is
+# the ONE source of the Postgres shape, so the BUILD stage keeps it for the contract suite's
+# throwaway database (test/fixture.ts); the runtime stage copies only dist/ + node_modules.
+scripts/pg-import/*
+!scripts/pg-import/ddl.sql

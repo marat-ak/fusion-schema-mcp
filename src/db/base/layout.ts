@@ -13,15 +13,15 @@ export class BaseLayout implements LayoutApi {
     return rows[0]?.v ?? null;
   }
 
-  protected insertSql(): string {
-    return `INSERT INTO ${this.p.t("layout_patterns")}
+  protected insertSql(tbl = this.p.t("layout_patterns")): string {
+    return `INSERT INTO ${tbl}
     (id, kind, name, format, format_exclusive, dsl_support, description, when_to_use, intents,
      requires, composition, recipe, fixture_ref, pitfalls, trigger, why, instead, alternative,
      source_refs, verified, dsl_version, verified_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
   }
-  protected hashSql(): string {
-    return `INSERT INTO ${this.p.t("layout_meta")} (k, v) VALUES ('jsonl_hash', ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`;
+  protected hashSql(tbl = this.p.t("layout_meta")): string {
+    return `INSERT INTO ${tbl} (k, v) VALUES ('jsonl_hash', ?) ON CONFLICT(k) DO UPDATE SET v=excluded.v`;
   }
   protected insertParams(r: T.LayoutPatternRow, verifiedAt: string): unknown[] {
     return [

@@ -42,6 +42,10 @@ export abstract class BaseProvider implements CatalogProvider {
   abstract fromVec(raw: unknown): Float32Array;
   /** Qualified name of a table (bare vs `schema.table`). */
   abstract t(table: TableName): string;
+  /** Text-ORDER-BY suffix. SQLite compares text bytewise; Postgres orders by the database locale
+   *  (which ignores spaces/case), so its provider appends `COLLATE "C"` — without it the same list
+   *  comes back in a different order on the two providers. */
+  abstract coll(): string;
   /** Identity column of a table (`rowid` on sqlite, `rid` on pg) + how to bind a value of it. */
   abstract idCol(): string;
   abstract idBind(n: number | bigint): unknown;

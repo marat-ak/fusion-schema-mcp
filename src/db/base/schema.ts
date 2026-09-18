@@ -45,7 +45,7 @@ export class BaseSchema implements SchemaApi {
   async indexes(table: string): Promise<T.IndexRow[]> {
     return this.p.q<T.IndexRow>(
       `SELECT index_name, is_unique, ordinal, column_name
-       FROM ${this.p.t("indexes")} WHERE table_name = ? ORDER BY index_name, ordinal`, [table]);
+       FROM ${this.p.t("indexes")} WHERE table_name = ? ORDER BY index_name${this.p.coll()}, ordinal`, [table]);
   }
 
   async fkeys(table: string): Promise<{ out: T.FkRow[]; in: T.FkRow[] }> {
@@ -83,12 +83,14 @@ export class BaseSchema implements SchemaApi {
   protected loadSql(table: T.SchemaLoadTable): string {
     switch (table) {
       case "tables":
-        return `INSERT INTO ${this.p.t("tables")} (name, schema, type, module, remarks, view_text)
+        // the target row must be named explicitly in the WHERE: Postgres does not resolve a bare
+        // column there (42702 "column reference is ambiguous"); SQLite accepts the same alias.
+        return `INSERT INTO ${this.p.t("tables")} AS tgt (name, schema, type, module, remarks, view_text)
                 VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(name) DO UPDATE SET
                   schema=excluded.schema, type=excluded.type, module=excluded.module,
                   remarks=excluded.remarks, view_text=excluded.view_text
-                WHERE excluded.schema='FUSION' AND schema<>'FUSION'`;
+                WHERE excluded.schema='FUSION' AND tgt.schema<>'FUSION'`;
       case "columns":
         return `INSERT INTO ${this.p.t("columns")} (table_name, name, data_type, size, nullable, remarks, ordinal) VALUES (?, ?, ?, ?, ?, ?, ?)`;
       case "pkeys":

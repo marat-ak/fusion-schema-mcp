@@ -3,17 +3,22 @@
  * then reach it through `db()`. Callers program against `CatalogProvider` (src/db/provider.ts) —
  * typed methods, never SQL, never a connection handle.
  *
- * Required config, no defaults: CATALOG_DB=sqlite + DATA_DIR (+ optional per-file *_DB overrides,
- * see sqlite/paths.ts). A missing/unknown value is a boot error.
+ * Required config, no defaults:
+ *   CATALOG_DB=sqlite    + DATA_DIR (+ optional per-file *_DB overrides, see sqlite/paths.ts)
+ *   CATALOG_DB=postgres  + DATABASE_URL (the `fusion` database on stack-db)
+ * A missing/unknown value is a boot error — there is no default provider and no fallback between
+ * them.
  */
 import type { CatalogProvider } from "./provider.js";
 export type { CatalogProvider, MetaApi, SchemaApi, CorpusApi, RegistriesApi, FlexApi, LayoutApi, RulesApi, EnrichApi, JobsApi, ColCacheApi } from "./provider.js";
 import { SqliteProvider, type SqliteConfig } from "./sqlite/provider.js";
+import { PostgresProvider, type PostgresConfig } from "./postgres/provider.js";
 import { sqliteFilesFromEnv } from "./sqlite/paths.js";
 
 export type CatalogDb = CatalogProvider;
-export type CatalogConfig = SqliteConfig;
+export type CatalogConfig = SqliteConfig | PostgresConfig;
 export type { SqliteFiles } from "./sqlite/paths.js";
+export type { SqliteConfig, PostgresConfig };
 export * from "./types.js";
 
 let _db: CatalogDb | null = null;
@@ -21,14 +26,20 @@ let _db: CatalogDb | null = null;
 /** Resolve the provider config from the environment (runtime shape: every file required). */
 export function configFromEnv(opts: { create?: boolean } = {}): CatalogConfig {
   const kind = process.env.CATALOG_DB;
-  if (kind !== "sqlite") throw new Error(`CATALOG_DB must be "sqlite" (got ${JSON.stringify(kind ?? null)}) — required, no default`);
-  return { provider: "sqlite", files: sqliteFilesFromEnv(), create: opts.create };
+  if (kind === "sqlite") return { provider: "sqlite", files: sqliteFilesFromEnv(), create: opts.create };
+  if (kind === "postgres") {
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) throw new Error("DATABASE_URL is required with CATALOG_DB=postgres — no default");
+    return { provider: "postgres", databaseUrl };
+  }
+  throw new Error(`CATALOG_DB must be "sqlite" or "postgres" (got ${JSON.stringify(kind ?? null)}) — required, no default`);
 }
 
 /** Open a catalog DB. Throws on missing files / DDL failure. Registers as the process default unless `register:false`. */
 export async function openCatalogDb(cfg: CatalogConfig, opts: { register?: boolean } = {}): Promise<CatalogDb> {
-  if (cfg.provider !== "sqlite") throw new Error(`unknown catalog provider ${String((cfg as any).provider)}`);
-  const p = await SqliteProvider.open(cfg);
+  const p = cfg.provider === "sqlite" ? await SqliteProvider.open(cfg)
+    : cfg.provider === "postgres" ? await PostgresProvider.open(cfg)
+    : (() => { throw new Error(`unknown catalog provider ${String((cfg as any).provider)}`); })();
   if (opts.register !== false) _db = p;
   return p;
 }

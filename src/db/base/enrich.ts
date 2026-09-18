@@ -109,14 +109,14 @@ export class BaseEnrich implements EnrichApi {
   constructor(protected p: BaseProvider) { this.jobs = new BaseJobs(p); }
   protected e() { return this.p.t("enrich"); }
 
-  protected insSrcSql(): string {
-    return `INSERT INTO ${this.e()} (id, source, title, source_hash, original_sql, reports)
+  protected insSrcSql(tbl = this.e()): string {
+    return `INSERT INTO ${tbl} AS tgt (id, source, title, source_hash, original_sql, reports)
     VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET
       source=excluded.source, title=excluded.title,
       source_hash=excluded.source_hash, original_sql=excluded.original_sql,
       clean_sql=NULL, description=NULL   -- hash changed → invalidate prior enrichment
-    WHERE source_hash <> excluded.source_hash`;
+    WHERE tgt.source_hash <> excluded.source_hash`;
   }
 
   async upsertSource(s: T.SqlSource): Promise<void> {

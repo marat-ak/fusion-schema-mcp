@@ -20,7 +20,7 @@ export class BaseRegistries implements RegistriesApi {
       `SELECT u.query_id AS id, u.source, u.title, u.sql_chars,
               r.filters, r.joins, r.clean_sql, r.original_sql
        FROM ${this.p.t("table_usages")} u JOIN ${this.p.t("report_queries")} r ON r.id = u.query_id
-       WHERE u.table_name = ? ORDER BY u.score DESC LIMIT ?`, [table, limit]);
+       WHERE u.table_name = ? ORDER BY u.score DESC, u.query_id${this.p.coll()} LIMIT ?`, [table, limit]);
   }
 
   async usageCount(table: string): Promise<number> {
@@ -30,12 +30,12 @@ export class BaseRegistries implements RegistriesApi {
 
   async predicates(table: string): Promise<T.PredicateRow[]> {
     return this.p.q<T.PredicateRow>(
-      `SELECT column_name, op, literal, occurrences, role FROM ${this.p.t("table_predicates")} WHERE table_name = ? ORDER BY occurrences DESC`, [table]);
+      `SELECT column_name, op, literal, occurrences, role FROM ${this.p.t("table_predicates")} WHERE table_name = ? ORDER BY occurrences DESC, column_name${this.p.coll()}, op${this.p.coll()}, literal${this.p.coll()}`, [table]);
   }
 
   async topPredicates(table: string, limit: number): Promise<T.PredicateStat[]> {
     return this.p.q<T.PredicateStat>(
-      `SELECT column_name AS column, op, literal, occurrences FROM ${this.p.t("table_predicates")} WHERE table_name = ? ORDER BY occurrences DESC LIMIT ?`,
+      `SELECT column_name AS "column", op, literal, occurrences FROM ${this.p.t("table_predicates")} WHERE table_name = ? ORDER BY occurrences DESC, column_name${this.p.coll()}, op${this.p.coll()}, literal${this.p.coll()} LIMIT ?`,
       [table, limit]);
   }
 

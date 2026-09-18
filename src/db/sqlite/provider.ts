@@ -181,6 +181,7 @@ export class SqliteProvider extends BaseProvider {
   }
 
   t(table: TableName): string { return `${DB_OF[table]}.${table}`; }
+  coll(): string { return ""; } // BINARY is SQLite's default text collation
   idCol(): string { return "rowid"; }
   idBind(n: number | bigint): bigint { return BigInt(n); } // vec0 rejects JS numbers ("Only integers are allowed")
 

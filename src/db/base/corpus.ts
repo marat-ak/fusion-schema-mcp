@@ -63,18 +63,18 @@ export class BaseCorpus implements CorpusApi {
 
   async siblings(title: string): Promise<T.SiblingRow[]> {
     return this.p.q<T.SiblingRow>(
-      `SELECT id, LENGTH(COALESCE(clean_sql, original_sql)) AS sqlChars, description
+      `SELECT id, LENGTH(COALESCE(clean_sql, original_sql)) AS "sqlChars", description
        FROM ${this.rq()} WHERE title = ?
-       ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC`, [title]);
+       ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC, id${this.p.coll()}`, [title]);
   }
 
   async byTitlePrefix(pattern: string, limit: number): Promise<T.CorpusRowLite[]> {
     return this.p.q<T.CorpusRowLite>(
-      `SELECT id, source, title, description FROM ${this.rq()} WHERE title LIKE ? ORDER BY title LIMIT ?`, [pattern, limit]);
+      `SELECT id, source, title, description FROM ${this.rq()} WHERE title LIKE ? ORDER BY title${this.p.coll()} LIMIT ?`, [pattern, limit]);
   }
 
   async nearTitles(pattern: string): Promise<string[]> {
-    const rows = await this.p.q<{ title: string }>(`SELECT title FROM ${this.rq()} WHERE title LIKE ? ORDER BY title LIMIT 8`, [pattern]);
+    const rows = await this.p.q<{ title: string }>(`SELECT title FROM ${this.rq()} WHERE title LIKE ? ORDER BY title${this.p.coll()} LIMIT 8`, [pattern]);
     return rows.map((r) => r.title);
   }
 
@@ -90,7 +90,7 @@ export class BaseCorpus implements CorpusApi {
 
   async titleAndSql(id: string): Promise<{ title: string; sql: string } | null> {
     const rows = await this.p.q<{ title: string; sql: string }>(
-      `SELECT title, COALESCE(clean_sql, original_sql) sql FROM ${this.rq()} WHERE id = ?`, [id]);
+      `SELECT title, COALESCE(clean_sql, original_sql) AS "sql" FROM ${this.rq()} WHERE id = ?`, [id]);
     return rows[0] ?? null;
   }
 
@@ -166,19 +166,19 @@ export class BaseCorpus implements CorpusApi {
       ? `(mechanics IS NULL OR (mechanics = '(no notable mechanics)' AND LENGTH(COALESCE(clean_sql, original_sql)) > 3000))`
       : `mechanics IS NULL`;
     return this.p.q<T.QueueRow>(
-      `SELECT id, title, COALESCE(clean_sql, original_sql) AS sql, source
+      `SELECT id, title, COALESCE(clean_sql, original_sql) AS "sql", source
        FROM ${this.rq()} WHERE source IN (${ph}) AND ${cond}${this.inflight()}
-       ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC LIMIT ?`, [...sources, limit]);
+       ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC, id${this.p.coll()} LIMIT ?`, [...sources, limit]);
   }
 
   /** Only the batch-degraded rows (for the Opus redo batch). */
   async redoQueue(sources: string[], limit: number): Promise<T.QueueRow[]> {
     const ph = sources.map(() => "?").join(",");
     return this.p.q<T.QueueRow>(
-      `SELECT id, title, COALESCE(clean_sql, original_sql) AS sql, source
+      `SELECT id, title, COALESCE(clean_sql, original_sql) AS "sql", source
        FROM ${this.rq()} WHERE source IN (${ph})
          AND mechanics = '(no notable mechanics)' AND LENGTH(COALESCE(clean_sql, original_sql)) > 3000${this.inflight()}
-       ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC LIMIT ?`, [...sources, limit]);
+       ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC, id${this.p.coll()} LIMIT ?`, [...sources, limit]);
   }
 
   async reenrichCounts(sources: string[]): Promise<{ total: number; done: number; pending: number }> {
@@ -242,7 +242,7 @@ export class BaseCorpus implements CorpusApi {
   async joinColumnStats(table: string, limit: number): Promise<T.JoinColumnStat[]> {
     try {
       return await this.p.q<T.JoinColumnStat>(
-        `SELECT column_name AS column, units, share FROM ${this.p.t("table_join_columns")} WHERE table_name = ? ORDER BY share DESC LIMIT ?`,
+        `SELECT column_name AS "column", units, share FROM ${this.p.t("table_join_columns")} WHERE table_name = ? ORDER BY share DESC, column_name${this.p.coll()} LIMIT ?`,
         [table, limit]);
     } catch { return []; }
   }

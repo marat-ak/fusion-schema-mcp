@@ -8,7 +8,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { openTempCatalog } from "./fixture.js";
+import { openTempCatalog, dropScratchDbs, PROVIDER } from "./fixture.js";
 import { EMBED_DIM } from "../src/corpus/embed.js";
 
 // deterministic PRNG → unit vectors
@@ -25,6 +25,7 @@ function vec(): Float32Array {
 function l2(a: Float32Array, b: Float32Array): number { let s = 0; for (let i = 0; i < a.length; i++) s += (a[i] - b[i]) ** 2; return Math.sqrt(s); }
 
 const { db, dir } = await openTempCatalog("contract-", false);
+const SQLITE = PROVIDER === "sqlite";
 
 test("meta: versions/set/stats/activeVersion", async () => {
   assert.equal(await db.meta.versions(), null);
@@ -33,8 +34,8 @@ test("meta: versions/set/stats/activeVersion", async () => {
   await db.meta.set("tables", "3");
   const s = await db.meta.stats();
   assert.equal(s.tables, "3"); assert.equal(s.schema_version, "2");
-  assert.equal(db.meta.activeVersion(), "");
-  await db.meta.ensureDdl(); // idempotent
+  assert.equal(db.meta.activeVersion(), SQLITE ? "" : "v2999_01", "sqlite has no version schema; postgres serves one");
+  await db.meta.ensureDdl(); // idempotent (postgres: the upgrade job's explicit call, never boot)
   await db.meta.ensureIndexes();
 });
 
@@ -163,6 +164,10 @@ test("corpus: bulkLoad + embedding maintenance + seed refresh", async () => {
   await db.corpus.setEmbeddings(all.slice(0, 3).map((r) => ({ rid: r.rid, vec: vec() })));
   await db.corpus.rebuildVectorIndex();
   assert.equal((await db.corpus.knn(vec(), 5)).length, 5);
+  if (!SQLITE) {
+    await assert.rejects(() => db.corpus.replaceSourcesFromSeed("/nope.sqlite", ["otbi"]), /sqlite-only/);
+    return;
+  }
   // seed refresh: a second catalog acts as the seed for the otbi rows
   const seedCat = await openTempCatalog("seed-", false);
   await seedCat.db.corpus.materialize([{ id: "seed:1", source: "otbi", title: "S1", originalSql: "s", cleanSql: "s", description: "seed row", tablesUsed: [], lookupTypes: [] }], [[vec()]]);
@@ -331,5 +336,6 @@ test("tx: concurrent writers serialize (no interleaving, consistent final state)
   assert.equal(ra.inserted, 150); assert.equal(rb.inserted, 150);
   assert.equal(await db.corpus.count(), before + 250, "the 50 overlapping ids are replaced, never duplicated");
   await db.close();
-  assert.ok(fs.existsSync(path.join(dir, "facts.sqlite")));
+  if (SQLITE) assert.ok(fs.existsSync(path.join(dir, "facts.sqlite")));
+  else await dropScratchDbs();
 });
