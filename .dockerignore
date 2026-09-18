@@ -26,3 +26,6 @@ data/enrich.sqlite*
 data/*.jsonl
 _gem_compare.json
 **/*_gem_compare.json
+
+# dev-only: the SQLite -> Postgres catalog importer (D13) never ships in the image
+scripts/pg-import/

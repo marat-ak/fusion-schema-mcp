@@ -1,0 +1,14 @@
+{
+  "name": "fusion-schema-mcp-pg-import",
+  "private": true,
+  "type": "module",
+  "description": "DEV-ONLY: imports the live v2 SQLite catalog into the `fusion` Postgres database (D13). Not shipped (.dockerignore).",
+  "dependencies": {
+    "better-sqlite3": "^11.8.0",
+    "postgres": "^3.4.9",
+    "sqlite-vec": "^0.1.9"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
+  }
+}
