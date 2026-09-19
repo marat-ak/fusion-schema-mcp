@@ -36,3 +36,4 @@ scripts/pg-import/*
 # dev-box-only: the raw landing-zone loader for the fusion_dev database. Nothing in the image reads
 # it and no serving code depends on its shape, so the whole directory stays out of the build.
 scripts/fusion-dev
+scripts/pipeline
