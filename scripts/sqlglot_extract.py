@@ -12,8 +12,17 @@ parse_quality: full | full_lex (lexical-substituted) | fallback (tables only, to
 Resumable: only units WHERE parse_quality IS NULL are processed. Multiprocess: workers parse,
 the parent writes (single writer).
 
+THE PARSER VERSION IS PINNED (SQLGLOT_PIN below) and asserted at import. An unpinned parser makes
+the facts' version stamp meaningless: the same SQL yields different tables/joins/predicates across
+sqlglot releases, so `facts_meta.parser_version` has to name an exact build.
+
+The extraction body is I/O-agnostic: `extract_one` / `work` / `fallback_tables` only need a SQL
+string and a column dictionary. The dictionary comes from `COLUMNS_RESOLVER`, which defaults to
+the sqlite schema DB below; the Postgres pipeline driver (scripts/pipeline/p3_parse.py) installs
+its own so the SAME extraction runs against `work.clear_sql` + `work.meta_columns`.
+
 Run:  docker run --rm -v /opt/fusion-catalog-v2:/data python:3.12-slim sh -c \
-        "pip install -q sqlglot && python /data/sqlglot_extract.py"
+        "pip install -q sqlglot==30.18.0 && python /data/sqlglot_extract.py"
 """
 import json
 import multiprocessing as mp
@@ -26,6 +35,15 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.optimizer.qualify import qualify
 from sqlglot.optimizer.scope import traverse_scope
+
+#: The ONE parser build these facts are valid for. Bumping it invalidates every f_* row —
+#: stamp it into facts_meta.parser_version and rebuild.
+SQLGLOT_PIN = "30.18.0"
+if sqlglot.__version__ != SQLGLOT_PIN:
+    raise RuntimeError(
+        f"sqlglot {sqlglot.__version__} is installed but these facts are pinned to {SQLGLOT_PIN}; "
+        f"install sqlglot=={SQLGLOT_PIN} or bump SQLGLOT_PIN and rebuild every fact table"
+    )
 
 DB = "/data/sqls.sqlite"
 SCHEMA_DB = "/data/schema.sqlite"
@@ -41,9 +59,18 @@ LEX_RE = re.compile(r"&&?([A-Za-z_][A-Za-z0-9_]*)")
 # ----------------------------------------------------------------------------- worker side
 _schema_conn = None  # per-process lazy connection for column lookups
 
+#: Swap-in point for the column dictionary: a callable(tables) -> {table: {column: "TEXT"}}.
+#: Left None here so this file keeps its sqlite default; scripts/pipeline/p3_parse.py assigns a
+#: Postgres-backed resolver before forking its pool. WITHOUT a dictionary, qualify() cannot bind an
+#: unqualified column to a table and those references are silently DROPPED — the dictionary is not
+#: an optimisation, it is what makes the facts complete.
+COLUMNS_RESOLVER = None
+
 
 def _columns_for(tables):
     """table -> {column: 'TEXT'} map for qualify(), from schema-v2 (per-process connection)."""
+    if COLUMNS_RESOLVER is not None:
+        return COLUMNS_RESOLVER(tables)
     global _schema_conn
     if _schema_conn is None:
         _schema_conn = sqlite3.connect(f"file:{SCHEMA_DB}?mode=ro", uri=True)

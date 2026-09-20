@@ -27,7 +27,9 @@ the L3 row after dedup, not part of its key.
 | `p0_fn.sql`      | drop/create `work`; the function library (`norm_sql`, `sql_hash`, `dec_xml`, `nn`) | 1 s |
 | `p1_l2_l3.sql`   | `meta_*` copies, L2 `sql_unit`, L3 `clear_sql`, `unit_ref` | 6.5 min |
 | `p2_merge.sql`   | merge both enrichment generations onto the L3 row, field by field | 15 s |
-| `p3_facts.sql`   | `f_tables` / `f_joins` / `f_predicates`, exclusions, relationships | 15 s |
+| `p3_facts.sql`   | the `work.f_*` fact tables (DDL) + carry `relationships` | 2 s |
+| `p3_parse.sh`    | the REAL pinned sqlglot parse (`p3_parse.py`) over all 26,204 statements | ~2 min |
+| `p3_post.sql`    | fact indexes, exclusions from real `parse_quality`, divergence report | 6 s |
 | `p4_vectors.sql` | the `work.embeddings` table | 1 s |
 | `p4_run.sh`      | full deterministic re-embed, sharded (`p4_embed.mts` per shard) | ~20 min |
 | `p5_ddl.sh`      | create `v<ver>` from the PRODUCT's `scripts/pg-import/ddl.sql` | 2 s |
@@ -44,6 +46,7 @@ wsl -d CloudBeaver -u root -e bash -lc \
 The `.sh` / `.mts` steps run themselves:
 
 ```bash
+wsl -d CloudBeaver -u root -e bash -lc 'bash /mnt/c/.../scripts/pipeline/p3_parse.sh'
 wsl -d CloudBeaver -u root -e bash -lc 'bash /mnt/c/.../scripts/pipeline/p4_run.sh 12'
 wsl -d CloudBeaver -u root -e bash -lc 'bash /mnt/c/.../scripts/pipeline/p5_ddl.sh v2026_10'
 ```
@@ -61,7 +64,18 @@ Heredocs and inline SQL through the WSL bridge mangle quoting — always `docker
   because a missing stamp makes the serving container rebuild — and a rebuild over a partial
   input silently replaces a good registry.
 - The four registries (`table_grain`, `table_usages`, `table_predicates`, `table_join_columns`)
-  are COMPUTED from `work`, never copied from `v2026_09`.
+  are COMPUTED from the PARSE FACTS in `work.f_*`, never copied from `v2026_09` and never read
+  back out of the enrichment (which only ever covered otbi).
+- **The parser version is PINNED** in `scripts/sqlglot_extract.py` (`SQLGLOT_PIN`), asserted at
+  import, and stamped into `v<ver>.facts_meta.parser_version`. The same SQL yields different
+  facts across sqlglot releases, so an unpinned parser makes the stamp meaningless. Bumping the
+  pin invalidates every `f_*` row and all four registries — rebuild them together.
+- The parse needs `work.meta_columns` as its dictionary. Without it `qualify()` cannot bind an
+  unqualified column to a table and those references are **silently dropped**, so the parse looks
+  successful while producing thin facts.
+- `report_queries.tables_used`, `.joins` and `.filters` keep the MERGED ENRICHMENT values, not
+  the parse facts. Changing what the agent is served is a product decision; `p3_post.sql` prints
+  the divergence so it can be made on numbers.
 - The embedder is the product's own (`src/corpus/embed.ts` + `embedTexts()` from
   `src/corpus/ingestStore.ts`), imported, never reimplemented, and run inside
   `schema-mcp-build:latest` where the bge-small cache lives.

@@ -110,7 +110,11 @@ FROM   v2026_09.adf_extensions;
 
 -- curated table rules: customer-owned, and correctly EMPTY in a vendor release
 -- (the one dev row was moved to `customer` on 2026-09-18).
+-- facts_meta carries the PARSER PIN: every f_* row, and therefore all four
+-- registries, are valid only for this exact sqlglot build.
 INSERT INTO v2026_10.facts_meta (k, v) VALUES ('version', '1');
+INSERT INTO v2026_10.facts_meta (k, v)
+SELECT 'parser_version', 'sqlglot==' || v FROM work.build_meta WHERE k = 'parser_version';
 
 -- ===========================================================================
 -- 3. the schema catalog
@@ -183,6 +187,9 @@ FROM   work.relationships;
 -- ---- table_usages (src/corpus/usageGraph.ts) -------------------------------
 -- score = SOURCE_WEIGHT * 100000 + min(sql_chars, 90000);
 -- SOURCE_WEIGHT bip-report 3 / view 2 / otbi 1; top 60 per table.
+-- The table list is the PARSE's (work.f_tables, CTE names excluded), not the
+-- enrichment column the runtime rebuild would read — the parse reaches every
+-- source, the enrichment reaches otbi.
 INSERT INTO v2026_10.table_usages (table_name, query_id, source, title, sql_chars, score)
 SELECT table_name, query_id, source, title, sql_chars, score
 FROM (
@@ -195,24 +202,43 @@ FROM (
                             ORDER BY (CASE rq.source WHEN 'bip-report' THEN 3 WHEN 'view' THEN 2 ELSE 1 END) * 100000
                                      + least(length(coalesce(rq.clean_sql, rq.original_sql, '')), 90000) DESC,
                                      rq.id COLLATE "C")                         AS rn
-  FROM   work.f_tables ft
+  FROM  (SELECT DISTINCT sql_hash, table_name FROM work.f_tables WHERE NOT is_cte) ft
   JOIN   v2026_10.report_queries rq ON rq.id = 'sql:' || ft.sql_hash
-  WHERE  rq.tables_used IS NOT NULL AND rq.tables_used <> '[]') x
+  -- Real objects only. usageGraph.ts does NOT filter (predicateMiner.ts does), and
+  -- v2026_09 carries 2,819 such rows; the richer parse would take that to 8,142.
+  -- A usage row for an object the dump does not contain is UNREACHABLE — getTableUsages
+  -- is only ever called with a name validateTable accepted — so the filter costs nothing
+  -- and is what keeps the registry self-consistent.
+  WHERE  EXISTS (SELECT 1 FROM v2026_10.tables t WHERE t.name = ft.table_name)) x
 WHERE  rn <= 60;
 INSERT INTO v2026_10.usage_meta (k, v) VALUES ('version', '1');
 
 -- ---- table_predicates (src/corpus/predicateMiner.ts) -----------------------
--- occurrences = DISTINCT statements carrying the predicate (import_serving.mjs's
--- `units.size`, now at L3 grain); role = discriminator at >= 8 distinct literals
--- on the column, else structural.
+-- Source = work.f_predicates, the PINNED sqlglot parse: <table.column> <op>
+-- <literal> with the column alias-resolved through its scope. occurrences =
+-- DISTINCT statements (import_serving.mjs's `units.size`, at L3 grain); role =
+-- discriminator at >= 8 distinct literals on the column, else structural.
+--
+-- Two predicateMiner.ts filters are applied on top of the parse — it is the code
+-- that READS this table, and both drop things that are not rules:
+--   * the LHS must be a real object (an unresolvable name cannot be attributed);
+--   * a 6+-digit literal on a *_ID column is one row's id, not a filter idiom.
+-- The parse's own `_is_literal` already subsumes predicateMiner's isLiteral(),
+-- more precisely (AST node kind, not a regex over text).
 INSERT INTO v2026_10.table_predicates (table_name, column_name, op, literal, occurrences, role)
-SELECT p.table_name, p.column_name, p.op, p.literal, count(*) AS occurrences,
+SELECT p.table_name, p.column_name, p.op, left(p.literal, 80) AS literal,
+       count(DISTINCT p.sql_hash) AS occurrences,
        CASE WHEN pc.distinct_literals >= 8 THEN 'discriminator' ELSE 'structural' END
 FROM   work.f_predicates p
-JOIN  (SELECT table_name, column_name, count(DISTINCT literal) AS distinct_literals
-       FROM work.f_predicates GROUP BY 1, 2) pc
+JOIN  (SELECT table_name, column_name, count(DISTINCT left(literal, 80)) AS distinct_literals
+       FROM   work.f_predicates q
+       WHERE  EXISTS (SELECT 1 FROM v2026_10.tables t WHERE t.name = q.table_name)
+         AND  NOT (q.column_name ~ '_ID$' AND regexp_replace(btrim(q.literal), '^''|''$', '', 'g') ~ '^[0-9]{6,}$')
+       GROUP  BY 1, 2) pc
        ON pc.table_name = p.table_name AND pc.column_name = p.column_name
-GROUP  BY p.table_name, p.column_name, p.op, p.literal, pc.distinct_literals;
+WHERE  EXISTS (SELECT 1 FROM v2026_10.tables t WHERE t.name = p.table_name)
+  AND  NOT (p.column_name ~ '_ID$' AND regexp_replace(btrim(p.literal), '^''|''$', '', 'g') ~ '^[0-9]{6,}$')
+GROUP  BY p.table_name, p.column_name, p.op, left(p.literal, 80), pc.distinct_literals;
 INSERT INTO v2026_10.pred_meta (k, v) VALUES ('version', '1');
 
 -- ---- table_join_columns (scripts/gpu-enrich/import_serving.mjs:177-235) -----
@@ -228,7 +254,9 @@ FROM  (SELECT t, c, count(DISTINCT sql_hash) AS units
        GROUP  BY 1, 2) j
 JOIN  (SELECT table_name, count(DISTINCT sql_hash) AS units
        FROM work.f_tables WHERE NOT is_cte GROUP BY 1) d ON d.table_name = j.t
-WHERE  j.units::numeric / d.units >= 0.20;
+WHERE  j.units::numeric / d.units >= 0.20
+  -- real objects only, same reasoning as table_usages above
+  AND  EXISTS (SELECT 1 FROM v2026_10.tables t WHERE t.name = j.t);
 
 -- ---- table_grain (src/corpus/grainRegistry.ts) -----------------------------
 -- Schema signals from `columns` + corpus corroboration. The flag/revision column
@@ -248,24 +276,24 @@ WHERE  lower(c.name) IN ('effective_start_date','effective_end_date','latest_rec
 GROUP  BY c.table_name;
 CREATE INDEX ON grain_sig (table_name);
 
+-- Corpus corroboration: which statements apply a dedup idiom AND read a table whose
+-- columns support it. The table attribution is the PARSE's (work.f_tables, CTEs
+-- excluded) rather than the enrichment column grainRegistry.ts reads at runtime —
+-- same coarse rule, a table list that reaches bip and view instead of otbi only.
 CREATE TEMP TABLE grain_ev AS
-WITH q AS (
-  SELECT c.sql_hash, c.tables_used,
-         lower(coalesce(c.rewritten_sql, c.sql_text, '') || ' ' || coalesce(c.sql_text, '')) AS sql
+WITH f AS (
+  SELECT c.sql_hash,
+         s.sql ~ 'between[\s\S]{0,60}effective_start_date'                        AS has_eff,
+         (s.sql ~ 'latest_rec_flag|latest_flag|current_flag') AND (s.sql ~ '=[\s]*''y''') AS has_flag,
+         (s.sql ~ 'max[\s]*\([\s]*object_version_number') OR (s.sql ~ 'source_revision_number') AS has_rev
   FROM   work.clear_sql c
-  WHERE  c.tables_used IS NOT NULL AND jsonb_typeof(c.tables_used) = 'array'),
-f AS (
-  SELECT sql_hash, tables_used,
-         sql ~ 'between[\s\S]{0,60}effective_start_date'                       AS has_eff,
-         (sql ~ 'latest_rec_flag|latest_flag|current_flag') AND (sql ~ '=[\s]*''y''') AS has_flag,
-         (sql ~ 'max[\s]*\([\s]*object_version_number') OR (sql ~ 'source_revision_number') AS has_rev
-  FROM   q)
+  CROSS  JOIN LATERAL (SELECT lower(coalesce(c.rewritten_sql, c.sql_text, '') || ' ' || coalesce(c.sql_text, '')) AS sql) s)
 SELECT g.table_name, count(*) AS evidence
 FROM   f
-CROSS  JOIN LATERAL jsonb_array_elements_text(f.tables_used) t(val)
-JOIN   grain_sig g ON g.table_name = upper(t.val)
-WHERE  (f.has_eff OR f.has_flag OR f.has_rev)
-  AND  ((f.has_eff AND g.eff) OR (f.has_flag AND g.flag IS NOT NULL) OR (f.has_rev AND g.rev IS NOT NULL))
+JOIN  (SELECT DISTINCT sql_hash, table_name FROM work.f_tables WHERE NOT is_cte) ft
+       ON ft.sql_hash = f.sql_hash
+JOIN   grain_sig g ON g.table_name = ft.table_name
+WHERE  (f.has_eff AND g.eff) OR (f.has_flag AND g.flag IS NOT NULL) OR (f.has_rev AND g.rev IS NOT NULL)
 GROUP  BY g.table_name;
 
 INSERT INTO v2026_10.table_grain (table_name, grain, multi_row, dedup, signals, corpus_evidence, note, updated_at)
