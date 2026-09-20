@@ -211,6 +211,51 @@ hashes is rescued by another unit. The 51 failures are truncated JSON (the model
 `max_tokens`); their error text is stored. This is a **queryable queue**
 (`WHERE src_enrich_unit IS NULL` has its own partial index), not a hidden gap.
 
+Those 144 are not arbitrary: **every one of them is `excluded_reason='dynamic_lexical'`**, and
+`export_wave.py` selected `WHERE excluded_reason IS NULL`. They were excluded on purpose, not
+lost. The full exclusion cohort is 151 — the other 7 are catalog-only and already counted in the
+2,524. So the queue decomposes two ways over the same 2,668 rows: by origin 2,524 catalog-only +
+144 bip, by eligibility 2,517 never-a-candidate + 151 deliberately excluded.
+
+### Filling the queue: p2_gap_*
+
+`p2_gap_export.py` builds the prompt payload for `WHERE description IS NULL` out of `work`, and it
+is a PORT of `scripts/gpu-enrich/export_wave.py` — the script that produced all 23,610 records we
+hold — not a new prompt. Verified against it: re-exporting the same otbi unit through both gives a
+byte-identical payload and the same `ghash`. `p2_gap_run.py` imports `enrich_client.py` for the
+contract (23-field strict schema, system prompt, `one()` with its retry) and supplies only the
+orchestration the original could not: the endpoint URL and model id are REQUIRED arguments, and
+every row is stamped with `model`, `run_id` and `produced_at` — the provenance the 2026-08 run has
+none of. `p2_gap_dryrun.py` renders every request with no network and checks it.
+
+```bash
+wsl -d CloudBeaver -u root -e bash -lc 'OUTDIR=/root/gap-run FLEX=OFF bash …/p2_gap.sh export'
+wsl -d CloudBeaver -u root -e bash -lc 'OUTDIR=/root/gap-run CPT=5.16 bash …/p2_gap.sh dryrun'
+```
+
+Three things the port cannot carry, all measured rather than assumed:
+
+- **`ghash` on the new rows is not comparable with the stored otbi values.** Same formula; the
+  grounding underneath it is the fresh pinned parse, not the lost August extractor's `x_*`. Two
+  thirds of the stored otbi ghashes are already unreproducible even by `export_wave.py` itself —
+  its junk-remark guard (a dictionary remark equal to the column name) post-dates that export.
+- **`work` has no `view_column_remarks`.** The vendor dictionary carries remarks on 99.9 % of TABLE
+  columns and 0 % of VIEW columns; the 222,510-row derived table that covered views lives only in
+  the run's `sqls.sqlite`. Over a 199-unit otbi control every single lost column meaning was a VIEW
+  column that only that table had — 1,572 in `columnNotes`, 436 predicate annotations, no other
+  cause. In the gap cohort it reaches 5,853 column references over 575 statements.
+- **The dictionary stringifies JSON null.** `work.meta_columns.remarks` holds the four-character
+  text `null` on exactly the 244,409 rows where the source had SQL NULL (17,022 in `meta_tables`,
+  11,426 in `application_short_name`). The exporter maps it back; a port that did not would assert
+  "COLUMN: null" as a meaning a quarter of a million times.
+
+And one trap worth naming, because it is silent: **never let Postgres order a fact list.**
+`p3_parse.py` wrote each list through Python `sorted()` — codepoint order, matching sqlite's
+BINARY collation. Postgres' default collation ignores `_` at the primary level, so `ORDER BY
+table_name` returns `BEN_BILL_CHARGE_DETAILS` before `BEN_BILL_CHARGES`. That reordered the table
+list on 18 of 199 control units and moved every one of their ghashes. The exporter fetches
+unordered and sorts in Python.
+
 ### Vectors: what gets one, and what slot 0 is made of
 
 `embedTexts()` (`src/corpus/ingestStore.ts:16-18`) is the whole contract: **slot 0** is
@@ -240,6 +285,11 @@ statement; 337 of the 342 are `bip-report`. So the slot-0 KNN drift against the 
 bounded by those 342 rows and is additive by construction. The artifact filter is load-bearing
 here: without it 424 statements would differ instead of 342.
 
+And it is small in practice. `p4_knn.mts` over six natural-language questions: mean top-10
+agreement with the shipped corpus **9.0/10**, the same top-1 on 6/6, and **not one** of the six
+disagreements is a drifted statement — all six are v2026_09 rank-11/12 rows crossing the boundary
+because the two corpora differ in membership (23,746 rows there, 23,471 embeddable here).
+
 ## Run order
 
 | file | step | ~time |
@@ -254,7 +304,7 @@ here: without it 424 statements would differ instead of 342.
 | `p3_reconcile.sql` | test every model claim, then `work.r_tables` — the reconciled fact set | 10 s |
 | `p3_rel.sql`     | `work.relationships` derived from `f_joins` + `meta_fkeys` | 6 s |
 | `p4_vectors.sql` | the `work.embeddings` table | 1 s |
-| `p4_run.sh`      | full deterministic re-embed, sharded (`p4_embed.mts` per shard) | ~28 min / 12 shards |
+| `p4_run.sh`      | full deterministic re-embed, sharded (`p4_embed.mts` per shard) | 27 min / 12 shards |
 | `p4_knn.mts`     | KNN probe of `work.embeddings` (+ `v2026_09` alongside) — p4's own gate, since p6 needs p5 | 40 s |
 | `p5_ddl.sh`      | create `v<ver>` from the PRODUCT's `scripts/pg-import/ddl.sql` | 2 s |
 | `p5_fill.sql`    | populate all 25 release tables from `work` | ~3 min |
@@ -280,9 +330,13 @@ wsl -d CloudBeaver -u root -e bash -lc 'bash /mnt/c/.../scripts/pipeline/p5_ddl.
 
 Heredocs and inline SQL through the WSL bridge mangle quoting — always `docker cp` a file.
 
-### p4–p6 are STALE against the current `work` shape
+### p5–p6 are STALE against the current `work` shape
 
-`p0`–`p3` and `p7`–`p8` are current. `p5_fill.sql` still reads the merged-enrichment columns that
+`p0`–`p4` and `p7`–`p8` are current. `p4` was stale too until 2026-09-20 — it read a
+`clear_sql.tables_used` column that `p2_merge.sql` wrote and `p2_promote.sql` does not, so it
+could not run at all; it now takes slot 0’s table list from `work.r_tables` (above).
+
+`p5_fill.sql` still reads the merged-enrichment columns that
 `p2_merge.sql` used to write (`tables_used`, `joins`, `filters`, `lookup_types`,
 `security_predicate`, `semantics_json`, `low_confidence`) and will fail against the columns
 `p2_promote.sql` writes instead. It also reads `work.f_tables` directly, which is now the wrong
@@ -419,6 +473,6 @@ DATABASE-level, not version-level: `scripts/pg-import/import.mts` writes the fir
 `src/db/postgres/migrations.ts` the last. A serving database needs them in addition to the version
 schema.
 
-`work.embeddings` and `work.layout_pattern` exist only after `p4` runs. The 2026-09-20 pass skipped
-embedding deliberately — the enrichment text is not settled, and a re-embed is ~25 minutes — so a
-fresh `work` has no vectors until `p4_vectors.sql` + `p4_run.sh` are run.
+`work.embeddings` and `work.layout_pattern` exist only after `p4` runs — a fresh `work` has no
+vectors until `p4_vectors.sql` + `p4_run.sh` are run. The 2026-09-20 build ran them: 23,471 owners
+→ 93,950 unit vectors, plus 46 layout owners → 224, in 26m56s over 12 shards.
