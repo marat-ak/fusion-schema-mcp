@@ -2,10 +2,10 @@
 -- P3a — the fact tables the REAL parse fills, keyed on sql_hash.
 --
 -- Run BEFORE p3_parse.sh. Facts are produced by sqlglot (pinned), not by reading
--- the enrichment back: the merged gen-1 `filters` only ever covered otbi, and only
--- 7,164 of its 11,291 hashes — bip has exactly ONE and catalog/view have none — so
--- 27 % of the corpus is the ceiling for enrichment-derived predicates. Only a parse
--- creates bip and view facts.
+-- the enrichment back. Generation-2 has no predicate field at all, and the excluded
+-- generation-1 `filters` only ever covered otbi, and only 7,164 of its 11,291 hashes
+-- — bip had exactly ONE and catalog/view none, so 27 % of the corpus was the ceiling
+-- for enrichment-derived predicates. Only a parse creates bip and view facts.
 --
 -- Tables carry no unique constraints: a COPY of 26k statements' worth of facts must
 -- not abort half-way on a shape surprise. Uniqueness is ASSERTED in p3_post.sql.
@@ -75,21 +75,10 @@ CREATE TABLE work.f_projection (
   source_expr text
 );
 
--- ---------------------------------------------------------------------------
--- relationships — CARRIED, not recomputed.
---
--- The mined tier is aggregated by scripts/step5_relations.mjs from round-0 x_joins
--- with `occurrences` counting DISTINCT UNITS, and the unit grain moved from L2 to
--- L3; the otbi tier comes from the OTBI metadata join graph, which is not in `raw`
--- at all. Recomputing would change the numbers the release gate pins at 14,009.
--- This is the ONE release table sourced from v2026_09 rather than `work`.
--- ---------------------------------------------------------------------------
-DROP TABLE IF EXISTS work.relationships;
-CREATE TABLE work.relationships AS
-SELECT from_table, from_col, to_table, to_col, evidence,
-       occurrences, confidence, predicate, source
-FROM   v2026_09.relationships;
+-- relationships are DERIVED, in p3_rel.sql, from work.f_joins + work.meta_fkeys.
+-- They used to be carried from v2026_09 (mined_relationships.json / otbi_relations.json
+-- upstream of it), which made the release its own input. Nothing in this build reads
+-- a shipped schema.
 
 SELECT 'fact tables created' AS step,
-       (SELECT count(*) FROM work.clear_sql)     AS statements_to_parse,
-       (SELECT count(*) FROM work.relationships) AS relationships_carried;
+       (SELECT count(*) FROM work.clear_sql) AS statements_to_parse;

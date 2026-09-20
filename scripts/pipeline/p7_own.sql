@@ -3,8 +3,22 @@
 -- born postgres-owned; the database's own role must own it or the serving role
 -- cannot read (and a pg_dump --schema round-trip restores the wrong owner).
 -- This is the last act of every build — the previous build shipped without it.
+--
+-- SCOPE IS EXPLICIT. It re-owns `work` and nothing else unless told otherwise:
+--   psql -v schemas='work,v2026_10' -f p7_own.sql
+-- A build that only rebuilds `work` must not reach into a release schema it did
+-- not produce; ownership is a write, even when the new owner equals the old one.
 -- ============================================================================
 \set ON_ERROR_STOP on
+
+\if :{?schemas}
+\else
+  \set schemas 'work'
+\endif
+
+DROP TABLE IF EXISTS pg_temp.own_targets;
+CREATE TEMP TABLE own_targets(s text);
+INSERT INTO own_targets SELECT btrim(unnest(string_to_array(:'schemas', ',')));
 
 DO $own$
 DECLARE
@@ -16,7 +30,7 @@ BEGIN
     RAISE EXCEPTION 'role % does not exist — refusing to guess an owner', target;
   END IF;
 
-  FOREACH s IN ARRAY ARRAY['work', 'v2026_10'] LOOP
+  FOR s IN SELECT t.s FROM own_targets t LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = s) THEN CONTINUE; END IF;
     EXECUTE format('ALTER SCHEMA %I OWNER TO %I', s, target);
 
@@ -49,12 +63,12 @@ $own$;
 -- ================= verify: nothing may be left owned by anyone else =================
 SELECT n.nspname AS schema, pg_get_userbyid(c.relowner) AS owner, count(*) AS objects
 FROM   pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE  n.nspname IN ('work', 'v2026_10') AND c.relkind IN ('r','v','m','S','p')
+WHERE  n.nspname IN (SELECT s FROM own_targets) AND c.relkind IN ('r','v','m','S','p')
 GROUP  BY 1, 2 ORDER BY 1, 2;
 
 SELECT n.nspname AS schema, pg_get_userbyid(p.proowner) AS owner, count(*) AS functions
 FROM   pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-WHERE  n.nspname IN ('work', 'v2026_10') GROUP BY 1, 2 ORDER BY 1, 2;
+WHERE  n.nspname IN (SELECT s FROM own_targets) GROUP BY 1, 2 ORDER BY 1, 2;
 
 SELECT nspname AS schema, pg_get_userbyid(nspowner) AS owner
-FROM   pg_namespace WHERE nspname IN ('work', 'v2026_10') ORDER BY 1;
+FROM   pg_namespace WHERE nspname IN (SELECT s FROM own_targets) ORDER BY 1;

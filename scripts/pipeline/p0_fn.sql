@@ -89,3 +89,32 @@ $fn$;
 CREATE OR REPLACE FUNCTION work.clean_view_text(s text) RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
   SELECT work.dec_xml(work.nn(s));
 $fn$;
+
+-- ---------------------------------------------------------------------------
+-- emptiness helpers — ONE definition of "this field carries no information".
+-- Used by p2 to decide whether a Qwen payload field is worth promoting to a
+-- column: the model fills every key of the strict json_schema on every call, so
+-- "absent" is spelled '' / [] / {} / false, never a missing key.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION work.je(v jsonb) RETURNS jsonb LANGUAGE sql IMMUTABLE AS $fn$
+  SELECT CASE
+           WHEN v IS NULL THEN NULL
+           WHEN jsonb_typeof(v) = 'null' THEN NULL
+           WHEN jsonb_typeof(v) = 'array'  AND jsonb_array_length(v) = 0 THEN NULL
+           WHEN jsonb_typeof(v) = 'object' AND v = '{}'::jsonb THEN NULL
+           WHEN jsonb_typeof(v) = 'string' AND btrim(v #>> '{}') = '' THEN NULL
+           ELSE v
+         END;
+$fn$;
+
+CREATE OR REPLACE FUNCTION work.te(v text) RETURNS text LANGUAGE sql IMMUTABLE AS $fn$
+  SELECT CASE WHEN v IS NULL OR btrim(v) = '' THEN NULL ELSE v END;
+$fn$;
+
+-- ---------------------------------------------------------------------------
+-- build_meta — the build's own stamps (parser_version, ddl_version, …).
+-- Created HERE, not in a later step: p3_post writes parser_version into it, and
+-- p0 dropping the schema used to leave that INSERT with no table to write to.
+-- ---------------------------------------------------------------------------
+CREATE TABLE work.build_meta (k text PRIMARY KEY, v text);
+INSERT INTO work.build_meta (k, v) VALUES ('built_at', now()::text);

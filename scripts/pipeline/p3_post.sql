@@ -33,7 +33,7 @@ SET    excluded_reason = 'dynamic_lexical'
 FROM   work.facts_run f
 WHERE  f.sql_hash = c.sql_hash AND f.parse_quality = 'full_lex';
 
--- the parse_quality of record now lives on the L3 row too (p1 stored the L2 units')
+-- parse_quality is written HERE and only here: p1 no longer carries the old inventory column
 UPDATE work.clear_sql c
 SET    parse_quality = f.parse_quality
 FROM   work.facts_run f WHERE f.sql_hash = c.sql_hash;
@@ -76,72 +76,50 @@ UNION ALL SELECT 'f_predicates', count(*), count(DISTINCT sql_hash), count(DISTI
 UNION ALL SELECT 'f_params', count(*), count(DISTINCT sql_hash), count(DISTINCT kind) FROM work.f_params
 UNION ALL SELECT 'f_projection', count(*), count(DISTINCT sql_hash), NULL FROM work.f_projection;
 
-\echo '--- PREDICATE REACH: the point of the parse (enrichment ceiling was otbi-only) ---'
+\echo '--- PREDICATE REACH: the point of the parse (gen-2 has no predicate field at all) ---'
 SELECT c.source,
-       count(*)                                                        AS statements,
-       count(*) FILTER (WHERE p.sql_hash IS NOT NULL)                  AS with_parsed_predicates,
-       count(*) FILTER (WHERE c.filters IS NOT NULL)                   AS with_enrichment_filters
+       count(*)                                       AS statements,
+       count(*) FILTER (WHERE p.sql_hash IS NOT NULL) AS with_parsed_predicates
 FROM   work.clear_sql c
 LEFT   JOIN (SELECT DISTINCT sql_hash FROM work.f_predicates) p ON p.sql_hash = c.sql_hash
 GROUP  BY 1 ORDER BY 1;
 
-\echo '--- JOIN TYPE: recoverable from the parse, flattened to WHERE by the enrichment ---'
+\echo '--- JOIN TYPE: recoverable only from the parse ---'
 SELECT join_type, count(*) AS pairs, count(DISTINCT sql_hash) AS statements
 FROM   work.f_joins GROUP BY 1 ORDER BY 2 DESC;
 
 -- ===========================================================================
--- DIVERGENCE: parse facts vs the merged enrichment that STILL SHIPS in
--- report_queries.tables_used / .joins. The served columns are deliberately left
--- alone (a product decision, not a build detail) — this quantifies the gap.
+-- DIVERGENCE: sqlglot's table set vs the MODEL's corrections to it.
+--
+-- The model was shown the round-0 facts and asked to confirm them; its verdict is
+-- loaded in work.qwen_table_correction and NOT applied. This quantifies the gap so
+-- the decision ("may the model overrule the parser, and where?") can be made on
+-- numbers rather than on the feeling that one of them is better.
 -- ===========================================================================
-\echo '--- tables_used: parsed set vs enriched set, per statement ---'
-WITH p AS (SELECT sql_hash, array_agg(DISTINCT table_name ORDER BY table_name) AS t
-           FROM work.f_tables WHERE NOT is_cte GROUP BY 1),
-     e AS (SELECT c.sql_hash, array_agg(DISTINCT upper(btrim(v)) ORDER BY upper(btrim(v))) AS t
-           FROM work.clear_sql c CROSS JOIN LATERAL jsonb_array_elements_text(c.tables_used) x(v)
-           WHERE jsonb_typeof(c.tables_used)='array' GROUP BY 1),
-     j AS (SELECT c.sql_hash, coalesce(p.t, '{}') AS pt, coalesce(e.t, '{}') AS et
-           FROM work.clear_sql c LEFT JOIN p ON p.sql_hash=c.sql_hash LEFT JOIN e ON e.sql_hash=c.sql_hash)
-SELECT count(*)                                                                AS statements,
-       count(*) FILTER (WHERE pt = et)                                         AS identical,
-       count(*) FILTER (WHERE pt @> et AND NOT pt = et)                        AS parse_superset,
-       count(*) FILTER (WHERE et @> pt AND NOT pt = et)                        AS enrichment_superset,
-       count(*) FILTER (WHERE NOT pt @> et AND NOT et @> pt)                   AS disjointish,
-       sum(cardinality(pt))                                                    AS parsed_mentions,
-       sum(cardinality(et))                                                    AS enriched_mentions
-FROM   j;
+\echo '--- the model on the parser: confirmed / extra / missing ---'
+SELECT c.source,
+       count(*) FILTER (WHERE c.src_enrich_unit IS NOT NULL) AS judged,
+       count(*) FILTER (WHERE c.tables_confirmed)            AS confirmed,
+       count(*) FILTER (WHERE c.tables_confirmed IS FALSE)   AS disputed,
+       count(*) FILTER (WHERE c.extra_tables IS NOT NULL)    AS claims_extra,
+       count(*) FILTER (WHERE c.missing_tables IS NOT NULL)  AS claims_missing
+FROM   work.clear_sql c GROUP BY 1 ORDER BY 1;
 
-\echo '--- filters: also a SERVED column, also left as the merged enrichment ---'
-SELECT (SELECT count(*) FROM work.clear_sql WHERE filters IS NOT NULL)        AS served_statements_with_filters,
-       (SELECT count(DISTINCT sql_hash) FROM work.f_predicates)              AS parsed_statements_with_predicates,
-       (SELECT count(*) FROM work.clear_sql c
-        WHERE c.filters IS NULL
-          AND EXISTS (SELECT 1 FROM work.f_predicates p WHERE p.sql_hash = c.sql_hash)) AS parse_only,
-       (SELECT count(*) FROM work.clear_sql c
-        WHERE c.filters IS NOT NULL
-          AND NOT EXISTS (SELECT 1 FROM work.f_predicates p WHERE p.sql_hash = c.sql_hash)) AS enrichment_only;
+\echo '--- do the corrections agree with THIS parse? (the model judged the OLD round-0 facts) ---'
+SELECT k.kind,
+       count(*)                                          AS corrections,
+       count(*) FILTER (WHERE t.sql_hash IS NOT NULL)    AS table_is_in_this_parse,
+       count(*) FILTER (WHERE t.sql_hash IS NULL)        AS table_is_not_in_this_parse
+FROM   work.qwen_table_correction k
+LEFT   JOIN LATERAL (SELECT 1 AS sql_hash FROM work.f_tables f
+                     WHERE f.sql_hash = k.sql_hash AND NOT f.is_cte
+                       AND f.table_name = k.table_name LIMIT 1) t ON true
+GROUP  BY 1 ORDER BY 1;
 
-\echo '--- joins: unordered column-pair sets, parsed vs enriched ---'
-WITH p AS (SELECT sql_hash, array_agg(DISTINCT pair ORDER BY pair) AS s FROM (
-             SELECT sql_hash,
-                    least(from_t||'.'||from_c, to_t||'.'||to_c) || '|' ||
-                    greatest(from_t||'.'||from_c, to_t||'.'||to_c) AS pair
-             FROM work.f_joins WHERE from_t IS NOT NULL AND to_t IS NOT NULL) z GROUP BY 1),
-     e AS (SELECT sql_hash, array_agg(DISTINCT pair ORDER BY pair) AS s FROM (
-             SELECT c.sql_hash,
-                    least(upper(split_part(regexp_replace(v,'\[.*\]$',''),'=',1)),
-                          upper(split_part(regexp_replace(v,'\[.*\]$',''),'=',2))) || '|' ||
-                    greatest(upper(split_part(regexp_replace(v,'\[.*\]$',''),'=',1)),
-                             upper(split_part(regexp_replace(v,'\[.*\]$',''),'=',2))) AS pair
-             FROM work.clear_sql c CROSS JOIN LATERAL jsonb_array_elements_text(c.joins) x(v)
-             WHERE jsonb_typeof(c.joins)='array' AND position('=' in v) > 0) z GROUP BY 1),
-     j AS (SELECT c.sql_hash, coalesce(p.s,'{}') AS ps, coalesce(e.s,'{}') AS es
-           FROM work.clear_sql c LEFT JOIN p ON p.sql_hash=c.sql_hash LEFT JOIN e ON e.sql_hash=c.sql_hash)
-SELECT count(*)                                            AS statements,
-       count(*) FILTER (WHERE ps = es)                     AS identical,
-       count(*) FILTER (WHERE ps <> '{}' AND es = '{}')    AS parse_only,
-       count(*) FILTER (WHERE ps = '{}' AND es <> '{}')    AS enrichment_only,
-       count(*) FILTER (WHERE ps <> es AND ps <> '{}' AND es <> '{}') AS both_but_differ,
-       sum(cardinality(ps))                                AS parsed_pairs,
-       sum(cardinality(es))                                AS enriched_pairs
-FROM   j;
+\echo '--- how many disputed statements would actually change if the corrections were applied ---'
+SELECT count(DISTINCT k.sql_hash) AS statements_with_actionable_corrections
+FROM   work.qwen_table_correction k
+WHERE  (k.kind = 'extra'   AND     EXISTS (SELECT 1 FROM work.f_tables f
+           WHERE f.sql_hash = k.sql_hash AND NOT f.is_cte AND f.table_name = k.table_name))
+   OR  (k.kind = 'missing' AND NOT EXISTS (SELECT 1 FROM work.f_tables f
+           WHERE f.sql_hash = k.sql_hash AND NOT f.is_cte AND f.table_name = k.table_name));
