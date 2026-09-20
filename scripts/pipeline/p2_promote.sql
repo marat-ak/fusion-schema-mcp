@@ -106,8 +106,8 @@ FROM   work.qwen_pick p
 JOIN   work.qwen_record r ON r.unit_id = p.unit_id
 WHERE  p.sql_hash = c.sql_hash;
 
-CREATE INDEX ix_clear_sql_enrich_queue ON work.clear_sql (source) WHERE src_enrich_unit IS NULL;
-CREATE INDEX ix_clear_sql_ghash        ON work.clear_sql (src_enrich_ghash) WHERE src_enrich_ghash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_clear_sql_enrich_queue ON work.clear_sql (source) WHERE src_enrich_unit IS NULL;
+CREATE INDEX IF NOT EXISTS ix_clear_sql_ghash        ON work.clear_sql (src_enrich_ghash) WHERE src_enrich_ghash IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
 -- the model's parser corrections, as rows you can join to work.f_tables.
