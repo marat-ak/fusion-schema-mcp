@@ -168,6 +168,27 @@ value here — inventing an empty category would imply the question was close. I
   keep), and 37 name something absent from the SQL entirely. All 174 keep a verdict in
   `qwen_table_correction`, none is silently dropped.
 
+**The test that settles it — where each kind lands relative to parse quality:**
+
+| parse_quality | corpus statements | additions applied | extra claims rejected |
+|---|---|---|---|
+| `full` | 23,981 (91.5 %) | 245 | 2,286 |
+| `fallback` | 1,838 (7.0 %) | 452 | 87 |
+| `failed` | 234 (0.9 %) | 50 | 0 |
+
+Additions cluster where sqlglot **admits** it could not read the statement — 502 of 747 (67 %) on
+the 7.9 % of the corpus that is `fallback` or `failed`. Removals do the exact opposite: 2,286 of
+2,373 rejected `extra` claims sit on `full` parses, statements the parser read completely. The
+model is strongest precisely where the parser is weakest, and weakest where it is strongest.
+
+**The honest weakness of the add side**: only **3** of the 747 additions sit directly after
+`FROM`/`JOIN`. That is expected — a table in an obvious FROM position is one sqlglot would have
+found — but it means 744 rest on "a real vendor object whose name appears somewhere in the
+statement", a test a column name or string literal could also pass. The parse-quality correlation
+is what carries the decision, not the text test alone. 156 `missing` claims are already moot
+because this parse finds those tables itself, which is direct evidence that some of what the model
+reported was a defect of the lost August extractor rather than of sqlglot as such.
+
 Every claim carries its evidence (`in_parse`, `in_dictionary`, `in_sql_text`,
 `after_from_or_join`) and a `verdict`, so the decision is auditable rather than asserted.
 

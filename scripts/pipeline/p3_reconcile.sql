@@ -52,6 +52,20 @@
 --   a schema prefix is a rule change, not a reconciliation detail, so this step
 --   does not do it — the verify block below prints the number each run.
 --
+--   THE TEST THAT SETTLES IT: where do the two kinds land relative to parse quality?
+--   Additions cluster exactly where sqlglot ADMITS it could not read the statement —
+--   502 of 747 (67 %) sit on `fallback`/`failed` parses, which are only 7.9 % of the
+--   corpus. Removals do the opposite: 2,286 of 2,373 unsupported `extra` claims sit on
+--   `full` parses, statements the parser read completely. The model is strongest exactly
+--   where the parser is weakest, and weakest exactly where it is strongest.
+--
+--   THE HONEST WEAKNESS OF THE ADD SIDE: only 3 of the 747 additions sit directly after
+--   FROM/JOIN. That is expected — a table in an obvious FROM position is one sqlglot
+--   would have found — but it means 744 additions rest on "a real vendor object whose
+--   name appears somewhere in the statement", which a column name or a string literal
+--   could also satisfy. The parse-quality correlation above is what carries this, not
+--   the text test on its own.
+--
 -- tablesConfirmed is folded in as a CONFIDENCE SIGNAL (`model_verdict`), never as
 -- an action: 546 statements are `disputed`, the rest `confirmed` or `none`.
 -- ============================================================================
@@ -201,6 +215,21 @@ SELECT count(*) AS rejected_not_a_vendor_object,
                                                                               AS distinct_names
 FROM   work.qwen_table_correction k
 WHERE  k.kind = 'missing' AND k.verdict = 'rejected_not_a_vendor_object';
+
+\echo '--- THE TEST THAT SETTLES IT: claims vs parse quality ---'
+SELECT c.parse_quality,
+       (SELECT count(*) FROM work.clear_sql z WHERE z.parse_quality = c.parse_quality) AS corpus_statements,
+       count(*) FILTER (WHERE k.applied)                       AS additions_applied,
+       count(*) FILTER (WHERE k.verdict = 'unsupported_kept')  AS extra_claims_rejected
+FROM   work.qwen_table_correction k JOIN work.clear_sql c ON c.sql_hash = k.sql_hash
+GROUP  BY 1 ORDER BY 2 DESC;
+
+\echo '--- how strong is the positional evidence for the additions? ---'
+SELECT count(*) AS applied,
+       count(*) FILTER (WHERE after_from_or_join)     AS directly_after_from_join,
+       count(*) FILTER (WHERE NOT after_from_or_join) AS name_only_somewhere_in_text,
+       count(DISTINCT table_name)                     AS distinct_objects
+FROM   work.qwen_table_correction WHERE applied;
 
 \echo '--- the reconciled fact set, by provenance ---'
 SELECT provenance, count(*) AS rows, count(DISTINCT sql_hash) AS statements,
