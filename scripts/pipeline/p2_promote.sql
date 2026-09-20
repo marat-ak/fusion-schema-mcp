@@ -23,9 +23,9 @@
 --      a convenience index over it, not a filter: all 23 fields get a column.
 --
 -- The parser corrections (tablesConfirmed / extraTables / missingTables) are loaded
--- and made joinable in work.qwen_table_correction. They are NOT applied to work.f_*
--- — whether the model may overrule sqlglot is a separate decision, and this build
--- deliberately leaves both sides visible instead of silently merging them.
+-- here and acted on in p3_reconcile.sql — never in work.f_*, which stays exactly
+-- what one pinned sqlglot run produced. That is the property that makes the parse
+-- reproducible, and it survives reconciliation.
 -- ============================================================================
 \set ON_ERROR_STOP on
 
@@ -110,17 +110,29 @@ CREATE INDEX IF NOT EXISTS ix_clear_sql_enrich_queue ON work.clear_sql (source) 
 CREATE INDEX IF NOT EXISTS ix_clear_sql_ghash        ON work.clear_sql (src_enrich_ghash) WHERE src_enrich_ghash IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
--- the model's parser corrections, as rows you can join to work.f_tables.
--- LOADED, not applied. `extra` = the model says sqlglot listed a table the SQL
--- does not really use; `missing` = the model says a used table is absent from the
--- facts. tables_confirmed=false on the L3 row is the summary flag.
+-- the model's parser corrections, one row per claim.
+--
+-- `extra` = the model says sqlglot listed a table the SQL does not really use;
+-- `missing` = the model says a used table is absent from the facts.
+-- tables_confirmed=false on the L3 row is the summary flag.
+--
+-- The evidence columns and `applied` are filled by p3_reconcile.sql, which is the
+-- ONLY step allowed to act on these claims — the parse must be finished before a
+-- claim can be tested. Declared here so the table has one DDL site.
 -- ---------------------------------------------------------------------------
 DROP TABLE IF EXISTS work.qwen_table_correction CASCADE;
 CREATE TABLE work.qwen_table_correction (
   sql_hash   text NOT NULL,
   unit_id    text NOT NULL,
   kind       text NOT NULL,        -- extra | missing
-  table_name text NOT NULL
+  table_name text NOT NULL,
+  -- ---- evidence + verdict, all written by p3_reconcile.sql ----
+  in_parse           boolean,      -- this parse lists it as a physical object
+  in_dictionary      boolean,      -- it is a real object in meta_tables
+  in_sql_text        boolean,      -- the name occurs in the statement as a word
+  after_from_or_join boolean,      -- it occurs directly after FROM/JOIN/UPDATE/INTO
+  applied            boolean,      -- did the reconciled fact set act on this claim
+  verdict            text          -- why: applied | not_actionable | unsupported | …
 );
 
 INSERT INTO work.qwen_table_correction (sql_hash, unit_id, kind, table_name)
@@ -210,7 +222,7 @@ SELECT count(security)         AS security,
        count(flex_missed)      AS flex_missed
 FROM   work.clear_sql;
 
-\echo '--- the parser corrections: loaded, not applied ---'
+\echo '--- the parser corrections: loaded here, acted on in p3_reconcile ---'
 SELECT count(*) FILTER (WHERE tables_confirmed IS FALSE) AS tables_confirmed_false,
        count(extra_tables)                               AS rows_with_extra_tables,
        count(missing_tables)                             AS rows_with_missing_tables

@@ -80,8 +80,10 @@ UNION ALL SELECT 'lookup_types non-empty',
        (SELECT count(*) FROM v2026_09.report_queries WHERE lookup_types NOT IN ('', '[]')), 0
 UNION ALL SELECT 'security_predicate non-empty',
        (SELECT count(*) FROM v2026_09.report_queries WHERE coalesce(security_predicate,'') <> ''), 0
-UNION ALL SELECT 'reports (path refs) non-empty',
-       (SELECT count(*) FROM v2026_09.report_queries WHERE coalesce(reports,'') NOT IN ('', '[]')), 0
+UNION ALL SELECT 'reports non-empty (MIXED shape: 176 bip objects + 11,279 otbi strings)',
+       (SELECT count(*) FROM v2026_09.report_queries WHERE coalesce(reports,'') NOT IN ('', '[]')),
+       (SELECT count(*) FROM work.clear_sql WHERE reports <> '[]'::jsonb
+                                               OR l2_titles <> '[]'::jsonb)
 UNION ALL SELECT 'relationships total',
        (SELECT count(*) FROM v2026_09.relationships),
        (SELECT count(*) FROM work.relationships)
@@ -100,4 +102,25 @@ UNION ALL SELECT 'payloads kept whole (23 fields)', (SELECT count(*) FROM work.q
 UNION ALL SELECT 'rows with outputGrain',   (SELECT count(output_grain) FROM work.clear_sql), 0
 UNION ALL SELECT 'rows with security',      (SELECT count(security) FROM work.clear_sql), 0
 UNION ALL SELECT 'rows with params',        (SELECT count(params) FROM work.clear_sql), 0
-UNION ALL SELECT 'table corrections loaded', (SELECT count(*) FROM work.qwen_table_correction), 0;
+UNION ALL SELECT 'table corrections loaded + adjudicated', (SELECT count(*) FROM work.qwen_table_correction), 0
+UNION ALL SELECT 'reconciled table facts (r_tables)', (SELECT count(*) FROM work.r_tables), 0
+UNION ALL SELECT '  of which model_added',   (SELECT count(*) FROM work.r_tables WHERE provenance='model_added'), 0
+UNION ALL SELECT '  of which model_disputed (kept)', (SELECT count(*) FROM work.r_tables WHERE provenance='model_disputed'), 0
+UNION ALL SELECT 'crawl path refs (unit_ref)', (SELECT count(*) FROM work.unit_ref), 0;
+
+\echo '=== 8. path references: the crawl beats what the release shipped ==='
+SELECT (SELECT count(*) FROM v2026_09.report_queries
+        WHERE source='bip-report' AND coalesce(reports,'') NOT IN ('','[]')) AS v2026_09_bip_rows_with_paths,
+       (SELECT count(*) FROM work.clear_sql
+        WHERE source='bip-report' AND reports <> '[]'::jsonb)                AS work_bip_hashes_with_paths,
+       (SELECT count(*) FROM work.unit_ref)                                  AS work_path_ref_rows,
+       (SELECT count(DISTINCT path) FROM work.unit_ref)                      AS distinct_paths;
+
+\echo '=== 9. otbi: l2_titles must reproduce what v2026_09 put in `reports` ==='
+SELECT count(*)                                                       AS comparable,
+       count(*) FILTER (WHERE c.l2_titles @> r.reports::jsonb)        AS titles_cover_shipped_reports,
+       count(*) FILTER (WHERE NOT (c.l2_titles @> r.reports::jsonb))  AS shipped_has_a_title_we_lack
+FROM   work.clear_sql c
+JOIN   work.sql_unit u ON u.unit_id = c.primary_unit_id
+JOIN   v2026_09.report_queries r ON r.id = u.unit_id
+WHERE  c.source = 'otbi' AND coalesce(r.reports,'') NOT IN ('', '[]');

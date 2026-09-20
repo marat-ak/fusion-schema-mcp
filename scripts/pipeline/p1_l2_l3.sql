@@ -71,6 +71,40 @@ CREATE INDEX ix_sql_unit_hash   ON work.sql_unit (sql_hash);
 CREATE INDEX ix_sql_unit_source ON work.sql_unit (source);
 
 -- ---------------------------------------------------------------------------
+-- L2 -> path references. ACQUISITION, not enrichment: these are the BIP report
+-- and datamodel paths the catalog crawl captured — no model, no parser.
+--
+-- raw.unit_refs covers bip-report units ONLY: all 6,389 of them, 7,817 rows over
+-- 1,415 distinct paths (one datamodel SQL is reached through several catalog
+-- paths — localisation copies, Custom/ duplicates). `idx` is the dataset index
+-- inside the .xdm and is non-zero on 6,402 rows, so it is part of the identity.
+--
+-- `title` is DROPPED: it is byte-identical to `path` on all 7,817 rows (measured),
+-- so storing both is duplication. A serving shape that wants {path,title,index}
+-- can emit title = path at release time.
+--
+-- This is also the only real basis for L1 (the source object). L1 is NOT built
+-- this pass; `siblings()` and `listQueriesForSubjectArea()` still fake it with
+-- title-string matching.
+-- ---------------------------------------------------------------------------
+CREATE TABLE work.unit_ref (
+  unit_id text NOT NULL,
+  path    text NOT NULL,
+  idx     integer NOT NULL,
+  PRIMARY KEY (unit_id, path, idx)
+);
+
+INSERT INTO work.unit_ref (unit_id, path, idx)
+SELECT r.unit_id, r.path, coalesce(r.idx, 0)
+FROM   raw.unit_refs r
+WHERE  r.path IS NOT NULL
+  AND  EXISTS (SELECT 1 FROM work.sql_unit u WHERE u.unit_id = r.unit_id)
+ON CONFLICT DO NOTHING;
+
+CREATE INDEX ix_unit_ref_unit ON work.unit_ref (unit_id);
+CREATE INDEX ix_unit_ref_path ON work.unit_ref (path);
+
+-- ---------------------------------------------------------------------------
 -- L3 — the deduped statement. PK = sql_hash.
 --
 -- The primary unit (the one whose title and SQL text represent the group) is
@@ -84,11 +118,19 @@ CREATE INDEX ix_sql_unit_source ON work.sql_unit (source);
 -- catalog-derived rows are labelled bip-report — they ARE BIP datamodel SQL,
 -- harvested from the catalog archive instead of the poller.
 --
--- `l2_titles` replaces the old `reports` column. The .xdm path references live in
--- raw.unit_refs, which is NOT one of this build's allowed inputs; the titles of
--- the contributing L2 units are, and they carry the same "which objects use this
--- statement" signal. See the README: rebuilding report_queries.reports needs a
--- decision about unit_refs, it is not silently filled from a title.
+-- TWO reference columns, because the corpus genuinely has two kinds and they do
+-- NOT overlap — v2026_09 crammed both into one mixed-shape `reports` column
+-- (objects for 176 bip rows, bare strings for 11,279 otbi rows, empty for views):
+--
+--   reports    [{path,index}]  the crawl's .xdm paths, from work.unit_ref.
+--                              bip-report ONLY — raw.unit_refs has nothing else.
+--   l2_titles  ["title", …]    every contributing L2 unit's title. This is the
+--                              ONLY reference otbi and view rows have, and for
+--                              otbi it reproduces exactly what v2026_09 shipped
+--                              in `reports` (the canonical's alias titles).
+--
+-- Neither is redundant: reports covers 6,389 bip hashes and no others, l2_titles
+-- covers all 26,204.
 --
 -- Every enrichment column below is filled by p2 from the Qwen JSONL, and is NULL
 -- until then. Nothing here comes from raw.enrichment or from v2026_09.
@@ -102,6 +144,7 @@ CREATE TABLE work.clear_sql (
   n_units         integer NOT NULL,
   l2_sources      text NOT NULL,      -- JSON array of the raw sources behind this hash
   l2_titles       jsonb NOT NULL,     -- every contributing L2 unit's title
+  reports         jsonb NOT NULL,     -- [{path,index}] crawl path refs; bip-report only
   -- ---- parse outputs (p3) ----
   parse_quality   text,
   excluded_reason text,
@@ -140,7 +183,7 @@ CREATE TABLE work.clear_sql (
 );
 
 INSERT INTO work.clear_sql (sql_hash, sql_text, source, title, primary_unit_id,
-                            n_units, l2_sources, l2_titles)
+                            n_units, l2_sources, l2_titles, reports)
 SELECT g.sql_hash,
        p.original_sql,
        CASE WHEN p.source IN ('bip-report', 'catalog') THEN 'bip-report' ELSE p.source END,
@@ -148,12 +191,17 @@ SELECT g.sql_hash,
        p.unit_id,
        g.n_units,
        g.l2_sources,
-       g.l2_titles
+       g.l2_titles,
+       coalesce(g.reports, '[]'::jsonb)
 FROM (
   SELECT u.sql_hash,
          count(*)                                                       AS n_units,
          to_jsonb(array_agg(DISTINCT u.source ORDER BY u.source))::text AS l2_sources,
-         coalesce(to_jsonb(array_remove(array_agg(DISTINCT u.title), NULL)), '[]'::jsonb) AS l2_titles
+         coalesce(to_jsonb(array_remove(array_agg(DISTINCT u.title), NULL)), '[]'::jsonb) AS l2_titles,
+         (SELECT jsonb_agg(DISTINCT jsonb_build_object('path', r.path, 'index', r.idx))
+          FROM   work.unit_ref r
+          JOIN   work.sql_unit u2 ON u2.unit_id = r.unit_id
+          WHERE  u2.sql_hash = u.sql_hash)                              AS reports
   FROM   work.sql_unit u
   GROUP  BY u.sql_hash) g
 JOIN LATERAL (
@@ -169,10 +217,29 @@ CREATE INDEX ix_clear_sql_source ON work.clear_sql (source);
 CREATE INDEX ix_clear_sql_title  ON work.clear_sql (title text_pattern_ops);
 
 -- ================= verify =================
-\echo '--- L2 / L3 row counts (expect 116006 / 26204) ---'
+\echo '--- L2 / L3 row counts (expect 116006 / 26204 / 7817) ---'
 SELECT 'raw.sql_units'   AS t, count(*) FROM raw.sql_units
 UNION ALL SELECT 'work.sql_unit (L2)', count(*) FROM work.sql_unit
-UNION ALL SELECT 'work.clear_sql (L3)', count(*) FROM work.clear_sql;
+UNION ALL SELECT 'work.clear_sql (L3)', count(*) FROM work.clear_sql
+UNION ALL SELECT 'work.unit_ref (path refs)', count(*) FROM work.unit_ref;
+
+\echo '--- path references: which sources does the crawl cover, and is title == path? ---'
+SELECT u.source, count(DISTINCT r.unit_id) AS units_with_refs, count(*) AS ref_rows,
+       count(DISTINCT r.path) AS distinct_paths
+FROM   work.unit_ref r JOIN work.sql_unit u ON u.unit_id = r.unit_id
+GROUP  BY 1 ORDER BY 1;
+
+SELECT count(*) AS raw_ref_rows,
+       count(*) FILTER (WHERE r.path = r.title)                 AS title_equals_path,
+       count(*) FILTER (WHERE r.title IS DISTINCT FROM r.path)  AS title_differs
+FROM   raw.unit_refs r;
+
+\echo '--- L3 reference coverage: reports (crawl paths) vs l2_titles ---'
+SELECT c.source, count(*) AS statements,
+       count(*) FILTER (WHERE c.reports <> '[]'::jsonb)   AS with_path_refs,
+       count(*) FILTER (WHERE c.l2_titles <> '[]'::jsonb) AS with_titles,
+       sum(jsonb_array_length(c.reports))                 AS path_ref_rows
+FROM   work.clear_sql c GROUP BY 1 ORDER BY 1;
 
 \echo '--- the view-text cleanup changed how many rows? (expect 0 — it is exact either way) ---'
 SELECT count(*) AS view_rows_changed

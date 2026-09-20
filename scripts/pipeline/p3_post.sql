@@ -89,14 +89,13 @@ SELECT join_type, count(*) AS pairs, count(DISTINCT sql_hash) AS statements
 FROM   work.f_joins GROUP BY 1 ORDER BY 2 DESC;
 
 -- ===========================================================================
--- DIVERGENCE: sqlglot's table set vs the MODEL's corrections to it.
---
--- The model was shown the round-0 facts and asked to confirm them; its verdict is
--- loaded in work.qwen_table_correction and NOT applied. This quantifies the gap so
--- the decision ("may the model overrule the parser, and where?") can be made on
--- numbers rather than on the feeling that one of them is better.
+-- The model's corrections to this table set are NOT evaluated here: testing a
+-- claim needs the finished parse, and acting on one is a step of its own.
+-- p3_reconcile.sql does both, and is the only CONSUMER of work.f_tables; the
+-- index and volume lines above are this step's own bookkeeping over what the
+-- parse just wrote.
 -- ===========================================================================
-\echo '--- the model on the parser: confirmed / extra / missing ---'
+\echo '--- the model on the parser: confirmed / extra / missing (claims, not verdicts) ---'
 SELECT c.source,
        count(*) FILTER (WHERE c.src_enrich_unit IS NOT NULL) AS judged,
        count(*) FILTER (WHERE c.tables_confirmed)            AS confirmed,
@@ -104,22 +103,3 @@ SELECT c.source,
        count(*) FILTER (WHERE c.extra_tables IS NOT NULL)    AS claims_extra,
        count(*) FILTER (WHERE c.missing_tables IS NOT NULL)  AS claims_missing
 FROM   work.clear_sql c GROUP BY 1 ORDER BY 1;
-
-\echo '--- do the corrections agree with THIS parse? (the model judged the OLD round-0 facts) ---'
-SELECT k.kind,
-       count(*)                                          AS corrections,
-       count(*) FILTER (WHERE t.sql_hash IS NOT NULL)    AS table_is_in_this_parse,
-       count(*) FILTER (WHERE t.sql_hash IS NULL)        AS table_is_not_in_this_parse
-FROM   work.qwen_table_correction k
-LEFT   JOIN LATERAL (SELECT 1 AS sql_hash FROM work.f_tables f
-                     WHERE f.sql_hash = k.sql_hash AND NOT f.is_cte
-                       AND f.table_name = k.table_name LIMIT 1) t ON true
-GROUP  BY 1 ORDER BY 1;
-
-\echo '--- how many disputed statements would actually change if the corrections were applied ---'
-SELECT count(DISTINCT k.sql_hash) AS statements_with_actionable_corrections
-FROM   work.qwen_table_correction k
-WHERE  (k.kind = 'extra'   AND     EXISTS (SELECT 1 FROM work.f_tables f
-           WHERE f.sql_hash = k.sql_hash AND NOT f.is_cte AND f.table_name = k.table_name))
-   OR  (k.kind = 'missing' AND NOT EXISTS (SELECT 1 FROM work.f_tables f
-           WHERE f.sql_hash = k.sql_hash AND NOT f.is_cte AND f.table_name = k.table_name));

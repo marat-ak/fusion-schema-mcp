@@ -28,6 +28,7 @@ view 6,000 = 26,204. The three source groups are disjoint by hash.
 | input | what it gives |
 |---|---|
 | `raw.sql_units` — `unit_id, source, title, original_sql` ONLY | the L2 inventory and the SQL text |
+| `raw.unit_refs` | the crawl's BIP report / datamodel paths (acquisition, like `sql_units` itself) |
 | `raw.meta_tables/columns/pkeys/fkeys/indexes` | the dictionary (the parse needs it, see below) |
 | a fresh pinned `sqlglot` parse of the 26,204 L3 statements | every `work.f_*` fact |
 | `/root/enrich-run/enrich_output.{view.w0..w7,bip,otbi}.jsonl` | the Qwen generation-2 enrichment |
@@ -55,10 +56,29 @@ view 6,000 = 26,204. The three source groups are disjoint by hash.
   The 145 rows `v2026_09` ships that have no record in the JSONL are the proof it was never a clean
   source: 144 bip-report rows carry `raw.sql_units.description/intents/mechanics` byte-for-byte —
   an OLDER generation, not Qwen — and one view row's text matches nothing in `raw` at all.
-- **`raw.unit_refs`** is not in the allowed list either, so this build does not produce the `.xdm`
-  path references that fed `report_queries.reports`. `work.clear_sql.l2_titles` carries the
-  contributing units' titles instead. Rebuilding `reports` needs a decision about `unit_refs`; it
-  is not quietly filled from a title.
+## References — two columns, because there are two kinds
+
+`v2026_09.report_queries.reports` was one column holding two incompatible shapes and covering
+11,455 rows: `[{path,title,index}]` objects on **176** bip rows, bare title strings on **11,279**
+otbi rows, empty on all 6,078 views. This build keeps them apart.
+
+| column | shape | source | covers |
+|---|---|---|---|
+| `clear_sql.reports` | `[{path,index}]` | `work.unit_ref` ← `raw.unit_refs` | 6,389 bip-report hashes, 7,817 refs, 1,415 distinct paths |
+| `clear_sql.l2_titles` | `["title", …]` | the contributing L2 units | all 26,204 hashes |
+
+`raw.unit_refs` is **bip-report only** — all 6,389 of those units, and nothing for otbi or view. So
+`reports` alone cannot replace `l2_titles`: for otbi, `l2_titles` *is* what `v2026_09` shipped in
+`reports` (the canonical's alias titles), and for views nothing else exists. Both earn their place.
+On the bip side the crawl gives 6,389 hashes where the release had 176 — 36x the path coverage.
+
+`unit_ref.title` is dropped: byte-identical to `path` on all 7,817 rows, so a release-time
+projection can emit `title = path` if a serving shape still wants the three-key object.
+
+`unit_refs` is also the only real basis for **L1** (the source object), which `siblings()` and
+`listQueriesForSubjectArea()` currently fake with title-string matching (`byTitle` takes "the
+largest SQL sharing a title"; subject areas are matched `"<area>.%"` then `"<area>%"`). **L1 is not
+built this pass.**
 
 ## The Qwen generation-2 load — what the JSONL actually contains
 
@@ -107,17 +127,53 @@ all of which are now first-class columns. Same for the old `low_confidence` bool
 (`missingRemarks` ∪ `tablesConfirmed=false` ∪ `qualityFlags`). Both are release-time derivations
 now, not stored state that can drift from its inputs.
 
-### The parser corrections are loaded, not applied
+### The parser corrections: `f_tables` is the parse, `r_tables` is the reconciled fact set
 
-The model was shown the round-0 facts and asked to confirm them. Its verdict lands in
+The model was shown the round-0 facts and asked to confirm them. Its claims land in
 `work.qwen_table_correction (sql_hash, unit_id, kind, table_name)` — `extra` = sqlglot listed a
-table the SQL does not use, `missing` = a used table is absent — plus `clear_sql.tables_confirmed`
+table the SQL does not use, `missing` = a used table is absent — with `clear_sql.tables_confirmed`
 as the summary flag. 546 statements disputed, 2,488 `extra` claims over 665 statements, 1,077
-`missing` claims over 459.
+`missing` over 459.
 
-**They are not merged into `work.f_*`.** Whether a language model may overrule sqlglot, and where,
-is a decision with its own evidence; `p3_post.sql` prints how many of the claims this parse
-actually contradicts so it can be made on numbers.
+`work.f_tables` stays **exactly what one pinned `sqlglot==30.18.0` run produced**. That is what
+makes the parse reproducible and it is never edited. `p3_reconcile.sql` produces
+`work.r_tables` — the reconciled fact set, one row per `(sql_hash, table_name, is_cte)`, every row
+carrying how it got there. **Downstream reads `r_tables`;** the only consumer of `f_tables` is that
+step. One reconciled table, not a v1/v2 pair.
+
+| provenance | rows | statements | meaning |
+|---|---|---|---|
+| `agreed` | 143,004 | 22,823 | parse found it, model did not object |
+| `parser` | 12,245 | 2,457 | parse found it, statement has no model verdict |
+| `model_disputed` | 2,372 | 642 | parse found it, model called it extra — **kept** |
+| `model_added` | 747 | 342 | parse missed it, evidence backed the model |
+
+157,621 parse rows + 747 additions = 158,368; **0 dropped**. `model_verdict` carries
+`tablesConfirmed` as a confidence signal on every row (confirmed 144,896 / none 12,245 /
+disputed 1,227), never as an action.
+
+**The verdict is ADD, DO NOT REMOVE, and it is measured.** `model_removed` is not a provenance
+value here — inventing an empty category would imply the question was close. It is not:
+
+- **`extraTables` — removal unsupportable.** 2,373 of 2,488 claims name a table this parse finds
+  independently. Of those 2,373: **100 %** have the name in the statement text, 96 % are real
+  vendor objects, 60 % sit directly after `FROM`/`JOIN`/`UPDATE`/`INTO`, and **2,373 were raised on
+  statements where the model simultaneously said `tablesConfirmed = true`** — it asserted the table
+  set was correct while listing exclusions. Two parsers plus the literal text against one
+  self-contradicting model reading. Those rows stay, flagged.
+- **`missingTables` — adding supported, with a filter.** 921 of 1,077 are actionable; the parse is
+  known to under-report (`qualify()` drops what it cannot bind, silently). **747** are both a real
+  vendor object *and* present in the statement text — applied. 137 are not vendor objects (106 are
+  query ALIASES — `CC`, `GLL`, `FSV`, `GLBATCH` — or `DUAL`, 29x; the dictionary test earns its
+  keep), and 37 name something absent from the SQL entirely. All 174 keep a verdict in
+  `qwen_table_correction`, none is silently dropped.
+
+Every claim carries its evidence (`in_parse`, `in_dictionary`, `in_sql_text`,
+`after_from_or_join`) and a `verdict`, so the decision is auditable rather than asserted.
+
+**Open, measured, not applied**: 20 of the 31 schema-qualified rejects (7 distinct names,
+`FUSION.SVC_SERVICE_REQUESTS`, `FUSION.PER_BIPNTF_FLEX`, …) would resolve if a leading `FUSION.`
+were stripped. Normalising a schema prefix is a rule change, not a reconciliation detail.
 
 ### What has no generation-2 enrichment
 
@@ -144,7 +200,8 @@ hashes is rescued by another unit. The 51 failures are truncated JSON (the model
 | `p2_promote.sql` | map ids → `sql_hash`, resolve collisions, promote 23 columns, corrections table | 11 s |
 | `p3_facts.sql`   | the `work.f_*` fact tables (DDL) | 2 s |
 | `p3_parse.sh`    | the REAL pinned sqlglot parse (`p3_parse.py`) over all 26,204 statements | ~2 min |
-| `p3_post.sql`    | fact indexes, exclusions from real `parse_quality`, parse-vs-model divergence | 6 s |
+| `p3_post.sql`    | fact indexes, exclusions from real `parse_quality` | 4 s |
+| `p3_reconcile.sql` | test every model claim, then `work.r_tables` — the reconciled fact set | 10 s |
 | `p3_rel.sql`     | `work.relationships` derived from `f_joins` + `meta_fkeys` | 6 s |
 | `p4_vectors.sql` | the `work.embeddings` table | 1 s |
 | `p4_run.sh`      | full deterministic re-embed, sharded (`p4_embed.mts` per shard) | ~20 min |
@@ -176,11 +233,14 @@ Heredocs and inline SQL through the WSL bridge mangle quoting — always `docker
 
 `p0`–`p3` and `p7`–`p8` are current. `p5_fill.sql` still reads the merged-enrichment columns that
 `p2_merge.sql` used to write (`tables_used`, `joins`, `filters`, `lookup_types`,
-`security_predicate`, `semantics_json`, `low_confidence`, `reports`) and will fail against the
-columns `p2_promote.sql` writes instead. The 2026-09-20 pass rebuilt `work` only, by instruction,
-and did not run or rewrite the release steps. **Do not run `p5`/`p6` before reworking `p5_fill.sql`
-onto the promoted columns** — and decide there what `report_queries.tables_used/.joins/.filters`
-should be served from now that the merged enrichment is gone and only parse facts remain.
+`security_predicate`, `semantics_json`, `low_confidence`) and will fail against the columns
+`p2_promote.sql` writes instead. It also reads `work.f_tables` directly, which is now the wrong
+source — the registries must be built from **`work.r_tables`** — and `clear_sql.reports` is
+`[{path,index}]` now, not the old mixed shape. The 2026-09-20 pass rebuilt `work` only, by
+instruction, and did not run or rewrite the release steps. **Do not run `p5`/`p6` before reworking
+`p5_fill.sql`** onto the promoted columns and `r_tables` — and decide there what
+`report_queries.tables_used/.joins/.filters` should be served from now that the merged enrichment is
+gone and only parse facts remain.
 
 ## Invariants
 
@@ -202,6 +262,9 @@ should be served from now that the merged enrichment is gone and only parse fact
 - The parse needs `work.meta_columns` as its dictionary. Without it `qualify()` cannot bind an
   unqualified column to a table and those references are **silently dropped**, so the parse looks
   successful while producing thin facts. The copy is UNFILTERED on purpose.
+- **`work.f_tables` is the parse of record and is never edited.** Corrections are applied in
+  `p3_reconcile.sql`, into `work.r_tables`. Downstream reads `r_tables`; the reconcile step is the
+  only consumer of `f_tables`. If the sqlglot pin moves, both rebuild together.
 - **Exclusion is a parse output.** `parse_quality='full_lex'` ⟺ `excluded_reason='dynamic_lexical'`
   ⟺ the statement only parsed after its `&LEXICAL` parameters were substituted. Never a regex over
   the inventory.
