@@ -1,0 +1,60 @@
+-- ============================================================================
+-- P7 — ownership. The pipeline runs as `postgres`, so every object it creates is
+-- born postgres-owned; the database's own role must own it or the serving role
+-- cannot read (and a pg_dump --schema round-trip restores the wrong owner).
+-- This is the last act of every build — the previous build shipped without it.
+-- ============================================================================
+\set ON_ERROR_STOP on
+
+DO $own$
+DECLARE
+  target text := 'fusion_dev';
+  s text;
+  r record;
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = target) THEN
+    RAISE EXCEPTION 'role % does not exist — refusing to guess an owner', target;
+  END IF;
+
+  FOREACH s IN ARRAY ARRAY['work', 'v2026_10'] LOOP
+    IF NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = s) THEN CONTINUE; END IF;
+    EXECUTE format('ALTER SCHEMA %I OWNER TO %I', s, target);
+
+    -- tables, views, materialized views, sequences
+    FOR r IN
+      SELECT c.relname, c.relkind
+      FROM   pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE  n.nspname = s AND c.relkind IN ('r', 'v', 'm', 'S', 'p')
+        AND  NOT EXISTS (SELECT 1 FROM pg_depend d          -- identity sequences follow their table
+                         WHERE d.objid = c.oid AND d.deptype = 'i')
+    LOOP
+      EXECUTE format('ALTER %s %I.%I OWNER TO %I',
+                     CASE r.relkind WHEN 'v' THEN 'VIEW' WHEN 'm' THEN 'MATERIALIZED VIEW'
+                                    WHEN 'S' THEN 'SEQUENCE' ELSE 'TABLE' END,
+                     s, r.relname, target);
+    END LOOP;
+
+    -- functions (the pipeline's helper library lives in `work`)
+    FOR r IN
+      SELECT p.oid::regprocedure AS sig
+      FROM   pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE  n.nspname = s
+    LOOP
+      EXECUTE format('ALTER FUNCTION %s OWNER TO %I', r.sig, target);
+    END LOOP;
+  END LOOP;
+END
+$own$;
+
+-- ================= verify: nothing may be left owned by anyone else =================
+SELECT n.nspname AS schema, pg_get_userbyid(c.relowner) AS owner, count(*) AS objects
+FROM   pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE  n.nspname IN ('work', 'v2026_10') AND c.relkind IN ('r','v','m','S','p')
+GROUP  BY 1, 2 ORDER BY 1, 2;
+
+SELECT n.nspname AS schema, pg_get_userbyid(p.proowner) AS owner, count(*) AS functions
+FROM   pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE  n.nspname IN ('work', 'v2026_10') GROUP BY 1, 2 ORDER BY 1, 2;
+
+SELECT nspname AS schema, pg_get_userbyid(nspowner) AS owner
+FROM   pg_namespace WHERE nspname IN ('work', 'v2026_10') ORDER BY 1;
