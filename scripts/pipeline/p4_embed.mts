@@ -9,6 +9,18 @@
  *   embedTexts  src/corpus/ingestStore.ts    slot 0 = description + "\nTables: " + tables,
  *                                            slots 1..n = one per non-blank intent
  *
+ * Two properties of slot 0, both deliberate:
+ *
+ *  1. A statement with NO description gets NO vector. `materialize()` — the product's own
+ *     writer — drops those rows itself (`/\S/.test(r.description)`), and for good reason:
+ *     embedding "" + a table list produces a vector that sits somewhere arbitrary in the
+ *     space and matches unrelated questions. Those 2,733 rows ship with facts and no
+ *     vectors until the enrich queue reaches them; being unfindable beats being wrong.
+ *  2. `tables` comes from work.r_tables — the RECONCILED set (parse + model corrections),
+ *     physical tables only — under the same shape import_serving.mjs gave `tablesUsed`:
+ *     is_cte=0, parser artifacts dropped, de-duplicated, then JS `.sort()` (sorted in JS,
+ *     not SQL, so the order cannot drift with the database collation).
+ *
  * Layout patterns use loadLayoutPatterns()'s own text shape: `${name}. ${description}`
  * then one per intent.
  *
@@ -80,32 +92,43 @@ async function embedOwners(owners: { kind: string; id: string; texts: string[] }
 // ---------------------------------------------------------------- units (L3)
 // Sharding is a pure function of the hash, so the shards are disjoint, stable
 // and order-independent: mod of the first 28 bits (always non-negative).
-const units = await sql<{ sql_hash: string; description: string | null; tables_used: string[] | null; intents: string[] | null }[]>`
-  SELECT sql_hash,
-         description,
-         CASE WHEN jsonb_typeof(tables_used) = 'array'
-              THEN ARRAY(SELECT jsonb_array_elements_text(tables_used)) END AS tables_used,
-         CASE WHEN jsonb_typeof(intents) = 'array'
-              THEN ARRAY(SELECT jsonb_array_elements_text(intents)) END AS intents
-  FROM   work.clear_sql
-  WHERE  mod(('x' || substr(sql_hash, 1, 7))::bit(28)::int, ${SHARDS}) = ${SHARD}
-  ORDER  BY sql_hash`;
-log(`units in shard: ${units.length}`);
+// `tables_used` is the reconciled r_tables set under import_serving.mjs's own filter:
+// is_cte=0 minus the parser artifacts that leak in on the giant truncated SAWITH SQLs
+// (same ARTIFACT regex, extended there with TABLE\d+). Unsorted here on purpose — the
+// JS `.sort()` below is the one that decides the order, exactly as the importer did.
+const units = await sql<{ sql_hash: string; description: string; tables_used: string[] | null; intents: string[] | null }[]>`
+  SELECT c.sql_hash,
+         c.description,
+         t.tables_used,
+         CASE WHEN jsonb_typeof(c.intents) = 'array'
+              THEN ARRAY(SELECT jsonb_array_elements_text(c.intents)) END AS intents
+  FROM   work.clear_sql c
+  LEFT   JOIN LATERAL (
+           SELECT array_agg(DISTINCT r.table_name) AS tables_used
+           FROM   work.r_tables r
+           WHERE  r.sql_hash = c.sql_hash
+             AND  NOT r.is_cte
+             AND  r.table_name !~* '^(XMLTABLE|DUAL|SAWITH[0-9]+|TABLE[0-9]+)$'
+         ) t ON TRUE
+  WHERE  c.description IS NOT NULL
+    AND  mod(('x' || substr(c.sql_hash, 1, 7))::bit(28)::int, ${SHARDS}) = ${SHARD}
+  ORDER  BY c.sql_hash`;
+// the product's own guard, restated on the same side of the wire it lives on in materialize()
+const embeddable = units.filter((u) => /\S/.test(u.description));
+log(`units in shard: ${embeddable.length} embeddable (${units.length - embeddable.length} dropped as blank description)`);
 
 let done = 0, vectors = 0;
 const BATCH = 200;
-for (let i = 0; i < units.length; i += BATCH) {
-  const owners = units.slice(i, i + BATCH).map((u) => ({
+for (let i = 0; i < embeddable.length; i += BATCH) {
+  const owners = embeddable.slice(i, i + BATCH).map((u) => ({
     kind: "unit",
     id: u.sql_hash,
     // embedTexts() is the repo's own: description(+tables) first, then one per non-blank intent.
-    // A statement with no description yet (still in the enrich queue) embeds the empty string —
-    // never the literal "null" a naive template would produce.
-    texts: embedTexts(u.description ?? "", u.tables_used ?? [], u.intents ?? []),
+    texts: embedTexts(u.description, [...(u.tables_used ?? [])].sort(), u.intents ?? []),
   }));
   vectors += await embedOwners(owners);
   done += owners.length;
-  if ((i / BATCH) % 5 === 0) log(`units ${done}/${units.length} vectors=${vectors}`);
+  if ((i / BATCH) % 5 === 0) log(`units ${done}/${embeddable.length} vectors=${vectors}`);
 }
 log(`units done: ${done} owners, ${vectors} vectors`);
 
