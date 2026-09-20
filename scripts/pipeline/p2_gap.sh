@@ -28,8 +28,10 @@ DB="${DB:-fusion_dev}"
 NET="${NET:-oservices_default}"
 IMAGE="${IMAGE:-python:3.12-slim}"
 
-[ -n "${OUTDIR:-}" ] || { echo "[p2-gap] OUTDIR is required — no default"; exit 1; }
-mkdir -p "$OUTDIR"
+if [ "$CMD" != "vcr" ]; then            # vcr writes to the database, not to a directory
+  [ -n "${OUTDIR:-}" ] || { echo "[p2-gap] OUTDIR is required — no default"; exit 1; }
+  mkdir -p "$OUTDIR"
+fi
 
 STAGE=/tmp/pipeline-p2gap
 rm -rf "$STAGE" && mkdir -p "$STAGE/pipeline" "$STAGE/gpu-enrich"
@@ -38,6 +40,21 @@ cp "$REPO/scripts/gpu-enrich/enrich_client.py" "$REPO/scripts/gpu-enrich/curated
 cp "$REPO/scripts/gpu-enrich/flex_map.json" "$STAGE/gpu-enrich/"
 
 case "$CMD" in
+vcr)
+  # Land the derived VIEW column remarks in work, from the run's own sqls.sqlite.
+  # SQLS_DB must be given: there is one copy of that file and no default path to it.
+  [ -n "${SQLS_DB:-}" ] || { echo "[p2-gap] SQLS_DB is required (path to the run's sqls.sqlite)"; exit 1; }
+  [ -f "$SQLS_DB" ] || { echo "[p2-gap] SQLS_DB=$SQLS_DB not found"; exit 1; }
+  cp "$REPO/scripts/pipeline/p2_gap_vcr.py" "$STAGE/pipeline/"
+  PW="$(docker exec stack-db printenv POSTGRES_PASSWORD)"
+  # the DIRECTORY is mounted read-only, not just the file: nothing in the container can
+  # create a -wal/-shm beside a 3.7 GB single-copy database.
+  docker run --rm --network "$NET" \
+    -v "$STAGE:/app/scripts:ro" -v "$(dirname "$SQLS_DB"):/data:ro" \
+    -e DATABASE_URL="postgresql://postgres:${PW}@stack-db:5432/${DB}" \
+    -e SQLITE="/data/$(basename "$SQLS_DB")" \
+    "$IMAGE" sh -c "pip install -q 'psycopg[binary]' && python /app/scripts/pipeline/p2_gap_vcr.py"
+  ;;
 export)
   [ -n "${FLEX:-}" ] || { echo "[p2-gap] FLEX is required: a path to flex_map.json, or OFF"; exit 1; }
   if [ "$FLEX" = "OFF" ]; then FLEXARG="--no-flex"; else
@@ -64,5 +81,5 @@ dryrun)
         --sample-out /out/gap_sample_prompt.txt --chars-per-token $CPT"
   ;;
 *)
-  echo "usage: OUTDIR=<dir> [FLEX=<path>|OFF] [CPT=<n>] $0 {export|dryrun}"; exit 1 ;;
+  echo "usage: OUTDIR=<dir> [SQLS_DB=<path>] [FLEX=<path>|OFF] [CPT=<n>] $0 {vcr|export|dryrun}"; exit 1 ;;
 esac

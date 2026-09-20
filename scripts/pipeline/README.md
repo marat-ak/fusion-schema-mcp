@@ -219,31 +219,67 @@ lost. The full exclusion cohort is 151 — the other 7 are catalog-only and alre
 
 ### Filling the queue: p2_gap_*
 
-`p2_gap_export.py` builds the prompt payload for `WHERE description IS NULL` out of `work`, and it
-is a PORT of `scripts/gpu-enrich/export_wave.py` — the script that produced all 23,610 records we
-hold — not a new prompt. Verified against it: re-exporting the same otbi unit through both gives a
-byte-identical payload and the same `ghash`. `p2_gap_run.py` imports `enrich_client.py` for the
-contract (23-field strict schema, system prompt, `one()` with its retry) and supplies only the
-orchestration the original could not: the endpoint URL and model id are REQUIRED arguments, and
-every row is stamped with `model`, `run_id` and `produced_at` — the provenance the 2026-08 run has
-none of. `p2_gap_dryrun.py` renders every request with no network and checks it.
+The run set is **2,582**, not 2,733: the 151 `dynamic_lexical` statements stay excluded (below).
+
+`p2_gap_export.py` builds the prompt payload out of `work`, and it is a PORT of
+`scripts/gpu-enrich/export_wave.py` — the script that produced all 23,610 records we hold — not a
+new prompt. Measured against it on a 199-unit otbi control: **198 of 199 payloads are byte-
+identical, ghash included.** The one that differs is a card labelled `[UNKNOWN]` instead of
+`[TABLE]`, because 128 objects in the run's `schema.sqlite` (bare name+type stubs: no remarks, no
+module, no columns — `AP_INVOICES`, `AP_CHECKS`, …) exist in no `raw` table, so `work` cannot know
+them. 17 of the 128 are referenced by 87 statements in the queue.
+
+`p2_gap_run.py` imports `enrich_client.py` for the contract (23-field strict schema, system
+prompt, `one()` with its retry) and supplies only the orchestration the original could not: the
+endpoint URL, model id and concurrency are REQUIRED arguments with no default and no host in the
+source, resume is grounding-versioned on `ghash`, and every row is stamped with `model`, `run_id`
+and `produced_at`. Those three are now columns on `work.qwen_record` and are read by
+`p2_qwen_load.py`. They are **nullable and never backfilled**: the 23,610 existing rows genuinely
+have no such data (`enrich_client.py` resolved the model name once at startup and wrote it
+nowhere), and a value invented for them would be a fabrication wearing the shape of provenance.
+
+`p2_gap_dryrun.py` renders every request with no network and gates on block order, ghash
+recomputation, the clip and the truncation note.
 
 ```bash
+wsl -d CloudBeaver -u root -e bash -lc 'SQLS_DB=/root/enrich-run/sqls.sqlite bash …/p2_gap.sh vcr'
 wsl -d CloudBeaver -u root -e bash -lc 'OUTDIR=/root/gap-run FLEX=OFF bash …/p2_gap.sh export'
 wsl -d CloudBeaver -u root -e bash -lc 'OUTDIR=/root/gap-run CPT=5.16 bash …/p2_gap.sh dryrun'
 ```
 
-Three things the port cannot carry, all measured rather than assumed:
+#### work.view_column_remarks — an acquisition, and the only copy
+
+The vendor dictionary carries a remark on 99.9 % of TABLE columns (1,205,092 of 1,205,723) and on
+**0 of 243,778 VIEW columns**. Every VIEW column meaning the 2026-08 prompts ever showed came from
+one derived table — the base remark inherited through the view's projection, plus
+`computed`/`constant`/`unresolved` verdicts — built during the v2 catalog pass and never carried
+into `raw`. `p2_gap_vcr.py` lands its 222,510 rows (200,438 with a remark, over 5,982 views) in
+`work.view_column_remarks`.
+
+**Source: `/root/enrich-run/sqls.sqlite`, and there is no other copy.** 3.7 GB, WAL mode, and it is
+the database the 2026-08 run itself read — evidence, not a working file. Opened
+`mode=ro&immutable=1` so SQLite skips locking and the WAL entirely and creates no `-wal`/`-shm`;
+the directory is mounted read-only in the container as well; size, mtime and md5 are checked
+unchanged after the load. `seq` is the sqlite rowid and is load-bearing, not a surrogate:
+`export_wave.py` builds `vrem[(v, c)] = rm` over an unordered scan, which is LAST WINS, and 2
+(view, column) pairs have duplicate rows that disagree.
+
+It is **not part of the p0–p8 chain**: `p0_fn.sql` drops `work`, so a rebuild drops this table.
+Re-run `p2_gap.sh vcr` after any rebuild, or fold it into `p1_l2_l3.sql` beside the `meta_*` copies.
+
+What it bought on the run set: 5,099 VIEW column references over 487 statements, 4,894 (96.0 %)
+covered by the derived table. 987 of those are the junk case (the remark is the column name again)
+and the export's guard drops them, leaving 405 statements with a real new meaning. **404 ghashes
+moved** — the one that did not is `view:ZX_WHT_TRX_DETAILS_V`, already at `columnNotes`' 120-group
+cap, so its new meanings fell past the cut. 3,518 column meanings and 286 predicate annotations
+landed; predicate annotation coverage went from 56.3 % to 68.9 %.
+
+#### What the port still cannot carry
 
 - **`ghash` on the new rows is not comparable with the stored otbi values.** Same formula; the
-  grounding underneath it is the fresh pinned parse, not the lost August extractor's `x_*`. Two
-  thirds of the stored otbi ghashes are already unreproducible even by `export_wave.py` itself —
-  its junk-remark guard (a dictionary remark equal to the column name) post-dates that export.
-- **`work` has no `view_column_remarks`.** The vendor dictionary carries remarks on 99.9 % of TABLE
-  columns and 0 % of VIEW columns; the 222,510-row derived table that covered views lives only in
-  the run's `sqls.sqlite`. Over a 199-unit otbi control every single lost column meaning was a VIEW
-  column that only that table had — 1,572 in `columnNotes`, 436 predicate annotations, no other
-  cause. In the gap cohort it reaches 5,853 column references over 575 statements.
+  grounding underneath it is the fresh pinned parse, not the lost August extractor's `x_*`. A
+  third of the stored otbi ghashes are already unreproducible even by `export_wave.py` itself —
+  its junk-remark guard post-dates that export (133 of 199 control units still match).
 - **The dictionary stringifies JSON null.** `work.meta_columns.remarks` holds the four-character
   text `null` on exactly the 244,409 rows where the source had SQL NULL (17,022 in `meta_tables`,
   11,426 in `application_short_name`). The exporter maps it back; a port that did not would assert
@@ -255,6 +291,45 @@ BINARY collation. Postgres' default collation ignores `_` at the primary level, 
 table_name` returns `BEN_BILL_CHARGE_DETAILS` before `BEN_BILL_CHARGES`. That reordered the table
 list on 18 of 199 control units and moved every one of their ghashes. The exporter fetches
 unordered and sorts in Python.
+
+#### Decisions taken on the queue (2026-09-20), so they are not rediscovered as bugs
+
+**The SQL clip stays at 40,000 characters**, unchanged from the original run. Two consequences are
+accepted knowingly, and both are real:
+
+- The clip sends **27.0 %** of the run set's oversized SQL — 132 statements, 19.56 M chars of
+  statement, 5.28 M sent; otbi 8.0 %, bip 46.1 %, view 81.1 %. For the **13 OTBI giants**
+  (677–746 KB, all `fallback`)
+  **not one** of their fact tables appears in the first 40,000 characters: the largest is 746,649
+  chars of which the opening 40 KB is nothing but an outer alias list (`c1 AS "Extension Attribute
+  Character 003"` … `c975`), with 749 SELECTs, 747 FROMs, 351 JOINs and 706 SAWITH references all
+  past the cut. Those prompts are near-content-free by construction, not by accident.
+- Two *different* OTBI statements — 728,366 and 696,347 chars, different `sql_hash` — have
+  byte-identical first 40,000 characters, so they clip to the same prompt, carry the same `ghash`,
+  and will receive the same answer. That is the single shared ghash in the payload; it is correct
+  behaviour of the key (same grounding, same hash), not a collision.
+
+Mitigating, and worth remembering before anyone "fixes" this: the FACTS are parsed from the
+**full** statement, so nothing is lost to the clip on a `full` parse. It bites hardest exactly
+where the parse is `fallback` and there are no joins or predicates to carry.
+
+**The 151 `dynamic_lexical` statements stay excluded — deferred, not forgotten.** They are not
+hard: small (avg 3,307 chars), and 147 of 151 have table facts because `p3_parse.py` substitutes
+`&X -> NULL` and retries. The problem is that the substitution then **lies in the FACTS**: 71 of
+the 151 carry a literal `NULL` in their projection (`select &p_vendor_type_col from dual` becomes
+`[0] _COL_0 = NULL` with no tables), 149 still show the `&` token in the SQL block, and nothing in
+the prompt says a substitution happened. The fix is to re-parse with a placeholder that survives
+(`&X -> X_LEXICAL`) so the facts stop lying — which changes `work.f_*`, the frozen parse of
+record, and is therefore a **p3 decision, not an export flag**. Until then the export keeps
+`export_wave.py`'s own `WHERE excluded_reason IS NULL`. The debt: 151 statements, 271 lexical
+params over 125 distinct names, 88 of them substituting inside `WHERE`, 9 inside `SELECT`, 1 after
+`FROM`.
+
+**No flexfield map** (`FLEX=OFF`). The original applied one to the otbi wave only —
+`enrich_input.otbi.jsonl` carries 1,276 `flexfield (value by CONTEXT_CODE)` annotations,
+`enrich_input.bip.jsonl` and `enrich_input.view.w0.jsonl` carry none, and `clear_sql.flex_missed`
+is empty on every bip and view row. The queue is 99 % bip, so `OFF` is what preserves the shape.
+Turning it on changes 9 of the 2,582 statements and adds 65 annotations.
 
 ### Vectors: what gets one, and what slot 0 is made of
 

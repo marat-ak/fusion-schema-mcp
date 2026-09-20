@@ -12,6 +12,7 @@ table-set sort, the `ghash` formula — is carried across verbatim. Only the I/O
     facts work.r_tables / f_columns / f_joins  instead of the x_* tables
           work.f_predicates / f_projection / f_params
     dict  work.meta_tables / work.meta_columns instead of schema.sqlite tables/columns
+    views work.view_column_remarks             the same derived table, landed by p2_gap_vcr.py
     cards work.clear_sql.description (views)   instead of sql_units.description_generated
 
 WHAT IS NOT THE SAME, and cannot be (report, do not paper over):
@@ -21,13 +22,13 @@ WHAT IS NOT THE SAME, and cannot be (report, do not paper over):
     already-enriched statement yields a DIFFERENT ghash than the stored one — same formula,
     different grounding. ghash compares runs of the same parse, which is exactly what it is
     for; it is not a back-key into the August facts.
-  * `work` holds no `view_column_remarks`. The original prompt resolved a VIEW's column
-    meanings from that derived table (base + inherited + computed, 222,510 rows); the vendor
-    dictionary has remarks on 99.9 % of TABLE columns and 0 % of VIEW columns. Remarks here
-    come from `work.meta_columns` + the curated file, as instructed. The cost is measured in
-    the readiness report.
   * No view waves: this is one pass, so `wave` is 0 on every row (it was the view-dependency
     depth in the original run and only ever non-zero for views).
+
+The VIEW column remarks ARE carried (decision, 2026-09-20): `p2_gap_vcr.py` lands the 222,510
+rows in `work.view_column_remarks` from the run's own sqls.sqlite. Run it before exporting —
+without it every VIEW column goes silent, because the vendor dictionary has a remark on 0 of
+243,778 of them.
 
 DETERMINISM, AND WHY THE DATABASE IS NOT ASKED TO SORT. `p3_parse.py` wrote every fact list
 through Python `sorted()` (`sorted(tables)`, `sorted(set(columns))`, `sorted(set(joins))`,
@@ -99,6 +100,7 @@ class Exporter:
         self.ADF = flexraw.get("adf", {}) if flexraw else {}
         self.tmeta = {}
         self.crem = {}
+        self.vrem = {}
         self.VIEWSET = set()
         self.descgen = {}
 
@@ -130,6 +132,25 @@ class Exporter:
                     self.crem[(sys.intern(t), sys.intern(col))] = r
                     c += 1
         log(f"column remarks: {c}")
+
+        # VIEW column meanings — the derived table, landed by p2_gap_vcr.py. The dictionary has
+        # none for views (0 of 243,778 columns), so this is the whole of it. Replayed in `seq`
+        # (sqlite rowid) order because export_wave.py's `vrem[(v, c)] = rm` is LAST WINS and two
+        # (view, column) pairs have duplicate rows that disagree.
+        if not self.dconn.execute("SELECT to_regclass('work.view_column_remarks')").fetchone()[0]:
+            raise SystemExit(
+                "work.view_column_remarks is missing — run `p2_gap.sh vcr` first.\n"
+                "  Exporting without it silently drops every VIEW column meaning "
+                "(the dictionary has none), which is a different prompt, not a smaller one.")
+        v = 0
+        with self.dconn.cursor(name="vrem") as cur:
+            cur.itersize = 100_000
+            cur.execute("SELECT view_name, column_name, remark FROM work.view_column_remarks "
+                        "WHERE remark IS NOT NULL ORDER BY seq")
+            for vn, col, r in cur:
+                self.vrem[(sys.intern(vn), sys.intern(col))] = r
+                v += 1
+        log(f"view column remarks: {v} rows -> {len(self.vrem)} (view,column) keys")
 
         # the card overlay. In the original run this was sql_units.description_generated,
         # written back by persist_wave.py after each view wave. Its analogue in `work` is
@@ -169,9 +190,9 @@ class Exporter:
                     if len(labels) == 1:
                         return "flexfield (global segment): " + next(iter(labels))
                     return f"descriptive flexfield global segment (context omitted; {len(labels)} configured meanings — customer/global-defined)"
-        # `work` has no view_column_remarks, so a VIEW column falls straight through to the
-        # dictionary (which has none for views) and then to CURATED.
-        r = self.crem.get((t, c))
+        # export_wave.py:71 — an EITHER/OR, not a chain: a VIEW column is resolved from the
+        # derived table ONLY, a table column from the dictionary ONLY. Both then fall to CURATED.
+        r = (self.vrem.get((t, c)) if t in self.VIEWSET else self.crem.get((t, c)))
         if r and re.sub(r"[\s_]+", "", r.strip().upper()) == re.sub(r"[\s_]+", "", (c or "").upper()):
             r = None
         return r or self.CURATED.get((t, c))
@@ -188,9 +209,19 @@ class Exporter:
     # -- cohort ---------------------------------------------------------------------
     def cohort(self, mode, ids_file):
         if mode == "gap":
+            # `excluded_reason IS NULL` is export_wave.py's own selection, kept deliberately.
+            # It removes the 151 `dynamic_lexical` statements — the ones whose `&LEXICAL`
+            # parameters only parse after substitution. They are excluded because the FACTS
+            # would misdescribe them, not because they are hard: `p3_parse.py` substitutes
+            # `&X -> NULL`, so 71 of the 151 carry a literal NULL in their projection facts
+            # while the SQL text still shows the `&` token, and nothing in the prompt says a
+            # substitution happened. Fixing that means re-parsing with a placeholder that
+            # survives (`&X -> X_LEXICAL`), which changes `work.f_*` — the frozen parse of
+            # record — and is a p3 decision, not an export flag. Deferred, not forgotten.
             sql = ("SELECT c.sql_hash, c.source, c.primary_unit_id, c.title, c.sql_text, "
                    "       c.parse_quality "
-                   "FROM work.clear_sql c WHERE c.description IS NULL")
+                   "FROM work.clear_sql c "
+                   "WHERE c.description IS NULL AND c.excluded_reason IS NULL")
             args = ()
         else:
             want = [x.strip() for x in open(ids_file, encoding="utf-8").read().splitlines() if x.strip()]

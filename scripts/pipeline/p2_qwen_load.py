@@ -28,8 +28,14 @@ RECORD SHAPE (enrich_client.py:210) — `{id, source, ok, ghash, result, usage}`
           p2_promote.sql promotes columns out of it and drops nothing.
   usage   prompt/completion token counts. Stored.
 
-  There is no model, run-id or timestamp on the record. enrich_client.py resolves
-  MODEL_NAME from the endpoint at startup and never writes it per row.
+  model / run_id / produced_at
+          NULL on every one of these ten files, and that is the truth about them:
+          enrich_client.py resolves MODEL_NAME from the endpoint at startup and never
+          writes it per row, so `usage` is the only per-call evidence the 2026-08 run
+          left. The columns exist because p2_gap_run.py writes them on rows it
+          produces. They are nullable for exactly this reason and are NEVER backfilled,
+          inferred or defaulted here — a model name guessed for a 2026-08 record would
+          be a fabrication wearing the shape of provenance.
 
 LAST LINE PER ID WINS. The files are append-mode resume logs: a failed call is retried
 by appending, and `is_done()` skips on a later run. 406 otbi ids have more than one
@@ -69,7 +75,11 @@ CREATE TABLE work.qwen_record (
   error    text,               -- set when ok = false; payload is then NULL
   ghash    text,               -- grounding hash; otbi only (see the module docstring)
   payload  jsonb,              -- the WHOLE result object, 23 fields, verbatim
-  usage    jsonb               -- token counts
+  usage    jsonb,              -- token counts
+  -- run provenance. NULL for all ten 2026-08 files; written by p2_gap_run.py on its rows.
+  model       text,
+  run_id      text,
+  produced_at timestamptz
 );
 """
 
@@ -121,6 +131,10 @@ def main():
                     "ghash": d.get("ghash"),
                     "payload": d.get("result") if isinstance(d.get("result"), dict) else None,
                     "usage": d.get("usage") if isinstance(d.get("usage"), dict) else None,
+                    # absent from the ten primary files, present on p2_gap_run.py's rows
+                    "model": d.get("model"),
+                    "run_id": d.get("run_id"),
+                    "produced_at": d.get("produced_at"),
                 }
         counts[f] = (lines, ok, bad, unparsable)
         log(f"{f}: lines={lines} ok={ok} failed={bad} unparsable={unparsable}")
@@ -129,21 +143,24 @@ def main():
     superseded = sum(r["n_lines"] - 1 for r in best.values())
     ends_failed = sum(1 for r in best.values() if not r["ok"])
     with_ghash = sum(1 for r in best.values() if r["ghash"])
+    with_model = sum(1 for r in best.values() if r["model"])
     log(f"distinct ids={len(best)} retried_ids={retried} superseded_lines={superseded} "
-        f"ends_on_failure={ends_failed} with_ghash={with_ghash}")
+        f"ends_on_failure={ends_failed} with_ghash={with_ghash} with_model={with_model}")
 
     conn = psycopg.connect(DATABASE_URL, autocommit=False)
     conn.execute("SET statement_timeout = 0")
     conn.execute(DDL)
     with conn.cursor() as cur:
         with cur.copy("COPY work.qwen_record (unit_id, src_file, line_no, n_lines, source, "
-                      "ok, error, ghash, payload, usage) FROM STDIN") as cp:
+                      "ok, error, ghash, payload, usage, model, run_id, produced_at) "
+                      "FROM STDIN") as cp:
             for r in best.values():
                 cp.write_row((
                     r["unit_id"], r["src_file"], r["line_no"], r["n_lines"], r["source"],
                     r["ok"], r["error"], r["ghash"],
                     json.dumps(r["payload"], ensure_ascii=False) if r["payload"] is not None else None,
                     json.dumps(r["usage"], ensure_ascii=False) if r["usage"] is not None else None,
+                    r["model"], r["run_id"], r["produced_at"],
                 ))
     conn.execute("CREATE INDEX ix_qwen_record_source ON work.qwen_record (source)")
     conn.execute("CREATE INDEX ix_qwen_record_ghash  ON work.qwen_record (ghash) WHERE ghash IS NOT NULL")
