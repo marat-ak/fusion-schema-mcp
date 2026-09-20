@@ -211,6 +211,35 @@ hashes is rescued by another unit. The 51 failures are truncated JSON (the model
 `max_tokens`); their error text is stored. This is a **queryable queue**
 (`WHERE src_enrich_unit IS NULL` has its own partial index), not a hidden gap.
 
+### Vectors: what gets one, and what slot 0 is made of
+
+`embedTexts()` (`src/corpus/ingestStore.ts:16-18`) is the whole contract: **slot 0** is
+`${description}\nTables: ${tables.join(", ")}`, **slots 1..n** are one per non-blank intent, in
+order. `p4_embed.mts` imports it rather than restating it. Two things about slot 0 are decisions,
+not details:
+
+- **No description ⇒ no vector.** The 2,733 statements with `description IS NULL` are embedded
+  NOT AT ALL. `materialize()` — the product's own writer — already drops them
+  (`/\S/.test(r.description)`), and the reason is retrieval, not tidiness: `"" + "\nTables: …"`
+  is a real point in the space, so such a row answers questions it has nothing to do with. It
+  ships with facts and no vectors until the enrich queue reaches it; unfindable beats wrong.
+  `p5_fill.sql` already LEFT JOINs the vectors, so `report_queries.embedding IS NULL` on exactly
+  those rows and they contribute no `report_queries_vec_multi` rows at all.
+- **The table list is `r_tables`, not `f_tables`.** Slot 0 takes the RECONCILED set — physical
+  tables only (`is_cte = false`), parser artifacts dropped (`XMLTABLE|DUAL|SAWITH\d+|TABLE\d+`,
+  the same `ARTIFACT` regex `import_serving.mjs` applied to `x_tables`), de-duplicated, then
+  sorted with JS `.sort()`. The sort happens in JS on purpose: the importer sorted there, and a
+  SQL `ORDER BY` would put the order at the mercy of the database collation.
+
+That second choice is a **fidelity difference from the shipped `v2026_09` vectors**, and it is
+measured, not assumed. Reconstructing v2026_09's own slot-0 text for all 23,471 enriched
+statements: the description is byte-identical on every one, the raw `f_tables` list is
+byte-identical on every one, and **342 statements (1.46 %) differ — exactly the 342 that
+`p3_reconcile.sql` gave the 747 model additions**. 747 tables added, 0 removed, max 16 on one
+statement; 337 of the 342 are `bip-report`. So the slot-0 KNN drift against the shipped corpus is
+bounded by those 342 rows and is additive by construction. The artifact filter is load-bearing
+here: without it 424 statements would differ instead of 342.
+
 ## Run order
 
 | file | step | ~time |
@@ -225,7 +254,8 @@ hashes is rescued by another unit. The 51 failures are truncated JSON (the model
 | `p3_reconcile.sql` | test every model claim, then `work.r_tables` — the reconciled fact set | 10 s |
 | `p3_rel.sql`     | `work.relationships` derived from `f_joins` + `meta_fkeys` | 6 s |
 | `p4_vectors.sql` | the `work.embeddings` table | 1 s |
-| `p4_run.sh`      | full deterministic re-embed, sharded (`p4_embed.mts` per shard) | ~20 min |
+| `p4_run.sh`      | full deterministic re-embed, sharded (`p4_embed.mts` per shard) | ~28 min / 12 shards |
+| `p4_knn.mts`     | KNN probe of `work.embeddings` (+ `v2026_09` alongside) — p4's own gate, since p6 needs p5 | 40 s |
 | `p5_ddl.sh`      | create `v<ver>` from the PRODUCT's `scripts/pg-import/ddl.sql` | 2 s |
 | `p5_fill.sql`    | populate all 25 release tables from `work` | ~3 min |
 | `p5_index.sql`   | pgvector index on every embedding column | |
@@ -263,6 +293,89 @@ instruction, and did not run or rewrite the release steps. **Do not run `p5`/`p6
 `report_queries.tables_used/.joins/.filters` should be served from now that the merged enrichment is
 gone and only parse facts remain.
 
+
+## Experiments — `x*` scripts, NOT part of the build
+
+Scripts whose name starts with `x` are **measurements**, not build steps. They write only to their
+own clearly-named tables, nothing in `p0`–`p8` reads them, and the run order above never invokes
+them. They are kept in-tree so a decision they informed can be re-checked rather than re-argued.
+
+### `x1`/`x2` — should OTBI be a two-pass flow (rewrite → parse the rewrite)?
+
+| file | what it does |
+|---|---|
+| `x1_facts2.sql` | DDL for `work.facts2_run`, `work.f2_tables`, `work.f2_joins` |
+| `x1_parse_rewrite.py` / `.sh` | the SAME pinned `sqlglot==30.18.0` parse, over `clear_sql.rewritten_sql` instead of `sql_text`, OTBI only (11,266 statements with a rewrite) |
+| `x2_compare.sql` | builds `work.x2_cohort` / `x2_tables_cmp` / `x2_joins_cmp` and prints the full comparison |
+
+`x1_parse_rewrite.py` is a thin I/O shim: it imports `sqlglot_extract` unchanged and imports
+`p3_parse.load_dictionary` / `p3_parse.resolver` from the release driver, so both parses see the
+same unfiltered `work.meta_columns` (1,449,501 columns / 29,802 objects). Without that dictionary
+`qualify()` silently drops unresolvable columns instead of raising, and the rewrite would look
+better for free. Full parse: **12 s**, 927 statements/s.
+
+**The result is a split decision, and the two halves point opposite ways.**
+
+*Per statement the rewrite is worse.* Parse quality regresses on 616 statements and improves on 24
+(the original OTBI parse was already 99.8 % `full`, so there was almost nothing to gain).
+Dictionary-resolving table references: 65,487 original vs 58,869 rewritten — 6,775 lost against 98
+gained, a 69:1 loss ratio. Dictionary resolution itself does *not* improve (96.5 % original,
+96.0 % rewritten): the OBIS `SAWITH` wrappers were already correctly flagged as CTEs by the
+existing parse, so there was no artifact problem to fix. Per-statement join edges: 12,469 gained,
+10,421 lost.
+
+*Per corpus the rewrite is much better.* A relationship corpus consumes DEDUPED
+`(table.col = table.col)` pairs, and a lost edge that four hundred other statements also carry
+costs it nothing. Distinct relationships over the cohort: **5,331 in both, 362 original-only,
+5,898 rewrite-only** (5,400 with both tables in the dictionary). Against the whole corpus's
+19,254 distinct relationships from all 26,204 statements, the rewrite contributes **5,625 that no
+original parse anywhere produced** — +29 %. The reason is structural: OBIS joins its `SAWITH`
+blocks to each other on machine column aliases (`SAWITH0 D1 left outer join SAWITH1 D2 On
+D1.c3 = D2.c2`) and wraps single tables in derived tables, and `sqlglot_extract.resolve()` returns
+`None` for both, so the top-level joins are invisible to the direct parse. The rewrite flattens
+them. 12,387 of 12,469 gained edges have all four names present in the original text
+(case-insensitive), and only **2** name a table absent from the original — the gains are grounded,
+not invented.
+
+**Measured costs of the two-pass flow, all real:**
+
+- **Elision that `parse_quality` does not catch.** 238 rewrites carry a truncation symptom
+  (`-- ... repeated for 950+ columns ...`, a trailing comma, no `FROM`); **120 of them still parse
+  `full`**. `109d2da0…` collapses a 723,947-char original into 347 chars plus a comment.
+- **Outer-join semantics are unreliable.** 2,938 statements have `(+)` or `OUTER JOIN` in the
+  original and no outer keyword anywhere in the rewrite; 12 have the reverse. Hand-read
+  `7a8cbc04…`: the original's `left outer join` between two `SAWITH` blocks comes back as
+  `INNER JOIN`. The rewrite's rich `join_type` distribution (29,840 INNER / 18,546 LEFT vs the
+  original's 59,287 flat `WHERE`) is therefore *more detailed but not more trustworthy*.
+- **Dead-branch pruning deletes real relationships.** `0dd487e1…` has `AND ((1=2))` inside
+  `SAWITH0`; the model correctly concluded the branch returns nothing and dropped it — along with
+  four genuine receiving-table joins (`RCV_SHIPMENT_HEADERS`/`_LINES`/`RCV_TRANSACTIONS`/
+  `INV_ORG_PARAMETERS_V`). Semantically defensible, corpus-destructive.
+- **Plain drops.** `a42bb662…` keeps `WHERE 1=2` but silently drops `PO_HEADERS_ALL` and its join
+  to `PO_LINES_DRAFT_ALL`, which are explicit in the original.
+- **Transitive re-anchoring inflates both gain and loss.** `b66b9991…` re-centres a `PERSON_ID`
+  star from `PER_ALL_ASSIGNMENTS_M` onto `PER_PERSON_NAMES_F_V`: 2 edges lost, 2 gained, same
+  result set, all four true.
+
+**Where it helps is not where it was expected to.** Crossed against the ORIGINAL `parse_quality`,
+the 11,238 `full` statements yield 5 gained tables against 6,700 lost, while the 28 `fallback`/
+`failed` statements yield 93 gained against 75 lost and 171 gained edges against 0 lost — 20 of
+those 28 move to `full`. The same correlation the table corrections showed holds here: the model
+is strongest exactly where the parser failed. But that is 28 statements out of 11,266.
+
+**The corroboration test could not be run.** `work.qwen_table_correction` holds 1,077 `missing`
+claims corpus-wide, but only **6 of them, on ONE OTBI statement**, are in this cohort (1,002 are
+bip-report, 69 view). The rewrite corroborates **none** of the six: on `4498eb97…` it produces two
+different tables instead. The `extra` side is answerable and points the same way as
+`p3_reconcile.sql` already found — 670 of 994 OTBI `extra` claims (67 %) reappear in the model's
+own rewrite, the model contradicting itself from a second route.
+
+**Not determined here:** whether the same gain is reachable deterministically. Two of the three
+structural causes of the direct parse's blindness are extractor gaps, not OTBI-SQL gaps — a derived
+table wrapping exactly one physical table could resolve to that table, and Oracle `(+)` could be
+read as an outer join instead of being flattened to `WHERE`. If those two changes recover most of
+the 5,400 relationships, the two-pass flow buys little at the cost of trusting model output.
+That comparison has not been measured.
 ## Invariants
 
 - Writes ONLY to `work` (and to `v<ver>` when the release steps run). `raw` is a read-only input;
