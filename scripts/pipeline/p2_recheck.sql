@@ -9,13 +9,13 @@
 -- counts the outcome, by origin, plus the bucket that has NO rule yet: records
 -- that said tablesConfirmed=false and enumerated nothing.
 --
--- Claims are tested for the WINNING record per sql_hash (work.qwen_pick), which is
--- the established grain — a record that lost a collision pick has no claim row.
+-- Claims come from EVERY journal line (work.qwen_claim → qwen_table_correction), so
+-- `origin` here is the generation that MADE the claim, not the current record's.
 -- ============================================================================
 \set ON_ERROR_STOP on
 
 \echo '--- MISSING claims by run origin (2026-08 run has run_id NULL) ---'
-SELECT coalesce(split_part(r.run_id, '-', 1), 'august')            AS origin,
+SELECT coalesce(split_part(k.run_id, '-', 1), 'august')            AS origin,
        count(*)                                                    AS reported,
        count(*) FILTER (WHERE k.in_sql_text)                       AS in_text,
        count(*) FILTER (WHERE k.in_dictionary)                     AS in_dictionary,
@@ -24,7 +24,6 @@ SELECT coalesce(split_part(r.run_id, '-', 1), 'august')            AS origin,
        count(DISTINCT k.sql_hash) FILTER (WHERE k.applied)         AS statements_gained,
        count(*) FILTER (WHERE k.table_name <> k.name_norm)         AS fusion_prefixed
 FROM   work.qwen_table_correction k
-JOIN   work.qwen_record r ON r.unit_id = k.unit_id
 WHERE  k.kind = 'missing'
 GROUP  BY 1 ORDER BY 1;
 
@@ -43,7 +42,7 @@ FROM   work.qwen_table_correction k
 WHERE  k.kind = 'missing' AND NOT k.applied AND k.verdict LIKE 'rejected%'
 GROUP  BY 1, 2 ORDER BY 3 DESC, 1 LIMIT 20;
 
-\echo '--- flagged but did not enumerate: tablesConfirmed=false AND missingTables=[] (MEASURE ONLY) ---'
+\echo '--- flagged but did not enumerate: tablesConfirmed=false AND missingTables=[] (MEASURE ONLY; current records) ---'
 SELECT coalesce(split_part(r.run_id, '-', 1), 'august') AS origin,
        count(*)                                          AS ok_records,
        count(*) FILTER (WHERE (r.payload->>'tablesConfirmed')::boolean IS FALSE) AS confirmed_false,

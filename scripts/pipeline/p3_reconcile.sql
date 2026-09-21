@@ -67,8 +67,15 @@
 --   could also satisfy. The parse-quality correlation above is what carries this, not
 --   the text test on its own.
 --
+-- CLAIMS ARE A UNION ACROSS GENERATIONS (2026-09-21). work.qwen_table_correction
+-- carries every generation's claims (p2_promote.sql, from work.qwen_claim), so a
+-- claim accepted from the 2026-08 record stays accepted after the statement is
+-- re-enriched with that table in its FACTS and the new record — correctly — does not
+-- repeat it. A later generation never retracts an earlier addition by omission; it
+-- can only add. Text stays last-wins; that is a different question.
+--
 -- tablesConfirmed is folded in as a CONFIDENCE SIGNAL (`model_verdict`), never as
--- an action: 546 statements are `disputed`, the rest `confirmed` or `none`.
+-- an action: it is the CURRENT record's verdict (clear_sql.tables_confirmed).
 -- ============================================================================
 \set ON_ERROR_STOP on
 

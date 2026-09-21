@@ -26,6 +26,14 @@
 -- here and acted on in p3_reconcile.sql — never in work.f_*, which stays exactly
 -- what one pinned sqlglot run produced. That is the property that makes the parse
 -- reproducible, and it survives reconciliation.
+--
+-- CLAIMS ARE NOT LAST-WINS (2026-09-21). The text promoted in step 3 has one current
+-- generation per statement; the table claims do not: a claim is made against the
+-- FACTS a record was shown, and a later record that was shown the table in its facts
+-- does not repeat the claim. So the corrections table is filled from work.qwen_claim
+-- — every claim on every journal line, every generation, every unit that maps to the
+-- statement — not from the winning record. Reading the winner only retracted 710 of
+-- 878 accepted additions on their own recheck.
 -- ============================================================================
 \set ON_ERROR_STOP on
 
@@ -124,6 +132,7 @@ DROP TABLE IF EXISTS work.qwen_table_correction CASCADE;
 CREATE TABLE work.qwen_table_correction (
   sql_hash   text NOT NULL,
   unit_id    text NOT NULL,
+  run_id     text,                 -- the generation that made the claim; NULL = 2026-08
   kind       text NOT NULL,        -- extra | missing
   table_name text NOT NULL,        -- the claim as the model spelled it (upper, trimmed)
   -- the spelling every test uses: a leading schema qualifier `FUSION.` is stripped
@@ -140,16 +149,16 @@ CREATE TABLE work.qwen_table_correction (
   verdict            text          -- why: applied | not_actionable | unsupported | …
 );
 
-INSERT INTO work.qwen_table_correction (sql_hash, unit_id, kind, table_name)
-SELECT p.sql_hash, r.unit_id, k.kind, upper(btrim(v.t))
-FROM   work.qwen_pick p
-JOIN   work.qwen_record r ON r.unit_id = p.unit_id
-CROSS  JOIN LATERAL (VALUES ('extra', 'extraTables'), ('missing', 'missingTables')) k(kind, key)
-CROSS  JOIN LATERAL jsonb_array_elements_text(
-         CASE WHEN jsonb_typeof(r.payload->k.key) = 'array' THEN r.payload->k.key ELSE '[]'::jsonb END) v(t)
-WHERE  btrim(v.t) <> '';
+-- one row per (statement, unit, generation, kind, name): the same claim repeated on a
+-- resumed line of the same run collapses; the same claim from another generation or
+-- another unit sharing the statement is its own row, with its own run_id.
+INSERT INTO work.qwen_table_correction (sql_hash, unit_id, run_id, kind, table_name)
+SELECT DISTINCT m.sql_hash, q.unit_id, q.run_id, q.kind, q.table_name
+FROM   work.qwen_claim q
+JOIN   work.qwen_map   m ON m.unit_id = q.unit_id;
 
 CREATE INDEX ix_qwen_corr_hash  ON work.qwen_table_correction (sql_hash);
+CREATE INDEX ix_qwen_corr_run   ON work.qwen_table_correction (run_id);
 CREATE INDEX ix_qwen_corr_table ON work.qwen_table_correction (table_name, kind);
 ANALYZE work.qwen_table_correction;
 ANALYZE work.clear_sql;
@@ -233,9 +242,10 @@ SELECT count(*) FILTER (WHERE tables_confirmed IS FALSE) AS tables_confirmed_fal
        count(missing_tables)                             AS rows_with_missing_tables
 FROM   work.clear_sql;
 
-SELECT kind, count(*) AS corrections, count(DISTINCT sql_hash) AS statements,
+SELECT kind, coalesce(split_part(run_id, '-', 1), 'august') AS generation,
+       count(*) AS corrections, count(DISTINCT sql_hash) AS statements,
        count(DISTINCT table_name) AS objects
-FROM   work.qwen_table_correction GROUP BY 1 ORDER BY 1;
+FROM   work.qwen_table_correction GROUP BY 1, 2 ORDER BY 1, 2;
 
 \echo '--- ghash: the incremental key. otbi only — views/bip predate the field ---'
 SELECT r.source, count(*) AS records, count(r.ghash) AS with_ghash,

@@ -49,6 +49,15 @@ supersedes the earlier record for that id — exactly the resume-log semantics. 
 stays a full rebuild of work.qwen_record (DROP + COPY), so it is idempotent by
 construction; a rerun with the same file set produces the same table.
 
+THE CLAIMS ARE KEPT FROM EVERY LINE (2026-09-21). `work.qwen_record` is last-line-wins
+because the TEXT (description, intents, rewrite) has exactly one current generation. The
+model's table claims (`missingTables` / `extraTables`) are not like that: a claim is made
+against the FACTS block that record was shown, and a later generation that was shown the
+table IN its facts does not repeat the claim — it saw it. Reading claims off the current
+record only therefore retracted every accepted addition on its own recheck (measured:
+878 → 180). So `work.qwen_claim` holds one row per claim per journal line, every
+generation, and p3_reconcile.sql reconciles over that union. Text last-wins; claims union.
+
 Run through p2_qwen.sh (stages the files read-only into a python container), or through
 p2_recheck.sh which passes EXTRA_FILES.
 """
@@ -96,6 +105,18 @@ CREATE TABLE work.qwen_record (
   run_id      text,
   produced_at timestamptz
 );
+
+DROP TABLE IF EXISTS work.qwen_claim CASCADE;
+CREATE TABLE work.qwen_claim (
+  unit_id          text    NOT NULL,   -- the OLD unit id, as on the line
+  src_file         text    NOT NULL,
+  line_no          integer NOT NULL,
+  run_id           text,               -- NULL = the 2026-08 run
+  ghash            text,               -- the grounding this claim was made against
+  kind             text    NOT NULL,   -- missing | extra
+  table_name       text    NOT NULL,   -- upper, trimmed, as the model spelled it
+  tables_confirmed boolean             -- the line's own tablesConfirmed
+);
 """
 
 
@@ -115,6 +136,7 @@ def main():
     # id -> winning record; insertion order preserved, last write wins.
     best: dict = {}
     counts: dict = {}
+    claims: list = []   # every claim on every ok line, no generation dropped
     for f, p in SOURCES:
         lines = ok = bad = unparsable = 0
         with open(p, encoding="utf-8") as fh:
@@ -135,6 +157,16 @@ def main():
                 is_ok = bool(d.get("ok"))
                 ok += is_ok
                 bad += not is_ok
+                res = d.get("result") if isinstance(d.get("result"), dict) else None
+                if is_ok and res:
+                    tc = res.get("tablesConfirmed")
+                    tc = tc if isinstance(tc, bool) else None
+                    for kind, key in (("missing", "missingTables"), ("extra", "extraTables")):
+                        names = res.get(key)
+                        for t in (names if isinstance(names, list) else []):
+                            t = str(t).strip().upper()
+                            if t:
+                                claims.append((uid, f, n, d.get("run_id"), d.get("ghash"), kind, t, tc))
                 prev = best.get(uid)
                 best[uid] = {
                     "unit_id": uid,
@@ -178,6 +210,15 @@ def main():
                     json.dumps(r["usage"], ensure_ascii=False) if r["usage"] is not None else None,
                     r["model"], r["run_id"], r["produced_at"],
                 ))
+    with conn.cursor() as cur:
+        with cur.copy("COPY work.qwen_claim (unit_id, src_file, line_no, run_id, ghash, kind, "
+                      "table_name, tables_confirmed) FROM STDIN") as cp:
+            for row in claims:
+                cp.write_row(row)
+    conn.execute("CREATE INDEX ix_qwen_claim_unit ON work.qwen_claim (unit_id)")
+    log(f"work.qwen_claim: {len(claims)} claim rows "
+        f"({sum(1 for c in claims if c[5] == 'missing')} missing, "
+        f"{sum(1 for c in claims if c[3])} from run_id-stamped lines)")
     conn.execute("CREATE INDEX ix_qwen_record_source ON work.qwen_record (source)")
     conn.execute("CREATE INDEX ix_qwen_record_ghash  ON work.qwen_record (ghash) WHERE ghash IS NOT NULL")
     conn.execute("ANALYZE work.qwen_record")

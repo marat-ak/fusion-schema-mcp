@@ -324,23 +324,23 @@ Recheck export: 2,898 candidates, 2,495 grounding unchanged, **403 moved** (350 
 `model_added` + 2 gap whose view cards moved), $0.38; run 402 ok / 1 failed
 (`sql:883169ae…`, truncated JSON) in 7.6 min.
 
-**DEFECT FOUND ON THE SECOND LOAD — OPEN, NOT FIXED. The additions do not survive their own
-recheck.** `work.qwen_record` keeps ONE record per unit id (last line wins, across files), and
-`p3_reconcile.sql` rebuilds `r_tables` from the parse plus the claims of the CURRENT winning
-record only. The recheck record was produced with the 878 additions already in its FACTS block,
-so it does not report them as `missing` any more — and the reconcile, seeing no claim, drops them:
-`model_added` 878 → 180 (the 168 the model re-listed anyway, plus 12 new). Measured over the 403
-prompts: 878 additions shown, **811 accepted silently** (not in `extraTables`), 61 called
-`extra`, 168 re-listed as `missing`; **710 lost from `r_tables`**. Consequence today: the recheck
-descriptions were written against a table set `r_tables` no longer lists, and a further
-`export` would flag all 403 as "moved" again — an oscillation, not convergence. The claim history
-is the missing thing: a claim that was evidence-backed and applied has to stay applied across
-record generations, and it lives only in the journals. The fix is a grain change (keep every
-generation's claims — e.g. a claims table loaded from ALL journal lines, with `3b` adding from it
-— or keep `qwen_record` per `(unit_id, run_id)`), which is a decision, not a patch; until it is
-taken, do not run `export` again after a recheck `load`, and treat `r_tables` as under-counting
-on those 401 statements. To put the pre-recheck fact set back: `load` with
-`JOURNALS=enrich_output.gap.jsonl` alone (the recheck text then leaves `work` with it).
+**Claims are a UNION across generations; text is last-wins.** The first load of the recheck
+journal exposed it: `work.qwen_record` keeps one record per unit id, and the reconcile read the
+table claims off that record only — but the recheck record had been shown the 878 additions IN its
+FACTS block, so it did not repeat them, and the rebuild dropped them: `model_added` 878 → 180
+(measured over the 403 prompts: 878 additions shown, 811 accepted silently, 61 called `extra`,
+168 re-listed as `missing`, 710 lost). A later generation that omits a claim has not retracted it;
+it saw the table. So `p2_qwen_load.py` now also writes **`work.qwen_claim`** — one row per claim
+per journal LINE, every generation, with `run_id` and the `ghash` it was made against — and
+`p2_promote.sql` fills `qwen_table_correction` from it (DISTINCT over statement, unit, generation,
+kind, name; `run_id` on every row). `qwen_record` is unchanged: the text has exactly one current
+generation and stays last-wins. The acceptance rule is untouched. Verified on the full reload
+(ten primaries + gap + recheck): `model_added` **890 rows over 401 statements** — the 878
+restored plus 12 names the recheck generation claimed new — 0 dropped; text generations
+unchanged (August 23,121 · gap 2,495 · recheck 402 statements); a further `export` reports
+**8 moved of 2,897**, every one explained: 6 carry those recheck-first additions, 2 reference a
+view the recheck re-described (its card moved). That is grounding that genuinely changed, not
+oscillation; running them is a judgement call ($0.01), not a repair.
 
 #### What the port still cannot carry
 
