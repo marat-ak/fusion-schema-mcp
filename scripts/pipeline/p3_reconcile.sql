@@ -47,10 +47,11 @@
 --   added. The other 174 keep a verdict in work.qwen_table_correction rather than
 --   being silently dropped.
 --
---   OPEN, measured but NOT applied: 20 of the 31 schema-qualified rejects (7
---   distinct names) WOULD resolve if a leading `FUSION.` were stripped. Stripping
---   a schema prefix is a rule change, not a reconciliation detail, so this step
---   does not do it — the verify block below prints the number each run.
+--   The leading `FUSION.` schema qualifier IS stripped (rule taken 2026-09-21; it
+--   was 20 of the 31 schema-qualified rejects, 7 distinct names). The stripped
+--   spelling is `qwen_table_correction.name_norm`, a generated column declared in
+--   p2_promote.sql; every test and the added row use it, `table_name` stays the
+--   claim as spelled. The verify block prints how many claims the strip touched.
 --
 --   THE TEST THAT SETTLES IT: where do the two kinds land relative to parse quality?
 --   Additions cluster exactly where sqlglot ADMITS it could not read the statement —
@@ -77,13 +78,13 @@
 UPDATE work.qwen_table_correction k SET
   in_parse = EXISTS (SELECT 1 FROM work.f_tables f
                      WHERE f.sql_hash = k.sql_hash AND NOT f.is_cte
-                       AND f.table_name = k.table_name),
+                       AND f.table_name = k.name_norm),
   in_dictionary = EXISTS (SELECT 1 FROM work.meta_tables m
-                          WHERE upper(m.table_name) = k.table_name),
+                          WHERE upper(m.table_name) = k.name_norm),
   in_sql_text = (work.norm_sql(c.sql_text)
-                   ~ ('(^|[^a-z0-9_])' || lower(k.table_name) || '([^a-z0-9_]|$)')),
+                   ~ ('(^|[^a-z0-9_])' || lower(k.name_norm) || '([^a-z0-9_]|$)')),
   after_from_or_join = (work.norm_sql(c.sql_text)
-                   ~ ('(from|join|update|into)[ (]+' || lower(k.table_name) || '([^a-z0-9_]|$)'))
+                   ~ ('(from|join|update|into)[ (]+' || lower(k.name_norm) || '([^a-z0-9_]|$)'))
 FROM work.clear_sql c
 WHERE c.sql_hash = k.sql_hash;
 
@@ -135,7 +136,7 @@ SELECT f.sql_hash, f.table_name, f.is_cte,
          WHEN NOT f.is_cte AND EXISTS (
                 SELECT 1 FROM work.qwen_table_correction k
                 WHERE k.sql_hash = f.sql_hash AND k.kind = 'extra'
-                  AND k.table_name = f.table_name)          THEN 'model_disputed'
+                  AND k.name_norm = f.table_name)           THEN 'model_disputed'
          ELSE 'agreed'
        END,
        CASE WHEN c.tables_confirmed IS TRUE  THEN 'confirmed'
@@ -147,7 +148,7 @@ ON CONFLICT DO NOTHING;
 
 -- 3b — the accepted additions
 INSERT INTO work.r_tables (sql_hash, table_name, is_cte, provenance, model_verdict)
-SELECT DISTINCT k.sql_hash, k.table_name, false, 'model_added',
+SELECT DISTINCT k.sql_hash, k.name_norm, false, 'model_added',
        CASE WHEN c.tables_confirmed IS TRUE  THEN 'confirmed'
             WHEN c.tables_confirmed IS FALSE THEN 'disputed'
             ELSE 'none' END
@@ -199,22 +200,13 @@ SELECT verdict,
 FROM   work.qwen_table_correction
 WHERE  kind = 'missing' AND verdict LIKE 'rejected%' GROUP BY 1 ORDER BY 1;
 
-\echo '--- would stripping a schema prefix rescue any of them? (MEASURED, NOT APPLIED) ---'
--- The correction row MUST be aliased: an unqualified `table_name` inside the
--- correlated EXISTS binds to meta_tables.table_name, not to the claim, and the
--- filter then silently answers 0 for every row. It did, on the first run.
-SELECT count(*) AS rejected_not_a_vendor_object,
-       count(*) FILTER (WHERE position('.' in k.table_name) > 0)              AS schema_qualified,
-       count(*) FILTER (WHERE position('.' in k.table_name) > 0
-                          AND EXISTS (SELECT 1 FROM work.meta_tables m
-                                      WHERE upper(m.table_name) = split_part(k.table_name, '.', 2)))
-                                                                              AS resolves_after_prefix_strip,
-       count(DISTINCT k.table_name) FILTER (WHERE position('.' in k.table_name) > 0
-                          AND EXISTS (SELECT 1 FROM work.meta_tables m
-                                      WHERE upper(m.table_name) = split_part(k.table_name, '.', 2)))
-                                                                              AS distinct_names
+\echo '--- the FUSION. prefix strip: claims it touched, and what became of them ---'
+SELECT count(*)                                    AS prefixed_claims,
+       count(DISTINCT k.name_norm)                 AS distinct_names,
+       count(*) FILTER (WHERE k.applied)           AS applied,
+       count(*) FILTER (WHERE k.in_dictionary)     AS in_dictionary
 FROM   work.qwen_table_correction k
-WHERE  k.kind = 'missing' AND k.verdict = 'rejected_not_a_vendor_object';
+WHERE  k.kind = 'missing' AND k.table_name <> k.name_norm;
 
 \echo '--- THE TEST THAT SETTLES IT: claims vs parse quality ---'
 SELECT c.parse_quality,

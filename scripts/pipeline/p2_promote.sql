@@ -125,7 +125,12 @@ CREATE TABLE work.qwen_table_correction (
   sql_hash   text NOT NULL,
   unit_id    text NOT NULL,
   kind       text NOT NULL,        -- extra | missing
-  table_name text NOT NULL,
+  table_name text NOT NULL,        -- the claim as the model spelled it (upper, trimmed)
+  -- the spelling every test uses: a leading schema qualifier `FUSION.` is stripped
+  -- (rule, 2026-09-21: the model reports FUSION.X for a dictionary object X — 20 claims,
+  -- 7 names — and the text test already sees `fusion.x` as the word `x`). Declared ONCE
+  -- here; p3_reconcile.sql tests and adds `name_norm`, never `table_name`.
+  name_norm  text GENERATED ALWAYS AS (regexp_replace(table_name, '^FUSION\.', '')) STORED,
   -- ---- evidence + verdict, all written by p3_reconcile.sql ----
   in_parse           boolean,      -- this parse lists it as a physical object
   in_dictionary      boolean,      -- it is a real object in meta_tables

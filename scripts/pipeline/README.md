@@ -146,9 +146,9 @@ step. One reconciled table, not a v1/v2 pair.
 | `agreed` | 143,004 | 22,823 | parse found it, model did not object |
 | `parser` | 12,245 | 2,457 | parse found it, statement has no model verdict |
 | `model_disputed` | 2,372 | 642 | parse found it, model called it extra — **kept** |
-| `model_added` | 747 | 342 | parse missed it, evidence backed the model |
+| `model_added` | 766 | 350 | parse missed it, evidence backed the model (2026-08 records; the gap and recheck runs add theirs — see *Recheck* below) |
 
-157,621 parse rows + 747 additions = 158,368; **0 dropped**. `model_verdict` carries
+157,621 parse rows + 766 additions = 158,387; **0 dropped**. `model_verdict` carries
 `tablesConfirmed` as a confidence signal on every row (confirmed 144,896 / none 12,245 /
 disputed 1,227), never as an action.
 
@@ -192,9 +192,12 @@ reported was a defect of the lost August extractor rather than of sqlglot as suc
 Every claim carries its evidence (`in_parse`, `in_dictionary`, `in_sql_text`,
 `after_from_or_join`) and a `verdict`, so the decision is auditable rather than asserted.
 
-**Open, measured, not applied**: 20 of the 31 schema-qualified rejects (7 distinct names,
-`FUSION.SVC_SERVICE_REQUESTS`, `FUSION.PER_BIPNTF_FLEX`, …) would resolve if a leading `FUSION.`
-were stripped. Normalising a schema prefix is a rule change, not a reconciliation detail.
+**The `FUSION.` prefix IS stripped (rule taken 2026-09-21).** 20 claims over 7 names
+(`FUSION.SVC_SERVICE_REQUESTS`, `FUSION.PER_BIPNTF_FLEX`, …) were rejected only because the model
+spelled the schema qualifier. `work.qwen_table_correction.name_norm` — a generated column declared
+in `p2_promote.sql`, `regexp_replace(table_name, '^FUSION\.', '')` — is the spelling every test and
+the added row use; `table_name` stays the claim as spelled. 19 of the 20 applied (one was moot,
+the parse already had it): 747 → 766 additions, 342 → 350 statements.
 
 ### What has no generation-2 enrichment
 
@@ -273,6 +276,71 @@ and the export's guard drops them, leaving 405 statements with a real new meanin
 moved** — the one that did not is `view:ZX_WHT_TRX_DETAILS_V`, already at `columnNotes`' 120-group
 cap, so its new meanings fell past the cut. 3,518 column meanings and 286 predicate annotations
 landed; predicate annotation coverage went from 56.3 % to 68.9 %.
+
+#### Recheck: p2_recheck_* — the tables the model added never reached the prompt they came from
+
+A `missingTables` claim is made against the FACTS block the model was shown, so an accepted
+addition (`model_added` in `r_tables`) is by definition a table that was absent from that
+statement's prompt. The recheck closes the loop: fold the finished journal in, re-reconcile, re-export
+every enriched statement whose grounding moved, enrich those, fold that journal in too.
+
+```bash
+W='wsl -d CloudBeaver -u root -e bash -lc'; P=/mnt/c/.../scripts/pipeline/p2_recheck.sh
+$W "OUTDIR=/root/gap-run ENRICH_DIR=/root/enrich-run JOURNALS=enrich_output.gap.jsonl bash $P load"
+$W "OUTDIR=/root/gap-run FLEX=OFF bash $P export"
+$W "OUTDIR=/root/gap-run ENV_FILE=/root/enrich-run/.env MODEL=<served id> CONC=512 bash $P run"
+$W "OUTDIR=/root/gap-run ENRICH_DIR=/root/enrich-run JOURNALS=enrich_output.gap.jsonl,enrich_output.recheck.jsonl bash $P load"
+```
+
+- **`load`** = `p2_qwen_load.py` with `EXTRA_FILES` (the journals, read AFTER the ten primaries,
+  in the order given; last line per id wins across files, so a recheck record supersedes the
+  record it re-did) → `p2_promote.sql` → `p3_reconcile.sql` → `p2_recheck.sql` (report only) →
+  `p7_own.sql`. The load is still a full DROP + COPY of `work.qwen_record`, so it is idempotent by
+  construction, and `p3_reconcile.sql` is the ONLY add rule — the recheck restates nothing.
+- **`export`** = `p2_gap.sh export` with `COHORT=recheck` → `p2_gap_export.py --cohort recheck`.
+  Candidates: every enriched statement that carries a `model_added` row OR whose winning record
+  came from a `run_id`-stamped run (a ghash comparable with this exporter's). Written only when the
+  freshly computed ghash differs from `clear_sql.src_enrich_ghash` (NULL always differs: the
+  2026-08 view/bip records and every failure record). The 2026-08 otbi ghashes are NOT comparable
+  (lost-extractor facts) — they qualify through `model_added` only, never on ghash, or the whole
+  August run would "differ".
+- **`run`** = `p2_gap_run.py` with the gap run's exact shape; run id `recheck-<utc>`, journal
+  `enrich_output.recheck.jsonl`, log `run.recheck.log`, resume-safe by ghash.
+- **`p2_recheck.sql`** prints, by origin (`august` / `gap` / `recheck`): reported / in-text /
+  in-dictionary / already-present / added, the top-20 rejected names with reason, and the bucket
+  with NO rule — `tablesConfirmed=false AND missingTables=[]` (91 on the 2026-08 run; measured,
+  not acted on).
+
+Not done here, and now stale for every re-enriched statement: the `p4` vectors (slot 0 carries the
+table list AND the description, both of which moved). Re-embed those rows before a release.
+
+**Run of 2026-09-21 — measured.** Gap run: 2,582 → 2,548 ok / 34 failed (20 client-wall
+timeouts, 14 truncated JSON; all giants at or near the 40,000 clip — they belong with the
+oversized-deferred set, not with a plain retry). After that load: `missingTables` reported
+1,077 (August) + 239 (gap) = 1,316; in text 1,228; in dictionary 1,098; already in parse 174;
+**added 878 over 401 statements** (766 August incl. 19 rescued by the `FUSION.` strip, 112 gap).
+Flagged-but-did-not-enumerate (`tablesConfirmed=false`, `missingTables=[]`): 91 August + 180 gap.
+Recheck export: 2,898 candidates, 2,495 grounding unchanged, **403 moved** (350 August + 51 gap
+`model_added` + 2 gap whose view cards moved), $0.38; run 402 ok / 1 failed
+(`sql:883169ae…`, truncated JSON) in 7.6 min.
+
+**DEFECT FOUND ON THE SECOND LOAD — OPEN, NOT FIXED. The additions do not survive their own
+recheck.** `work.qwen_record` keeps ONE record per unit id (last line wins, across files), and
+`p3_reconcile.sql` rebuilds `r_tables` from the parse plus the claims of the CURRENT winning
+record only. The recheck record was produced with the 878 additions already in its FACTS block,
+so it does not report them as `missing` any more — and the reconcile, seeing no claim, drops them:
+`model_added` 878 → 180 (the 168 the model re-listed anyway, plus 12 new). Measured over the 403
+prompts: 878 additions shown, **811 accepted silently** (not in `extraTables`), 61 called
+`extra`, 168 re-listed as `missing`; **710 lost from `r_tables`**. Consequence today: the recheck
+descriptions were written against a table set `r_tables` no longer lists, and a further
+`export` would flag all 403 as "moved" again — an oscillation, not convergence. The claim history
+is the missing thing: a claim that was evidence-backed and applied has to stay applied across
+record generations, and it lives only in the journals. The fix is a grain change (keep every
+generation's claims — e.g. a claims table loaded from ALL journal lines, with `3b` adding from it
+— or keep `qwen_record` per `(unit_id, run_id)`), which is a decision, not a patch; until it is
+taken, do not run `export` again after a recheck `load`, and treat `r_tables` as under-counting
+on those 401 statements. To put the pre-recheck fact set back: `load` with
+`JOURNALS=enrich_output.gap.jsonl` alone (the recheck text then leaves `work` with it).
 
 #### What the port still cannot carry
 
@@ -377,6 +445,7 @@ because the two corpora differ in membership (23,746 rows there, 23,471 embeddab
 | `p3_parse.sh`    | the REAL pinned sqlglot parse (`p3_parse.py`) over all 26,204 statements | ~2 min |
 | `p3_post.sql`    | fact indexes, exclusions from real `parse_quality` | 4 s |
 | `p3_reconcile.sql` | test every model claim, then `work.r_tables` — the reconciled fact set | 10 s |
+| `p2_recheck.sh`  | after an enrichment run: `load` (journal → record → promote → reconcile → report → own), `export` (grounding moved), `run` (enrich) — see *Recheck* | load 40 s |
 | `p3_rel.sql`     | `work.relationships` derived from `f_joins` + `meta_fkeys` | 6 s |
 | `p4_vectors.sql` | the `work.embeddings` table | 1 s |
 | `p4_run.sh`      | full deterministic re-embed, sharded (`p4_embed.mts` per shard) | 27 min / 12 shards |

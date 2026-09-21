@@ -51,6 +51,20 @@ hard failure, never a substituted value.
 
   python p2_gap_export.py --cohort gap --out enrich_input.gap.jsonl \
                           --curated curated_column_remarks.json --no-flex
+
+--cohort recheck (2026-09-21): the statements whose GROUNDING MOVED after their last
+record was produced. The model's `missingTables` claims become `model_added` rows in
+`work.r_tables` (p3_reconcile.sql), and a table the model added never reached the
+prompt it was added from — so those statements are re-exported and re-enriched with the
+reconciled table set. Candidates are every enriched statement that either carries a
+`model_added` row or whose winning record came from a `run_id`-stamped run (a run whose
+ghash is comparable with this exporter's). A candidate is WRITTEN only when its freshly
+computed ghash differs from the ghash stored on its winning record (`clear_sql.
+src_enrich_ghash`; NULL — the 2026-08 view/bip records — always differs). Statements whose
+winning record is a FAILURE are not candidates: they were never enriched, so there is nothing
+to re-do; they belong to the gap run's own resume, not here. The August otbi ghashes are not comparable (their facts came from the lost
+extractor), which is why they are candidates only through `model_added`, never on ghash
+alone: everything the August run produced would otherwise "differ".
 """
 import argparse
 import hashlib
@@ -223,6 +237,16 @@ class Exporter:
                    "FROM work.clear_sql c "
                    "WHERE c.description IS NULL AND c.excluded_reason IS NULL")
             args = ()
+        elif mode == "recheck":
+            sql = ("SELECT c.sql_hash, c.source, c.primary_unit_id, c.title, c.sql_text, "
+                   "       c.parse_quality "
+                   "FROM work.clear_sql c "
+                   "WHERE c.enrich_ok IS TRUE AND c.excluded_reason IS NULL "
+                   "  AND (EXISTS (SELECT 1 FROM work.r_tables r WHERE r.sql_hash = c.sql_hash "
+                   "                 AND r.provenance = 'model_added') "
+                   "    OR EXISTS (SELECT 1 FROM work.qwen_record q WHERE q.unit_id = c.src_enrich_unit "
+                   "                 AND q.run_id IS NOT NULL))")
+            args = ()
         else:
             want = [x.strip() for x in open(ids_file, encoding="utf-8").read().splitlines() if x.strip()]
             if not want:
@@ -326,8 +350,9 @@ class Exporter:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--cohort", choices=["gap", "ids"], required=True,
-                    help="gap = every L3 statement with description IS NULL; ids = --ids file")
+    ap.add_argument("--cohort", choices=["gap", "ids", "recheck"], required=True,
+                    help="gap = every L3 statement with description IS NULL; ids = --ids file; "
+                         "recheck = enriched statements whose grounding moved (see docstring)")
     ap.add_argument("--ids", help="file of sql_hash or unit_id, one per line (--cohort ids)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--curated", required=True, help="curated_column_remarks.json")
@@ -370,13 +395,27 @@ def main():
     rows = ex.cohort(args.cohort, args.ids)
     log(f"cohort {args.cohort}: {len(rows)} statements")
 
-    n = 0
+    # recheck: the ghash of the grounding each winning record was produced from
+    stored = {}
+    if args.cohort == "recheck":
+        stored = dict(conn.execute(
+            "SELECT sql_hash, src_enrich_ghash FROM work.clear_sql "
+            "WHERE src_enrich_unit IS NOT NULL").fetchall())
+
+    n = unchanged = 0
     with open(args.out, "w", encoding="utf-8") as out:
         for r in rows:
-            out.write(json.dumps(ex.build(r), ensure_ascii=False) + "\n")
+            p = ex.build(r)
+            if args.cohort == "recheck" and stored.get(r[0]) == p["ghash"]:
+                unchanged += 1
+                continue
+            out.write(json.dumps(p, ensure_ascii=False) + "\n")
             n += 1
             if n % 250 == 0:
                 log(f"{n}/{len(rows)}")
+    if args.cohort == "recheck":
+        log(f"recheck: candidates {len(rows)} · grounding unchanged {unchanged} · "
+            f"moved {n} · est. cost ${n / 1000 * 0.95:.2f} at $0.95/1k")
     log(f"wrote {args.out} ({n} units)")
     conn.close()
 

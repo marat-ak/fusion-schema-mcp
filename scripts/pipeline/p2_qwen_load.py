@@ -41,7 +41,16 @@ LAST LINE PER ID WINS. The files are append-mode resume logs: a failed call is r
 by appending, and `is_done()` skips on a later run. 406 otbi ids have more than one
 line. Counting lines instead of ids is what produced the "388 differing rows" ghost.
 
-Run through p2_qwen.sh (stages the files read-only into a python container).
+EXTRA JOURNALS (2026-09-21). Later runs — the gap run, the recheck run — append to the
+same table through the same door: `EXTRA_FILES` is a comma-separated list of absolute
+paths (inside the container) read AFTER the ten primaries, in the order given. Last line
+per id still wins, now across files too, so a recheck record written under a unit id
+supersedes the earlier record for that id — exactly the resume-log semantics. The load
+stays a full rebuild of work.qwen_record (DROP + COPY), so it is idempotent by
+construction; a rerun with the same file set produces the same table.
+
+Run through p2_qwen.sh (stages the files read-only into a python container), or through
+p2_recheck.sh which passes EXTRA_FILES.
 """
 import json
 import os
@@ -62,6 +71,12 @@ FILES = [f"enrich_output.view.w{i}.jsonl" for i in range(8)] + [
     "enrich_output.otbi.jsonl",
 ]
 REFUSED = "round1-local-stale"
+
+# (label, path): the ten primaries under ENRICH_DIR, then the extra journals as given.
+SOURCES = [(f, os.path.join(DATA_DIR, f)) for f in FILES] + [
+    (os.path.basename(x.strip()), x.strip())
+    for x in os.environ.get("EXTRA_FILES", "").split(",") if x.strip()
+]
 
 DDL = """
 DROP TABLE IF EXISTS work.qwen_record CASCADE;
@@ -89,19 +104,20 @@ def log(m):
 
 
 def main():
-    for f in FILES:
+    for f, p in SOURCES:
         if REFUSED in f:
             raise SystemExit(f"refusing superseded file {f}")
-        p = os.path.join(DATA_DIR, f)
         if not os.path.exists(p):
-            raise SystemExit(f"missing primary input {p} — refusing a partial load")
+            raise SystemExit(f"missing input {p} — refusing a partial load")
+    log(f"sources: {len(FILES)} primary + {len(SOURCES) - len(FILES)} extra "
+        f"({', '.join(f for f, _ in SOURCES[len(FILES):]) or 'none'})")
 
     # id -> winning record; insertion order preserved, last write wins.
     best: dict = {}
     counts: dict = {}
-    for f in FILES:
+    for f, p in SOURCES:
         lines = ok = bad = unparsable = 0
-        with open(os.path.join(DATA_DIR, f), encoding="utf-8") as fh:
+        with open(p, encoding="utf-8") as fh:
             for n, raw in enumerate(fh, 1):
                 raw = raw.strip()
                 if not raw:

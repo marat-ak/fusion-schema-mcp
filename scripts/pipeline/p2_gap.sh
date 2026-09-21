@@ -27,6 +27,7 @@ CMD="${1:-}"
 DB="${DB:-fusion_dev}"
 NET="${NET:-oservices_default}"
 IMAGE="${IMAGE:-python:3.12-slim}"
+COHORT="${COHORT:-gap}"                 # gap (this script's own) | recheck (p2_recheck.sh export)
 
 if [ "$CMD" != "vcr" ]; then            # vcr writes to the database, not to a directory
   [ -n "${OUTDIR:-}" ] || { echo "[p2-gap] OUTDIR is required — no default"; exit 1; }
@@ -66,8 +67,8 @@ export)
     -v "$STAGE:/app/scripts" -v "$OUTDIR:/out" \
     -e DATABASE_URL="postgresql://postgres:${PW}@stack-db:5432/${DB}" \
     "$IMAGE" sh -c "pip install -q 'psycopg[binary]' && \
-      python /app/scripts/pipeline/p2_gap_export.py --cohort gap \
-        --out /out/enrich_input.gap.jsonl \
+      python /app/scripts/pipeline/p2_gap_export.py --cohort $COHORT \
+        --out /out/enrich_input.$COHORT.jsonl \
         --curated /app/scripts/gpu-enrich/curated_column_remarks.json $FLEXARG"
   ;;
 dryrun)
