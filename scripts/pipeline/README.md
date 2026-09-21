@@ -474,7 +474,7 @@ because the two corpora differ in membership (23,746 rows there, 23,471 embeddab
 | `p5_index.sql`   | pgvector index on every embedding column | |
 | `p6_verify.sql`  | the release gate: counts, content equality, dangling, stamps | 2 min |
 | `p6_knn.mts`     | exact-KNN spot check through the serving statement | 30 s |
-| `p7_own.sql`     | `ALTER ... OWNER TO fusion_dev` — the last act of every build | 1 s |
+| `p7_own.sql`     | `ALTER ... OWNER TO :owner` (default `fusion_dev`; `fusion` after a restore) — the last act of every build | 1 s |
 | `p8_verify.sql`  | VERIFICATION ONLY against `v2026_09`; writes nothing | 20 s |
 
 ```bash
@@ -572,6 +572,57 @@ fixed-assets probe (3/6 exact vs 2/6 HNSW) — the documented 95 % recall at `hn
 - 166 shipped titles no longer resolve via `byTitle` (above, item 1).
 - `col_vec` carried, `flexfields`/`adf_extensions` carried (our demo pod's configuration in a
   vendor schema — flagged in the script since the first build).
+
+### Into `fusion`, and the PG provider (2026-09-21)
+
+The release schema moves between databases as a plain custom-format dump; `meta` is
+database-level and is written by hand (the upgrade job does not exist yet):
+
+```bash
+docker exec stack-db bash -c 'pg_dump -U postgres -Fc -n v2026_10 -f /tmp/v2026_10.dump fusion_dev'
+docker exec stack-db psql -U postgres -d fusion -c 'DROP SCHEMA IF EXISTS v2026_10 CASCADE'
+docker exec stack-db bash -c 'pg_restore -U postgres --no-owner -d fusion /tmp/v2026_10.dump'   # 1m06s
+docker cp p7_own.sql stack-db:/tmp/ && docker exec stack-db psql -U postgres -d fusion \
+  -v schemas='v2026_10' -v owner='fusion' -f /tmp/p7_own.sql                                    # the serving role owns it
+# meta: seeds (version, embedding_model='bge-small-en-v1.5-384', ddl_version='2', activated_at) + active_version='v2026_10'
+```
+
+`p7_own.sql` takes the owner as a variable now (`-v owner=`, default `fusion_dev`). Verified in
+`fusion` as role `fusion`: all 25 tables count-identical to `fusion_dev.v2026_10` (26,020 /
+104,147 / 29,802 …), four `vector` columns, the three HNSW indexes restored (197 MB / 51 MB /
+456 kB) and chosen by the planner, exact-KNN top-10 identical across the two databases, 0 objects
+not owned by `fusion`, `meta.active_version = v2026_10` (the `v2026_09` seeds row is left in
+place; that schema does not exist in `fusion`). `raw`, `v2026_09`, `/opt/fusion-catalog-test/`
+untouched.
+
+**The provider** (`src/db/postgres/`) already resolved `meta.active_version` at open and put it on
+every pooled connection's `search_path` (`refreshIfMoved()` rebuilds the pool when the pointer
+moves), and `PgMeta.verify()` builds nothing at boot — the registry stamps the build writes are the
+code constants the `ensure*Registry()` gates compare against, so boot finds them "present". Three
+changes were needed for the v2026_10 shape, nothing else in the MCP was touched:
+
+- `provider.ts`: `hnsw.ef_search = 100` on every pooled connection (startup parameter). pgvector's
+  default 40 measured 95.0 % recall@10 against the exact scan `PgCorpus.knn` is documented to
+  match; 100 measured 100 % for +0.08 ms per probe. Verified through the pool: `SHOW` returns 100.
+- `corpus.ts`: `byTitle()` — the exact, indexed statement first ("largest SQL wins", unchanged),
+  and on a miss a scan of `reports[].title` (`jsonb_array_elements`), so the 166 shipped titles
+  that belonged to a unit which lost the collision pick still resolve to their statement.
+- `catalog.ts`: `getReportQuery` treats `sql:` as the only id shape (`/^sql:/`); `view:` and
+  `otbi:` are reference paths in `reports`, not ids. The old `/^(sql:|view:)/` was removed, not
+  kept as a fallback.
+
+Typecheck + `npm test` (the SQL-placement gate + 27 tests) pass on both `CATALOG_DB=sqlite` and
+`CATALOG_DB=postgres` (throwaway database on `stack-db`), run inside `schema-mcp-build:latest`.
+
+**Switching the dev container** (devops, not done here): `fusion-schema-mcp` selects the provider
+with `CATALOG_DB=postgres` and takes the connection as `DATABASE_URL` (`postgresql://fusion:<pw>@
+stack-db:5432/fusion` — the `fusion` role's password from the stack secrets, never a literal in
+compose); it must be on the `oservices_default` network. With that, `DATA_DIR` and every
+`*_DB` sqlite override (`schema.sqlite`, `reports.sqlite`, `enrich.sqlite`, `cache.sqlite`,
+`facts.sqlite`) and the `/opt/fusion-catalog-test` mount are unused by the catalog path. Not a
+fallback: `CATALOG_DB` is required and the sqlite provider stays a coexisting, selectable
+provider (`src/db/index.ts`), which is the product's design and a decision for the user, not
+legacy this pass removed.
 
 ## Experiments — `x*` scripts, NOT part of the build
 

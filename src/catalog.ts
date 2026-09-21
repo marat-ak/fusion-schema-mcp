@@ -529,7 +529,7 @@ export async function findSimilarQueries(
  *  list of sibling datasets (fetch each by id). Id -> that exact row, at FULL size (this is how the
  *  caller pulls the SQL that findSimilarQueries omitted for being large — it returns the match's id). */
 export async function getReportQuery(arg: string) {
-  const isId = /^(sql:|view:)/.test(arg);
+  const isId = /^sql:/.test(arg); // every corpus id is sql:<hash> (v2026_10); view:/otbi: are reference paths in `reports`
   const r = isId ? await db().corpus.byId(arg) : await db().corpus.byTitle(arg);
   if (!r) {
     const suggestions = isId ? [] : await db().corpus.nearTitles(`%${arg}%`);

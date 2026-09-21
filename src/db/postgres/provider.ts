@@ -53,6 +53,14 @@ const TYPES = { int8: NUM(20), numeric: NUM(1700) };
 const POOL = { max: 8, connect_timeout: 10, idle_timeout: 10 };
 const STATEMENT_TIMEOUT_MS = 120_000;
 const IDLE_IN_TX_TIMEOUT_MS = 60_000;
+/** v2026_10 ships HNSW indexes on every searched embedding column (scripts/pipeline/p5_index.sql),
+ *  and the planner uses them. `PgCorpus.knn` is documented as EXACT — its `1 - d²/2` score must match
+ *  what sqlite-vec returned — and at pgvector's default `hnsw.ef_search = 40` recall@10 measured
+ *  95.0 % (one top-10 hit in twenty changes). 100 measured 100.0 % recall@10 for +0.08 ms per probe
+ *  on the 104k-vector table, so that is the value: the index buys the latency (1.45 ms vs 23 ms
+ *  exact) at no measured loss. Set per connection, here, because nothing else in the serving path
+ *  sets GUCs. */
+const HNSW_EF_SEARCH = "100";
 
 type Sql = postgres.Sql<{}>;
 
@@ -105,6 +113,7 @@ export class PostgresProvider extends BaseProvider {
         search_path: `${this.version}, ${CUSTOMER_SCHEMA}, ${META_SCHEMA}, ${this.vectorSchema}`,
         statement_timeout: STATEMENT_TIMEOUT_MS,
         idle_in_transaction_session_timeout: IDLE_IN_TX_TIMEOUT_MS,
+        "hnsw.ef_search": HNSW_EF_SEARCH,
       },
     });
   }

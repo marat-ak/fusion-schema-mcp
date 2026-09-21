@@ -8,6 +8,9 @@
 --   psql -v schemas='work,v2026_10' -f p7_own.sql
 -- A build that only rebuilds `work` must not reach into a release schema it did
 -- not produce; ownership is a write, even when the new owner equals the old one.
+-- THE OWNER IS EXPLICIT TOO (2026-09-21): `fusion_dev` in the build database, and
+-- `fusion` — the serving role — after a restore into the `fusion` database:
+--   psql -d fusion -v schemas='v2026_10' -v owner='fusion' -f p7_own.sql
 -- ============================================================================
 \set ON_ERROR_STOP on
 
@@ -15,14 +18,21 @@
 \else
   \set schemas 'work'
 \endif
+\if :{?owner}
+\else
+  \set owner 'fusion_dev'
+\endif
 
 DROP TABLE IF EXISTS pg_temp.own_targets;
 CREATE TEMP TABLE own_targets(s text);
 INSERT INTO own_targets SELECT btrim(unnest(string_to_array(:'schemas', ',')));
+DROP TABLE IF EXISTS pg_temp.own_owner;
+CREATE TEMP TABLE own_owner(o text);
+INSERT INTO own_owner VALUES (:'owner');
 
 DO $own$
 DECLARE
-  target text := 'fusion_dev';
+  target text := (SELECT o FROM own_owner);
   s text;
   r record;
 BEGIN

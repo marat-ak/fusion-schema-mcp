@@ -23,6 +23,27 @@ const RQ_UPDATE = RQ_COLUMNS.filter((c) => c !== "id").map((c) => `${c} = exclud
 export class PgCorpus extends BaseCorpus {
   constructor(protected p: PostgresProvider) { super(p); }
 
+  /**
+   * Exact title first — the base statement, unchanged ("largest SQL wins" among the datasets of
+   * one .xdm). On a miss, the REFERENCE titles: since v2026_10 every corpus row is one deduped
+   * statement keyed `sql:<hash>`, and `reports` carries one `{path, title, index}` object per L2
+   * unit that fed it (the old `otbi:`/`view:` ids as `path`, their titles as `title`). A title that
+   * belonged to a unit which lost the collision pick — 166 shipped titles — lives there and nowhere
+   * else. Two statements, not one, because the exact match is indexed and this scan is not.
+   */
+  async byTitle(title: string): Promise<T.CorpusRow | null> {
+    const exact = await super.byTitle(title);
+    if (exact) return exact;
+    const rows = await this.p.q<T.CorpusRow>(
+      `SELECT id, source, title, original_sql, clean_sql, description,
+              tables_used, joins, filters, lookup_types, security_predicate
+       FROM ${this.rq()}
+       WHERE reports IS NOT NULL AND reports <> '[]'
+         AND EXISTS (SELECT 1 FROM jsonb_array_elements(reports::jsonb) r WHERE r->>'title' = ?)
+       ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC LIMIT 1`, [title]);
+    return rows[0] ?? null;
+  }
+
   async knn(vec: Float32Array, k: number, opts: { source?: string; multi?: boolean } = {}): Promise<T.CorpusHit[]> {
     const v = this.p.vec(vec);
     if (opts.multi) {
