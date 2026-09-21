@@ -311,8 +311,22 @@ $W "OUTDIR=/root/gap-run ENRICH_DIR=/root/enrich-run JOURNALS=enrich_output.gap.
   with NO rule — `tablesConfirmed=false AND missingTables=[]` (91 on the 2026-08 run; measured,
   not acted on).
 
-Not done here, and now stale for every re-enriched statement: the `p4` vectors (slot 0 carries the
-table list AND the description, both of which moved). Re-embed those rows before a release.
+Then `p4_run.sh` — incremental since 2026-09-21, so it re-embeds exactly the statements whose text
+moved (slot 0 carries the table list AND the description). Run of 2026-09-21 after the recheck:
+2,897 owners changed → 11,564 vectors embedded, 23,121 unchanged (the August-text statements,
+byte-identical), 1 owner gone (4 rows deleted: `sql:883169ae…`, whose failed recheck line
+superseded its good August record — a last-wins casualty, see below), 2m21s over 12 shards.
+`work.embeddings`: 94,174 → 104,363 vectors, unit owners 23,471 → 26,018, every described
+statement has a vector. `p4_knn.mts` on three gap-described probes: same top-1 as the shipped
+corpus on 3/3, the gap statement surfaces at rank 5 (1099 distribution) and rank 6 (India GSTR1);
+the Israeli-withholding probe's top-10 is the ten pre-existing withholding data models (10/10
+overlap), the new row outside it.
+
+**Last-wins bites a failed line.** `qwen_record` keeps the last line per unit id, and a recheck
+line that FAILED replaces the successful record it was re-doing: `sql:883169ae…` had an August
+description and now has none (`enrich_ok = false`), so it lost its vector. One statement today;
+the rule (a failed generation should not supersede a good one) is a `p2_qwen_load.py` decision
+not taken here.
 
 **Run of 2026-09-21 — measured.** Gap run: 2,582 → 2,548 ok / 34 failed (20 client-wall
 timeouts, 14 truncated JSON; all giants at or near the 40,000 clip — they belong with the
@@ -448,7 +462,7 @@ because the two corpora differ in membership (23,746 rows there, 23,471 embeddab
 | `p2_recheck.sh`  | after an enrichment run: `load` (journal → record → promote → reconcile → report → own), `export` (grounding moved), `run` (enrich) — see *Recheck* | load 40 s |
 | `p3_rel.sql`     | `work.relationships` derived from `f_joins` + `meta_fkeys` | 6 s |
 | `p4_vectors.sql` | the `work.embeddings` table | 1 s |
-| `p4_run.sh`      | full deterministic re-embed, sharded (`p4_embed.mts` per shard) | 27 min / 12 shards |
+| `p4_run.sh`      | incremental re-embed by `text_hash`, sharded (`p4_embed.mts` per shard): embeds changed slots only, deletes stale slots / gone owners; full on an empty table | 27 min full / ~2 min incremental, 12 shards |
 | `p4_knn.mts`     | KNN probe of `work.embeddings` (+ `v2026_09` alongside) — p4's own gate, since p6 needs p5 | 40 s |
 | `p5_ddl.sh`      | create `v<ver>` from the PRODUCT's `scripts/pg-import/ddl.sql` | 2 s |
 | `p5_fill.sql`    | populate all 25 release tables from `work` | ~3 min |
@@ -619,4 +633,6 @@ schema.
 
 `work.embeddings` and `work.layout_pattern` exist only after `p4` runs — a fresh `work` has no
 vectors until `p4_vectors.sql` + `p4_run.sh` are run. The 2026-09-20 build ran them: 23,471 owners
-→ 93,950 unit vectors, plus 46 layout owners → 224, in 26m56s over 12 shards.
+→ 93,950 unit vectors, plus 46 layout owners → 224, in 26m56s over 12 shards. Since 2026-09-21
+`p4_embed.mts` is incremental by `text_hash` (the 46 layout owners are still re-embedded on every
+run by shard 0 — 224 vectors, seconds — and `work.layout_pattern` re-staged with them).

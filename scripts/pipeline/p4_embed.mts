@@ -24,9 +24,13 @@
  * Layout patterns use loadLayoutPatterns()'s own text shape: `${name}. ${description}`
  * then one per intent.
  *
- * Deterministic FULL re-embed — no vector is carried from an earlier build. The
- * text that produced each vector is recorded as md5(text) in `text_hash`, so any
- * later build can prove reuse instead of assuming it.
+ * INCREMENTAL BY text_hash (2026-09-21; it was a full re-embed before). `text_hash` is
+ * md5 of the EXACT text that produced a vector, so currency is decidable per slot: a
+ * slot is re-embedded only when its text (or the model) differs from the stored row;
+ * slots past an owner's new count (intents shrank) and owners that stopped being
+ * embeddable (description gone) are DELETED; an untouched slot is left alone. On an
+ * empty table this is the full build. Sharding is unchanged, so the comparison map is
+ * loaded per shard.
  *
  * Run (one shard per process; shards are disjoint and order-independent). The mount
  * point MUST be /app/scripts/pipeline so the ../../dist imports resolve the same way
@@ -72,17 +76,19 @@ async function flush(rows: Row[]) {
   }
 }
 
-/** Embed a batch of {ownerKind, ownerId, texts} and write every slot. */
-async function embedOwners(owners: { kind: string; id: string; texts: string[] }[]): Promise<number> {
+type Item = { slot: number; text: string };
+
+/** Embed a batch of {ownerKind, ownerId, items} and write exactly those slots. */
+async function embedOwners(owners: { kind: string; id: string; items: Item[] }[]): Promise<number> {
   const flat: string[] = [];
   const at: number[] = [];
-  for (const o of owners) { at.push(flat.length); flat.push(...o.texts); }
+  for (const o of owners) { at.push(flat.length); flat.push(...o.items.map((it) => it.text)); }
   const out: Row[] = [];
   const vecs: Float32Array[] = [];
   for (let i = 0; i < flat.length; i += EMBED_CHUNK) vecs.push(...(await embedBulk(flat.slice(i, i + EMBED_CHUNK))));
   owners.forEach((o, i) => {
-    o.texts.forEach((t, k) => {
-      out.push({ owner_kind: o.kind, owner_id: o.id, slot: k, text_hash: md5(t), model: MODEL, embedding: vecLit(vecs[at[i] + k]) });
+    o.items.forEach((it, k) => {
+      out.push({ owner_kind: o.kind, owner_id: o.id, slot: it.slot, text_hash: md5(it.text), model: MODEL, embedding: vecLit(vecs[at[i] + k]) });
     });
   });
   await flush(out);
@@ -117,20 +123,54 @@ const units = await sql<{ sql_hash: string; description: string; tables_used: st
 const embeddable = units.filter((u) => /\S/.test(u.description));
 log(`units in shard: ${embeddable.length} embeddable (${units.length - embeddable.length} dropped as blank description)`);
 
-let done = 0, vectors = 0;
+// what this shard already holds: owner -> slot -> text_hash (a vector from another model
+// is never current, so it is left out of the map and therefore re-embedded)
+const have = new Map<string, Map<number, string>>();
+for (const r of await sql<{ owner_id: string; slot: number; text_hash: string; model: string }[]>`
+  SELECT owner_id, slot, text_hash, model FROM work.embeddings
+  WHERE  owner_kind = 'unit'
+    AND  mod(('x' || substr(owner_id, 1, 7))::bit(28)::int, ${SHARDS}) = ${SHARD}`) {
+  if (r.model !== MODEL) continue;
+  let m = have.get(r.owner_id);
+  if (!m) have.set(r.owner_id, (m = new Map()));
+  m.set(r.slot, r.text_hash);
+}
+log(`existing in shard: ${have.size} owners`);
+
+let done = 0, vectors = 0, unchanged = 0, changedOwners = 0;
+const trim: { id: string; n: number }[] = [];   // owners whose slot count shrank: delete slot >= n
 const BATCH = 200;
 for (let i = 0; i < embeddable.length; i += BATCH) {
-  const owners = embeddable.slice(i, i + BATCH).map((u) => ({
-    kind: "unit",
-    id: u.sql_hash,
+  const owners: { kind: string; id: string; items: Item[] }[] = [];
+  for (const u of embeddable.slice(i, i + BATCH)) {
     // embedTexts() is the repo's own: description(+tables) first, then one per non-blank intent.
-    texts: embedTexts(u.description, [...(u.tables_used ?? [])].sort(), u.intents ?? []),
-  }));
-  vectors += await embedOwners(owners);
-  done += owners.length;
-  if ((i / BATCH) % 5 === 0) log(`units ${done}/${embeddable.length} vectors=${vectors}`);
+    const texts = embedTexts(u.description, [...(u.tables_used ?? [])].sort(), u.intents ?? []);
+    const cur = have.get(u.sql_hash);
+    const items = texts.map((text, slot) => ({ slot, text })).filter((it) => cur?.get(it.slot) !== md5(it.text));
+    const stale = cur ? [...cur.keys()].some((k) => k >= texts.length) : false;
+    if (stale) trim.push({ id: u.sql_hash, n: texts.length });
+    if (items.length === 0 && !stale) { unchanged++; continue; }
+    changedOwners++;
+    if (items.length) owners.push({ kind: "unit", id: u.sql_hash, items });
+  }
+  if (owners.length) vectors += await embedOwners(owners);
+  done += Math.min(BATCH, embeddable.length - i);
+  if ((i / BATCH) % 5 === 0) log(`units ${done}/${embeddable.length} changed=${changedOwners} unchanged=${unchanged} vectors=${vectors}`);
 }
-log(`units done: ${done} owners, ${vectors} vectors`);
+// slots an owner no longer has, and owners that are no longer embeddable at all
+let trimmed = 0, gone = 0;
+if (trim.length) {
+  const r = await sql`DELETE FROM work.embeddings e USING unnest(${sql.array(trim.map((t) => t.id))}::text[], ${sql.array(trim.map((t) => t.n))}::int[]) AS s(id, n)
+                      WHERE e.owner_kind = 'unit' AND e.owner_id = s.id AND e.slot >= s.n`;
+  trimmed = r.count;
+}
+const live = new Set(embeddable.map((u) => u.sql_hash));
+const goneIds = [...have.keys()].filter((id) => !live.has(id));
+if (goneIds.length) {
+  const r = await sql`DELETE FROM work.embeddings WHERE owner_kind = 'unit' AND owner_id = ANY(${sql.array(goneIds)}::text[])`;
+  gone = r.count;
+}
+log(`units done: ${embeddable.length} owners — ${changedOwners} changed (${vectors} vectors embedded), ${unchanged} unchanged, ${trimmed} stale slots deleted, ${goneIds.length} owners gone (${gone} rows deleted)`);
 
 // ------------------------------------------------------- layout patterns (shard 0 only)
 // The curated corpus is an INPUT to assembly, not a runtime load: 46 human-authored,
@@ -146,7 +186,7 @@ if (SHARD === 0) {
     kind: "layout",
     id: r.id as string,
     // loadLayoutPatterns()'s own text shape (src/corpus/layoutStore.ts)
-    texts: [`${r.name}. ${r.description}`, ...((r.intents ?? []) as string[])],
+    items: [`${r.name}. ${r.description}`, ...((r.intents ?? []) as string[])].map((text, slot) => ({ slot, text })),
   }));
   const n = await embedOwners(owners);
 
