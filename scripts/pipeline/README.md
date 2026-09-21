@@ -322,11 +322,16 @@ corpus on 3/3, the gap statement surfaces at rank 5 (1099 distribution) and rank
 the Israeli-withholding probe's top-10 is the ten pre-existing withholding data models (10/10
 overlap), the new row outside it.
 
-**Last-wins bites a failed line.** `qwen_record` keeps the last line per unit id, and a recheck
-line that FAILED replaces the successful record it was re-doing: `sql:883169ae…` had an August
-description and now has none (`enrich_ok = false`), so it lost its vector. One statement today;
-the rule (a failed generation should not supersede a good one) is a `p2_qwen_load.py` decision
-not taken here.
+**Last OK line wins (rule, 2026-09-21).** `qwen_record` used to keep the last line per unit id,
+so a recheck line that FAILED replaced the successful record it was re-doing (`sql:883169ae…`
+lost its August description and its vector). `p2_qwen_load.py` now lets a failed line supersede
+only while the id has no ok record in any journal; a permanent failure stays a failure. The
+reload restored TWO statements, not one: that recheck giant, and
+`otbi:Absence Management - Leave Donations Real Time__Worker`, whose August otbi file holds an
+ok line followed by a failed retry (last-line-wins had counted it as a failure, which is why it
+was in the gap cohort — where it failed again). Text generations: August 23,121 → 23,123, gap
+2,495, recheck 402; described statements 26,018 → **26,020**; `model_added` 890 / 401 unchanged;
+p4 re-embedded exactly those 2 owners (8 vectors) → 104,147 unit + 224 layout = 104,371.
 
 **Run of 2026-09-21 — measured.** Gap run: 2,582 → 2,548 ok / 34 failed (20 client-wall
 timeouts, 14 truncated JSON; all giants at or near the 40,000 clip — they belong with the
@@ -519,8 +524,8 @@ decisions it implements, and where each lands:
    23,121 August-generation rows. `semantics_json` is the whole winning payload as jsonb text
    (JS `JSON.stringify` spacing differs; readers parse it). `approved = 1` on every vendor row
    (what the product's own importer writes).
-3. **Membership = described statements only**: 26,018 = the embedding owners. Table-less rows
-   stay in. The 186 undescribed L3 rows are not shipped.
+3. **Membership = described statements only**: 26,020 = the embedding owners. Table-less rows
+   stay in. The 184 undescribed L3 rows are not shipped.
 
 Registries roll up over the SHIPPED corpus from `r_tables`/`f_joins`/`f_predicates`, so a
 dangling `table_usages` row is impossible by construction. `relationships` = `work.relationships`
@@ -537,13 +542,13 @@ switched: the build would set `version = 'v2026_10'` (with a `meta.seeds` row
 
 | item | v2026_09 | v2026_10 |
 |---|---|---|
-| `report_queries` | 23,746 | **26,018** (bip 8,744 · otbi 11,278 · view 5,996), all `sql:` ids |
-| descriptions on shared August-generation statements | — | **23,121 / 23,121 byte-identical** (mechanics and intents too); 375 re-enriched differ as expected |
+| `report_queries` | 23,746 | **26,020** after the last-OK-wins reload (26,018 on the first build: bip 8,744 · otbi 11,278 · view 5,996), all `sql:` ids |
+| descriptions on shared August-generation statements | — | **23,123 / 23,123 byte-identical** (mechanics and intents too); 375 re-enriched differ as expected |
 | tables / columns / pkeys / fkeys / indexes | 29,802 / 1,449,501 / 41,407 / 18,565 / 130,442 | identical, content EXCEPT = 0 both ways |
 | relationships | 14,009 | 28,055 |
 | `table_usages` (dangling) | 70,071 (13,682 dangling, 6,245 ids) | 63,061 (**0**) |
 | `table_predicates` / `table_join_columns` / `table_grain` | 15,736 / 15,972 / 3,792 | 15,459 / 15,664 / 3,792, dangling 0 |
-| vectors: `report_queries_vec_multi` + `layout_patterns_vec` | 95,614 + 224 | **104,139 + 224 = 104,363**; slot 0 = `embedding` on 26,018/26,018 |
+| vectors: `report_queries_vec_multi` + `layout_patterns_vec` | 95,614 + 224 | **104,147 + 224 = 104,371** (104,363 on the first build); slot 0 = `embedding` on every row |
 | filters / lookup_types / joins / tables_used non-empty | 0 / 0 / 17,213 / 23,163 | 15,864 / 6,523 / 17,634 / 25,312 |
 | `reports` non-empty | 11,455 (mixed shape) | 26,018 (one object shape) |
 | version stamps | — | all six written by the build, registry stamps = code constants |
@@ -559,11 +564,11 @@ the shipped rows' 0.86. The one difference between exact and HNSW is a top-1 fli
 fixed-assets probe (3/6 exact vs 2/6 HNSW) — the documented 95 % recall at `hnsw.ef_search = 40`.
 
 **Gaps, reported not papered over:**
-- **161 shipped v2026_09 rows are not in v2026_10** (bip 156 / otbi 1 / view 4). Every one maps
-  to an L3 row (p8 §1: 0 unreachable); they are absent because they have no generation-2
-  description: 144 bip are the `dynamic_lexical` exclusion (v2026_09 carried gen-1 text for them,
-  which is out by rule), 17 are enrichment failures (11 bip + 1 otbi + 4 view from the gap run,
-  1 bip from the recheck — the truncated-JSON giants).
+- **159 shipped v2026_09 rows are not in v2026_10** (161 before the last-OK-wins reload). Every
+  one maps to an L3 row (p8 §1: 0 unreachable); they are absent because they have no
+  generation-2 description: 144 bip are the `dynamic_lexical` exclusion (v2026_09 carried gen-1
+  text for them, which is out by rule), 15 are enrichment failures from the gap run (11 bip + 4
+  view — the truncated-JSON / timed-out giants).
 - 166 shipped titles no longer resolve via `byTitle` (above, item 1).
 - `col_vec` carried, `flexfields`/`adf_extensions` carried (our demo pod's configuration in a
   vendor schema — flagged in the script since the first build).

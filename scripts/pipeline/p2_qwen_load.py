@@ -37,9 +37,13 @@ RECORD SHAPE (enrich_client.py:210) — `{id, source, ok, ghash, result, usage}`
           inferred or defaulted here — a model name guessed for a 2026-08 record would
           be a fabrication wearing the shape of provenance.
 
-LAST LINE PER ID WINS. The files are append-mode resume logs: a failed call is retried
-by appending, and `is_done()` skips on a later run. 406 otbi ids have more than one
-line. Counting lines instead of ids is what produced the "388 differing rows" ghost.
+LAST OK LINE PER ID WINS (rule, 2026-09-21). The files are append-mode resume logs: a
+failed call is retried by appending, and `is_done()` skips on a later run. 406 otbi ids
+have more than one line. Counting lines instead of ids is what produced the "388
+differing rows" ghost. A FAILED line supersedes only while the id has no ok record in
+any journal: a later generation's failure (the recheck's truncated-JSON giant) must not
+erase the good text an earlier generation produced, and a permanent failure — an id
+that never succeeded — stays recorded as a failure.
 
 EXTRA JOURNALS (2026-09-21). Later runs — the gap run, the recheck run — append to the
 same table through the same door: `EXTRA_FILES` is a comma-separated list of absolute
@@ -168,6 +172,9 @@ def main():
                             if t:
                                 claims.append((uid, f, n, d.get("run_id"), d.get("ghash"), kind, t, tc))
                 prev = best.get(uid)
+                if not is_ok and prev and prev["ok"]:
+                    prev["n_lines"] += 1        # a failed line never supersedes an ok record
+                    continue
                 best[uid] = {
                     "unit_id": uid,
                     "src_file": f,
