@@ -465,7 +465,7 @@ because the two corpora differ in membership (23,746 rows there, 23,471 embeddab
 | `p4_run.sh`      | incremental re-embed by `text_hash`, sharded (`p4_embed.mts` per shard): embeds changed slots only, deletes stale slots / gone owners; full on an empty table | 27 min full / ~2 min incremental, 12 shards |
 | `p4_knn.mts`     | KNN probe of `work.embeddings` (+ `v2026_09` alongside) — p4's own gate, since p6 needs p5 | 40 s |
 | `p5_ddl.sh`      | create `v<ver>` from the PRODUCT's `scripts/pg-import/ddl.sql` | 2 s |
-| `p5_fill.sql`    | populate all 25 release tables from `work` | ~3 min |
+| `p5_fill.sql`    | populate all 25 release tables from `work` (described statements, `sql:` ids, parse-derived fact columns, `r_tables` registries) | 72 s |
 | `p5_index.sql`   | pgvector index on every embedding column | |
 | `p6_verify.sql`  | the release gate: counts, content equality, dangling, stamps | 2 min |
 | `p6_knn.mts`     | exact-KNN spot check through the serving statement | 30 s |
@@ -488,23 +488,85 @@ wsl -d CloudBeaver -u root -e bash -lc 'bash /mnt/c/.../scripts/pipeline/p5_ddl.
 
 Heredocs and inline SQL through the WSL bridge mangle quoting — always `docker cp` a file.
 
-### p5–p6 are STALE against the current `work` shape
+### The release build — `v2026_10`, built 2026-09-21
 
-`p0`–`p4` and `p7`–`p8` are current. `p4` was stale too until 2026-09-20 — it read a
-`clear_sql.tables_used` column that `p2_merge.sql` wrote and `p2_promote.sql` does not, so it
-could not run at all; it now takes slot 0’s table list from `work.r_tables` (above).
+`p5_fill.sql` was reworked onto the promoted columns and `r_tables` (it read columns
+`p2_merge.sql` used to write, `f_tables`, and the old mixed `reports` shape). The user
+decisions it implements, and where each lands:
 
-`p5_fill.sql` still reads the merged-enrichment columns that
-`p2_merge.sql` used to write (`tables_used`, `joins`, `filters`, `lookup_types`,
-`security_predicate`, `semantics_json`, `low_confidence`) and will fail against the columns
-`p2_promote.sql` writes instead. It also reads `work.f_tables` directly, which is now the wrong
-source — the registries must be built from **`work.r_tables`** — and `clear_sql.reports` is
-`[{path,index}]` now, not the old mixed shape. The 2026-09-20 pass rebuilt `work` only, by
-instruction, and did not run or rewrite the release steps. **Do not run `p5`/`p6` before reworking
-`p5_fill.sql`** onto the promoted columns and `r_tables` — and decide there what
-`report_queries.tables_used/.joins/.filters` should be served from now that the merged enrichment is
-gone and only parse facts remain.
+1. **Corpus ids = `sql:<sql_hash>` for every source.** bip already was; otbi and view switch.
+   The old ids are kept as REFERENCE rows in `reports`: ONE shape for all sources,
+   `T.ReportRef` objects `{path, title, index}` (`src/db/base/enrich.ts` parses the column as
+   `ReportRef[]`) — bip keeps exactly today's semantics (the crawl's `unit_ref` paths,
+   `title = path`), and every other L2 unit that fed the statement (`otbi:<subject>__<item>`,
+   `view:<NAME>`, `catalog:<path>#<seq>`) is a reference row with `path` = that old unit id and
+   `title` = the unit's title. Capped at 50 per row — the cap `import_serving.mjs` applied
+   (`paths.slice(0, 50)`); one otbi statement is shared by 14,009 units and 241 rows hit the cap;
+   the full set is `work.sql_unit`. **For the PG-provider step:** `catalog.ts getReportQuery`
+   tests `/^(sql:|view:)/` — every id is `sql:` now so it keeps working, but `view:` no longer
+   names a row, and 67 otbi + 81 view + 18 bip shipped TITLES no longer resolve through
+   `byTitle` (the title now lives on the hash's primary unit; a colliding unit's title is in
+   `reports`/`l2_titles` only). Serving code was not touched.
+2. **`tables_used` / `joins` / `filters` / `lookup_types` from the PARSE.** `tables_used` =
+   `work.r_tables` (reconciled), physical objects, artifacts dropped, codepoint order; `joins` =
+   `work.f_joins` as `FROM_T.FROM_C=TO_T.TO_C[TYPE]` (v2026_09's string shape); `filters` =
+   `work.f_predicates` in `where`/`join` position only (a predicate inside a CASE or a subquery
+   is not a filter of the statement), as `TABLE.COLUMN <op> literal`, statement order,
+   de-duplicated; `lookup_types` = the literals of `EQ`/`IN` predicates on a column named exactly
+   `LOOKUP_TYPE`, IN-lists split on commas, quotes stripped, sorted. **`security_predicate` stays
+   NULL — not decided**, empty exactly as v2026_09 shipped it. `mechanics` and `low_confidence`
+   reproduce `import_serving.mjs` (`work.mechanics_of`) — byte-identical to v2026_09 on all
+   23,121 August-generation rows. `semantics_json` is the whole winning payload as jsonb text
+   (JS `JSON.stringify` spacing differs; readers parse it). `approved = 1` on every vendor row
+   (what the product's own importer writes).
+3. **Membership = described statements only**: 26,018 = the embedding owners. Table-less rows
+   stay in. The 186 undescribed L3 rows are not shipped.
 
+Registries roll up over the SHIPPED corpus from `r_tables`/`f_joins`/`f_predicates`, so a
+dangling `table_usages` row is impossible by construction. `relationships` = `work.relationships`
+(28,055: 18,687 mined from `f_joins` + 9,368 declared from `meta_fkeys`); the p6 content-equality
+row for it reports a full diff against v2026_09 BY DESIGN (that table carried the excluded OTBI
+crawl tier and convention-mined edges). `col_vec` is carried from v2026_09 (953 rows) and
+flagged in the script: it is a content-hash cache with no `work` input. There is no
+`report_queries_fts` anywhere in the product DDL or serving code (only the generated
+`tables.search` column, filled on insert) — nothing to build. `meta.active_version` is NOT
+switched: the build would set `version = 'v2026_10'` (with a `meta.seeds` row
+`embedding_model = bge-small-en-v1.5-384`, `ddl_version = 2`).
+
+**Measured (p6 / p6_knn / p8), before → after where comparable:**
+
+| item | v2026_09 | v2026_10 |
+|---|---|---|
+| `report_queries` | 23,746 | **26,018** (bip 8,744 · otbi 11,278 · view 5,996), all `sql:` ids |
+| descriptions on shared August-generation statements | — | **23,121 / 23,121 byte-identical** (mechanics and intents too); 375 re-enriched differ as expected |
+| tables / columns / pkeys / fkeys / indexes | 29,802 / 1,449,501 / 41,407 / 18,565 / 130,442 | identical, content EXCEPT = 0 both ways |
+| relationships | 14,009 | 28,055 |
+| `table_usages` (dangling) | 70,071 (13,682 dangling, 6,245 ids) | 63,061 (**0**) |
+| `table_predicates` / `table_join_columns` / `table_grain` | 15,736 / 15,972 / 3,792 | 15,459 / 15,664 / 3,792, dangling 0 |
+| vectors: `report_queries_vec_multi` + `layout_patterns_vec` | 95,614 + 224 | **104,139 + 224 = 104,363**; slot 0 = `embedding` on 26,018/26,018 |
+| filters / lookup_types / joins / tables_used non-empty | 0 / 0 / 17,213 / 23,163 | 15,864 / 6,523 / 17,634 / 25,312 |
+| `reports` non-empty | 11,455 (mixed shape) | 26,018 (one object shape) |
+| version stamps | — | all six written by the build, registry stamps = code constants |
+| ownership | — | `fusion_dev` on all 28 objects (`p7_own.sql -v schemas='work,v2026_10'`) |
+| build time | — | p5_fill 1m12s, HNSW indexes 197 MB + 51 MB + 456 kB |
+
+**KNN (`p6_knn.mts`, the same six probes as `p4_knn.mts`): mean top-10 overlap 6.8/10, same
+top-1 on 2/6** — down from 9.0/10, and the whole drop is MEMBERSHIP, not the index: `p4_knn.mts`
+(exact scan over the same 26,018 owners) gives the identical 6.8/10; the non-overlapping hits
+are the newly described gap statements — on "general ledger journal lines" nine of the ten are
+new bip datamodels ("Journal Drill Down Information YTD", "GLJeLines2DM", …) scoring 0.90 against
+the shipped rows' 0.86. The one difference between exact and HNSW is a top-1 flip on the
+fixed-assets probe (3/6 exact vs 2/6 HNSW) — the documented 95 % recall at `hnsw.ef_search = 40`.
+
+**Gaps, reported not papered over:**
+- **161 shipped v2026_09 rows are not in v2026_10** (bip 156 / otbi 1 / view 4). Every one maps
+  to an L3 row (p8 §1: 0 unreachable); they are absent because they have no generation-2
+  description: 144 bip are the `dynamic_lexical` exclusion (v2026_09 carried gen-1 text for them,
+  which is out by rule), 17 are enrichment failures (11 bip + 1 otbi + 4 view from the gap run,
+  1 bip from the recheck — the truncated-JSON giants).
+- 166 shipped titles no longer resolve via `byTitle` (above, item 1).
+- `col_vec` carried, `flexfields`/`adf_extensions` carried (our demo pod's configuration in a
+  vendor schema — flagged in the script since the first build).
 
 ## Experiments — `x*` scripts, NOT part of the build
 

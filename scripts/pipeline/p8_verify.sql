@@ -34,18 +34,25 @@ FROM   v2026_09.report_queries r JOIN work.sql_unit u ON u.unit_id = r.id
 WHERE  r.source = 'bip-report';
 
 \echo '=== 3. descriptions: shipped vs freshly loaded, where the SAME unit won ==='
--- Same unit_id on both sides => the same JSONL record => the text must be identical.
--- A difference here means the release was edited after import, or the load is wrong.
-SELECT count(*)                                                  AS comparable_rows,
+-- Same unit_id on both sides => the same JSONL record => the text must be identical —
+-- for the 2026-08 GENERATION (qwen_record.run_id IS NULL). A statement re-enriched by
+-- the gap or recheck run keeps its unit id but carries new text: counted apart, and
+-- expected to differ. A difference in the August row means the release was edited
+-- after import, or the load is wrong.
+SELECT CASE WHEN q.run_id IS NULL THEN 'august generation' ELSE 're-enriched (' || split_part(q.run_id, '-', 1) || ')' END AS generation,
+       count(*)                                                  AS comparable_rows,
        count(*) FILTER (WHERE c.description = r.description)     AS byte_identical,
        count(*) FILTER (WHERE c.description IS DISTINCT FROM r.description) AS differs
 FROM   work.clear_sql c
+JOIN   work.qwen_record q ON q.unit_id = c.src_enrich_unit
 JOIN   v2026_09.report_queries r ON r.id = c.src_enrich_unit
-WHERE  c.description IS NOT NULL AND r.description IS NOT NULL;
+WHERE  c.description IS NOT NULL AND r.description IS NOT NULL
+GROUP  BY 1 ORDER BY 1;
 
 \echo '=== 3b. sample of any differing descriptions ==='
 SELECT c.src_enrich_unit, left(c.description, 90) AS rebuilt, left(r.description, 90) AS shipped
 FROM   work.clear_sql c
+JOIN   work.qwen_record q ON q.unit_id = c.src_enrich_unit AND q.run_id IS NULL
 JOIN   v2026_09.report_queries r ON r.id = c.src_enrich_unit
 WHERE  c.description IS NOT NULL AND r.description IS NOT NULL
   AND  c.description IS DISTINCT FROM r.description
@@ -76,8 +83,9 @@ WHERE  c.rewritten_sql IS NOT NULL AND r.clean_sql IS NOT NULL;
 \echo '=== 6. what the release ships that this build does NOT (the honest loss list) ==='
 SELECT 'report_queries rows'  AS item, (SELECT count(*) FROM v2026_09.report_queries)                AS v2026_09,
        (SELECT count(*) FROM work.clear_sql WHERE src_enrich_unit IS NOT NULL)                       AS work_rebuilt
-UNION ALL SELECT 'lookup_types non-empty',
-       (SELECT count(*) FROM v2026_09.report_queries WHERE lookup_types NOT IN ('', '[]')), 0
+UNION ALL SELECT 'lookup_types non-empty (work: statements with a LOOKUP_TYPE predicate)',
+       (SELECT count(*) FROM v2026_09.report_queries WHERE lookup_types NOT IN ('', '[]')),
+       (SELECT count(DISTINCT sql_hash) FROM work.f_predicates WHERE column_name = 'LOOKUP_TYPE' AND op IN ('EQ','IN'))
 UNION ALL SELECT 'security_predicate non-empty',
        (SELECT count(*) FROM v2026_09.report_queries WHERE coalesce(security_predicate,'') <> ''), 0
 UNION ALL SELECT 'reports non-empty (MIXED shape: 176 bip objects + 11,279 otbi strings)',
