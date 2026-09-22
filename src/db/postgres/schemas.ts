@@ -30,6 +30,7 @@ const ROLE: Record<TableName, Role> = {
   relationships: "version", meta: "version",
   table_grain: "version", grain_meta: "version", table_usages: "version", usage_meta: "version",
   table_predicates: "version", pred_meta: "version", table_join_columns: "version",
+  plsql_packages: "version", plsql_api: "version", plsql_api_tables: "version", plsql_meta: "version",
   layout_patterns: "version", layout_patterns_vec: "version", layout_meta: "version",
   // rebuildable embedding cache: ddl_version 1 puts it in the version schema; an upgrade re-embeds
   col_vec: "version",

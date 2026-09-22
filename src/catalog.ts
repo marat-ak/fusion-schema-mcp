@@ -201,6 +201,58 @@ export async function mostlyUsedStats(name: string) {
   if (f.length) out.mostlyUsedFilters = f;
   const j = await db().corpus.joinColumnStats(n, 8);
   if (j.length) out.mostlyUsedJoinFilters = j;
+  // Oracle-shipped PL/SQL APIs real reports call ALONGSIDE this table (pipeline-built inventory):
+  // the grounding for "call the official package instead of re-deriving its logic with joins".
+  // Bounded (5, >= 2 statements); the full list + sample calls come from findPlsqlApi({table}).
+  const a = (await db().plsql.forTable(n, 5)).filter((r) => r.table_statements >= 2);
+  if (a.length) out.mostlyUsedApis = a.map((r) => ({ api: `${r.package_name}.${r.function_name}`, statements: r.table_statements, share: r.share }));
+  return out;
+}
+
+const parseJson = (s: string | null): unknown => { if (!s) return null; try { return JSON.parse(s); } catch { return null; } };
+
+/** Wire shape of one inventory row: the id of each sample is fetchable via getReportQuery({id}). */
+function plsqlApiOut(r: { package_name: string; function_name: string; api_class: string; module: string | null; in_dictionary: number; statements: number; units: number; reports: number; arg_counts: string | null; found_in: string | null; top_tables: string | null; samples: string | null }) {
+  const samples = (parseJson(r.samples) as { snippet: string; sql_hash: string; source: string; title: string }[] | null) ?? [];
+  return {
+    api: `${r.package_name}.${r.function_name}`,
+    class: r.api_class, module: r.module, inDictionary: r.in_dictionary === 1,
+    statements: r.statements, units: r.units, reports: r.reports,
+    argCounts: parseJson(r.arg_counts), foundIn: parseJson(r.found_in),
+    topTables: parseJson(r.top_tables),
+    sampleCalls: samples.map((s) => ({ call: s.snippet, id: `sql:${s.sql_hash}`, source: s.source, title: s.title })),
+  };
+}
+
+/** PL/SQL API inventory lookup — by business word(s) in the name, by package, or by table. */
+export async function findPlsqlApi(q: { query?: string; package?: string; table?: string; limit?: number }) {
+  const limit = Math.max(1, Math.min(q.limit ?? 12, 40));
+  const out: any = {
+    source: "Oracle-shipped report SQL corpus; statements = distinct real SQL statements calling the api; " +
+      "fetch a sample's full SQL with getReportQuery({id}).",
+  };
+  if (q.package) {
+    const pkg = normName(q.package);
+    const p = await db().plsql.package(pkg);
+    out.package = p
+      ? { name: p.package_name, exists: true, inDictionary: p.in_dictionary === 1, class: p.api_class, module: p.module, functionsSeen: p.functions, statements: p.statements }
+      : { name: pkg, exists: false, suggestions: (await db().plsql.packagesLike(pkg.split("_").filter(Boolean).slice(0, 2), 8)).map((x) => x.package_name) };
+    out.apis = (await db().plsql.apisOfPackage(pkg, limit)).map(plsqlApiOut);
+    if (p && p.statements === 0) out.note = "the package exists on the pod (vendor dictionary) but no shipped report calls it — its signature is not in the corpus; ground the call shape from Oracle docs or a WITH FUNCTION wrapper you validate by running it.";
+  }
+  if (q.table) {
+    const t = normName(q.table);
+    out.table = t;
+    out.apisWithTable = (await db().plsql.forTable(t, limit)).map((r) => ({ ...plsqlApiOut(r), statementsWithTable: r.table_statements, share: r.share }));
+  }
+  if (q.query) {
+    const tokens = ftsSanitize(q.query);
+    out.query = tokens;
+    out.apis = (await db().plsql.search(tokens, limit)).map(plsqlApiOut);
+    const pk = await db().plsql.packagesLike(tokens, 10);
+    if (pk.length) out.packages = pk.map((p) => ({ name: p.package_name, class: p.api_class, module: p.module, functionsSeen: p.functions, statements: p.statements, inDictionary: p.in_dictionary === 1 }));
+  }
+  if (!q.package && !q.table && !q.query) out.error = "pass `query` (words of the business computation: quantity, convert, format name, rate…), `package`, or `table`";
   return out;
 }
 

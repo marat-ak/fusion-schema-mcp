@@ -176,6 +176,19 @@ SELECT 'table_grain.table_name -> tables.name', count(*), (SELECT count(*) FROM 
 FROM   v2026_10.table_grain g
 WHERE  NOT EXISTS (SELECT 1 FROM v2026_10.tables t WHERE t.name = g.table_name)
 UNION ALL
+SELECT 'plsql_api_tables.table_name -> tables.name', count(*), (SELECT count(*) FROM v2026_10.plsql_api_tables)
+FROM   v2026_10.plsql_api_tables p
+WHERE  NOT EXISTS (SELECT 1 FROM v2026_10.tables t WHERE t.name = p.table_name)
+UNION ALL
+SELECT 'plsql_api_tables -> plsql_api', count(*), (SELECT count(*) FROM v2026_10.plsql_api_tables)
+FROM   v2026_10.plsql_api_tables p
+WHERE  NOT EXISTS (SELECT 1 FROM v2026_10.plsql_api a WHERE a.package_name = p.package_name AND a.function_name = p.function_name)
+UNION ALL
+SELECT 'plsql_api.samples[].sql_hash -> report_queries.id', count(*),
+       (SELECT count(*) FROM v2026_10.plsql_api a, jsonb_array_elements(a.samples::jsonb) s)
+FROM   v2026_10.plsql_api a, jsonb_array_elements(a.samples::jsonb) s
+WHERE  NOT EXISTS (SELECT 1 FROM v2026_10.report_queries q WHERE q.id = 'sql:' || (s->>'sql_hash'))
+UNION ALL
 SELECT 'enrich.id -> report_queries.id', count(*), (SELECT count(*) FROM v2026_10.enrich)
 FROM   v2026_10.enrich e
 WHERE  NOT EXISTS (SELECT 1 FROM v2026_10.report_queries q WHERE q.id = e.id)
@@ -222,6 +235,7 @@ UNION ALL SELECT 'usage_meta',  k, v FROM v2026_10.usage_meta
 UNION ALL SELECT 'pred_meta',   k, v FROM v2026_10.pred_meta
 UNION ALL SELECT 'layout_meta', k, v FROM v2026_10.layout_meta
 UNION ALL SELECT 'facts_meta',  k, v FROM v2026_10.facts_meta
+UNION ALL SELECT 'plsql_meta',  k, v FROM v2026_10.plsql_meta
 ORDER BY 1, 2;
 
 \echo '--- registry stamps must match the code constants that gate a boot rebuild ---'
@@ -237,6 +251,7 @@ WITH want(t) AS (VALUES
   ('report_queries'),('report_queries_vec_multi'),
   ('table_grain'),('grain_meta'),('table_usages'),('usage_meta'),('table_predicates'),('pred_meta'),
   ('table_join_columns'),('layout_patterns'),('layout_patterns_vec'),('layout_meta'),
+  ('plsql_packages'),('plsql_api'),('plsql_api_tables'),('plsql_meta'),
   ('flexfields'),('adf_extensions'),('enrich'),('col_vec'),('table_rules'),('facts_meta'))
 SELECT w.t AS required_table,
        EXISTS (SELECT 1 FROM information_schema.tables i

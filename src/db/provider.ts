@@ -77,6 +77,21 @@ export interface RegistriesApi {
   replaceAll(kind: T.RegistryKind, rows: unknown[]): Promise<{ rows: number }>;
 }
 
+export interface PlsqlApi {
+  /** apis co-occurring with a table, most-called first (the pushed `mostlyUsedApis` + findPlsqlApi({table})) */
+  forTable(table: string, limit: number): Promise<T.PlsqlApiForTable[]>;
+  /** name search: every token must appear in PACKAGE.FUNCTION (upper-cased), most-called first */
+  search(tokens: string[], limit: number): Promise<T.PlsqlApiRow[]>;
+  apisOfPackage(pkg: string, limit: number): Promise<T.PlsqlApiRow[]>;
+  package(pkg: string): Promise<T.PlsqlPackageRow | null>;
+  /** package-name search over the dictionary ∪ corpus packages (an unused package still resolves) */
+  packagesLike(tokens: string[], limit: number): Promise<T.PlsqlPackageRow[]>;
+  counts(): Promise<{ packages: number; apis: number; apiTables: number }>;
+  version(): Promise<string | null>;
+  /** Full rebuild of the four tables in one transaction (the upgrade job / tests; never boot). */
+  replaceAll(pkgs: T.PlsqlPackageRow[], apis: T.PlsqlApiRow[], apiTables: T.PlsqlApiTableRow[], version: string): Promise<{ packages: number; apis: number; apiTables: number }>;
+}
+
 export interface FlexApi {
   replaceSnapshot(kind: T.FlexKind, source: string, rows: unknown[]): Promise<number>;
   queryFlexfields(q: T.FlexQuery, limit: number): Promise<any[]>;
@@ -148,7 +163,7 @@ export interface ColCacheApi {
 }
 
 export interface CatalogProvider {
-  meta: MetaApi; schema: SchemaApi; corpus: CorpusApi; registries: RegistriesApi; flex: FlexApi;
+  meta: MetaApi; schema: SchemaApi; corpus: CorpusApi; registries: RegistriesApi; plsql: PlsqlApi; flex: FlexApi;
   layout: LayoutApi; rules: RulesApi; enrich: EnrichApi; colCache: ColCacheApi;
   /** rev poll hook (per request): reload the active version + name snapshot when they moved. No-op on sqlite. */
   refreshIfMoved(): Promise<boolean>;

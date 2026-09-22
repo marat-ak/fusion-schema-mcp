@@ -25,6 +25,7 @@ import postgres from "postgres";
 import { BaseProvider, type RunResult, type TableName } from "../base/provider.js";
 import { BaseColCache } from "../base/colCache.js";
 import { BaseRegistries } from "../base/registries.js";
+import { BasePlsql } from "../base/plsql.js";
 import { PgMeta } from "./meta.js";
 import { PgSchema } from "./schema.js";
 import { PgCorpus } from "./corpus.js";
@@ -75,6 +76,7 @@ export class PostgresProvider extends BaseProvider {
   schema: PgSchema = new PgSchema(this);
   corpus: PgCorpus = new PgCorpus(this);
   registries: BaseRegistries = new BaseRegistries(this);
+  plsql: BasePlsql = new BasePlsql(this);
   flex: PgFlex = new PgFlex(this);
   layout: PgLayout = new PgLayout(this);
   rules: PgRules = new PgRules(this);

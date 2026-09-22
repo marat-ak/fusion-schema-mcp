@@ -64,6 +64,45 @@ export const DDL_REPORTS = `
   );
   CREATE INDEX IF NOT EXISTS main.ix_table_predicates ON table_predicates(table_name);
   CREATE TABLE IF NOT EXISTS main.pred_meta (k TEXT PRIMARY KEY, v TEXT);
+  CREATE TABLE IF NOT EXISTS main.plsql_packages (
+    package_name  TEXT PRIMARY KEY,
+    api_class     TEXT NOT NULL,
+    in_dictionary INTEGER NOT NULL DEFAULT 0,
+    module        TEXT,
+    module_source TEXT,
+    functions     INTEGER NOT NULL DEFAULT 0,
+    statements    INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS main.plsql_api (
+    package_name  TEXT NOT NULL,
+    function_name TEXT NOT NULL,
+    api_class     TEXT NOT NULL,
+    module        TEXT,
+    module_source TEXT,
+    in_dictionary INTEGER NOT NULL DEFAULT 0,
+    statements    INTEGER NOT NULL DEFAULT 0,
+    units         INTEGER NOT NULL DEFAULT 0,
+    reports       INTEGER NOT NULL DEFAULT 0,
+    titles        INTEGER NOT NULL DEFAULT 0,
+    by_source     TEXT,
+    arg_counts    TEXT,
+    found_in      TEXT,
+    top_tables    TEXT,
+    top_modules   TEXT,
+    samples       TEXT,
+    PRIMARY KEY (package_name, function_name)
+  );
+  CREATE INDEX IF NOT EXISTS main.ix_plsql_api_stmts ON plsql_api(statements DESC);
+  CREATE TABLE IF NOT EXISTS main.plsql_api_tables (
+    package_name  TEXT NOT NULL,
+    function_name TEXT NOT NULL,
+    table_name    TEXT NOT NULL,
+    statements    INTEGER NOT NULL,
+    share         REAL NOT NULL,
+    PRIMARY KEY (package_name, function_name, table_name)
+  );
+  CREATE INDEX IF NOT EXISTS main.ix_plsql_api_tables_t ON plsql_api_tables(table_name, statements DESC);
+  CREATE TABLE IF NOT EXISTS main.plsql_meta (k TEXT PRIMARY KEY, v TEXT);
 
   CREATE TABLE IF NOT EXISTS main.layout_patterns (
     rowid INTEGER PRIMARY KEY,

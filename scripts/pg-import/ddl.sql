@@ -1,5 +1,5 @@
 -- fusion database DDL (spec 2026-09-16 D13, plan decisions 2026-09-18): schema-per-version catalog.
--- ddl_version: 2
+-- ddl_version: 3
 --
 -- Blocks (applied by import.mts, in this order):
 --   @block meta    — schema `meta`: seeds + the single-row active_version pointer
@@ -254,6 +254,52 @@ CREATE TABLE IF NOT EXISTS {{V}}.table_join_columns (
   share       double precision NOT NULL,
   PRIMARY KEY (table_name, column_name)
 );
+
+-- PL/SQL API inventory (ddl_version 3): which Oracle-shipped packages/functions real report SQL
+-- calls, rolled up from the pinned call facts (scripts/pipeline/p3_calls.* → p5_plsql.sql).
+-- plsql_packages = the vendor dictionary's PACKAGE objects ∪ every package the corpus calls
+-- (statements = 0 ⇒ exists on the pod, no shipped report calls it); plsql_api = one row per
+-- package.function with usage stats + sample calls; plsql_api_tables = api × table co-occurrence
+-- (share = statements calling the api AND reading the table / statements reading the table).
+CREATE TABLE IF NOT EXISTS {{V}}.plsql_packages (
+  package_name  text PRIMARY KEY,
+  api_class     text NOT NULL,            -- fusion | oracle | custom
+  in_dictionary integer NOT NULL DEFAULT 0,
+  module        text,
+  module_source text,                     -- prefix | usage
+  functions     integer NOT NULL DEFAULT 0,
+  statements    integer NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS {{V}}.plsql_api (
+  package_name  text NOT NULL,
+  function_name text NOT NULL,
+  api_class     text NOT NULL,
+  module        text,
+  module_source text,
+  in_dictionary integer NOT NULL DEFAULT 0,
+  statements    integer NOT NULL DEFAULT 0,   -- distinct L3 statements calling it
+  units         integer NOT NULL DEFAULT 0,   -- distinct L2 source units
+  reports       integer NOT NULL DEFAULT 0,   -- distinct BIP catalog paths
+  titles        integer NOT NULL DEFAULT 0,
+  by_source     text,            -- JSON object (text): {"bip-report": n, "otbi": n, "view": n}
+  arg_counts    text,            -- JSON object (text): {"<argc>": n}
+  found_in      text,            -- JSON object (text): {"sql": n, "plsql": n}
+  top_tables    text,            -- JSON array (text): [{table, statements}]
+  top_modules   text,            -- JSON array (text): [{module, statements}]
+  samples       text,            -- JSON array (text): [{snippet, sql_hash, source, title}]
+  PRIMARY KEY (package_name, function_name)
+);
+CREATE INDEX IF NOT EXISTS ix_plsql_api_stmts ON {{V}}.plsql_api (statements DESC);
+CREATE TABLE IF NOT EXISTS {{V}}.plsql_api_tables (
+  package_name  text NOT NULL,
+  function_name text NOT NULL,
+  table_name    text NOT NULL,
+  statements    integer NOT NULL,
+  share         double precision NOT NULL,
+  PRIMARY KEY (package_name, function_name, table_name)
+);
+CREATE INDEX IF NOT EXISTS ix_plsql_api_tables_t ON {{V}}.plsql_api_tables (table_name, statements DESC);
+CREATE TABLE IF NOT EXISTS {{V}}.plsql_meta (k text PRIMARY KEY, v text);
 
 CREATE TABLE IF NOT EXISTS {{V}}.table_grain (
   table_name      text PRIMARY KEY,

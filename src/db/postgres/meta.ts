@@ -5,7 +5,7 @@ import type { TableName } from "../base/provider.js";
 import type { PostgresProvider } from "./provider.js";
 
 /** The `ddl_version` header of scripts/pg-import/ddl.sql this code is written against. */
-export const EXPECTED_DDL_VERSION = "2"; // v2: punctuation-stripped tsvector (FTS5 tokenizer parity)
+export const EXPECTED_DDL_VERSION = "3"; // v2: punctuation-stripped tsvector (FTS5 tokenizer parity); v3: plsql_* inventory tables
 /** The library migrations (./ddl.ts) a serving database must already carry. */
 export const EXPECTED_LIBRARY_VERSION = 1;
 
@@ -13,6 +13,7 @@ const ALL_TABLES: TableName[] = [
   "tables", "columns", "pkeys", "fkeys", "indexes", "relationships", "meta",
   "report_queries", "report_queries_vec_multi",
   "table_grain", "grain_meta", "table_usages", "usage_meta", "table_predicates", "pred_meta", "table_join_columns",
+  "plsql_packages", "plsql_api", "plsql_api_tables", "plsql_meta",
   "layout_patterns", "layout_patterns_vec", "layout_meta",
   "flexfields", "adf_extensions", "enrich", "col_vec",
   "enrich_usage", "batch_jobs", "batch_items", "gjob_jobs", "gjob_items", "gjob_control",

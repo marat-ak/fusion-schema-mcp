@@ -17,6 +17,7 @@ import Database from "better-sqlite3";
 import { load as loadVec } from "sqlite-vec";
 import { BaseProvider, type RunResult, type TableName } from "../base/provider.js";
 import { BaseRegistries } from "../base/registries.js";
+import { BasePlsql } from "../base/plsql.js";
 import { BaseRules } from "../base/rules.js";
 import { BaseColCache } from "../base/colCache.js";
 import { SqliteMeta } from "./meta.js";
@@ -42,6 +43,7 @@ const DB_OF: Record<TableName, string> = {
   report_queries: "main", report_queries_vec: "main", report_queries_vec_multi: "main",
   table_grain: "main", grain_meta: "main", table_usages: "main", usage_meta: "main",
   table_predicates: "main", pred_meta: "main", table_join_columns: "main",
+  plsql_packages: "main", plsql_api: "main", plsql_api_tables: "main", plsql_meta: "main",
   layout_patterns: "main", layout_patterns_vec: "main", layout_meta: "main",
   flexfields: "main", adf_extensions: "main",
   enrich_usage: "main", batch_jobs: "main", batch_items: "main", gjob_jobs: "main", gjob_items: "main", gjob_control: "main",
@@ -60,6 +62,7 @@ export class SqliteProvider extends BaseProvider {
   schema: SqliteSchema = new SqliteSchema(this);
   corpus: SqliteCorpus = new SqliteCorpus(this);
   registries: BaseRegistries = new BaseRegistries(this);
+  plsql: BasePlsql = new BasePlsql(this);
   flex: SqliteFlex = new SqliteFlex(this);
   layout: SqliteLayout = new SqliteLayout(this);
   rules: BaseRules = new BaseRules(this);

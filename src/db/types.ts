@@ -70,6 +70,17 @@ export interface PredicateRegistryRow { table_name: string; column_name: string;
 export interface UsageJoinRow { id: string; source: string; title: string; sql_chars: number; filters: string | null; joins: string | null; clean_sql: string | null; original_sql: string | null }
 export interface PredicateRow { column_name: string; op: string; literal: string; occurrences: number; role: string }
 
+// ---- plsql API inventory (pipeline-built: scripts/pipeline/p3_calls.* → p5_plsql.sql) ----
+export interface PlsqlPackageRow { package_name: string; api_class: string; in_dictionary: number; module: string | null; module_source: string | null; functions: number; statements: number }
+export interface PlsqlApiRow {
+  package_name: string; function_name: string; api_class: string; module: string | null; module_source: string | null; in_dictionary: number;
+  statements: number; units: number; reports: number; titles: number;
+  by_source: string | null; arg_counts: string | null; found_in: string | null; top_tables: string | null; top_modules: string | null; samples: string | null;
+}
+export interface PlsqlApiTableRow { package_name: string; function_name: string; table_name: string; statements: number; share: number }
+/** an api row joined to its co-occurrence with ONE table */
+export interface PlsqlApiForTable extends PlsqlApiRow { table_statements: number; share: number }
+
 // ---- flex ----
 export type FlexKind = "flexfields" | "adf_extensions";
 export type FlexfieldLoadRow = [application_id: number | null, flexfield_type: string, flexfield_code: string, deployment_status: string | null, context_code: string, context_enabled: string | null, multirow: string | null, translatable: string | null, segment_code: string, column_name: string | null, sequence_number: number | null, segment_name: string | null, prompt: string | null, display_type: string | null, value_set_id: number | null, required: string | null, segment_enabled: string | null, source: string, loaded_at: string];

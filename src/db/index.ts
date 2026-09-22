@@ -10,7 +10,7 @@
  * them.
  */
 import type { CatalogProvider } from "./provider.js";
-export type { CatalogProvider, MetaApi, SchemaApi, CorpusApi, RegistriesApi, FlexApi, LayoutApi, RulesApi, EnrichApi, JobsApi, ColCacheApi } from "./provider.js";
+export type { CatalogProvider, MetaApi, SchemaApi, CorpusApi, RegistriesApi, PlsqlApi, FlexApi, LayoutApi, RulesApi, EnrichApi, JobsApi, ColCacheApi } from "./provider.js";
 import { SqliteProvider, type SqliteConfig } from "./sqlite/provider.js";
 import { PostgresProvider, type PostgresConfig } from "./postgres/provider.js";
 import { sqliteFilesFromEnv } from "./sqlite/paths.js";

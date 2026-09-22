@@ -207,6 +207,42 @@ test("registries: replaceAll x3, reads, version stamps", async () => {
   assert.deepEqual(await db.registries.topPredicates("AP_INVOICES_ALL", 1), [{ column: "STATUS", op: "=", literal: "'OPEN'", occurrences: 30 }]);
 });
 
+test("plsql: replaceAll, forTable, search (escaped LIKE), package, packagesLike, version", async () => {
+  assert.equal(await db.plsql.version(), null);
+  assert.deepEqual(await db.plsql.counts(), { packages: 0, apis: 0, apiTables: 0 });
+  const api = (pkg: string, fn: string, statements: number, extra: Partial<import("../src/db/types.js").PlsqlApiRow> = {}) => ({
+    package_name: pkg, function_name: fn, api_class: "fusion", module: "INV", module_source: "prefix", in_dictionary: 1,
+    statements, units: statements * 2, reports: 1, titles: 1, by_source: '{"bip-report":1}', arg_counts: '{"4":3}', found_in: '{"sql":3}',
+    top_tables: '[{"table":"EGP_SYSTEM_ITEMS_B","statements":3}]', top_modules: '[{"module":"INV","statements":3}]',
+    samples: '[{"snippet":"INV_CONVERT.CONVERT_QTY(1,2,3,4)","sql_hash":"abc","source":"bip-report","title":"t"}]', ...extra,
+  });
+  const r = await db.plsql.replaceAll(
+    [{ package_name: "INV_CONVERT", api_class: "fusion", in_dictionary: 1, module: "INV", module_source: "prefix", functions: 2, statements: 5 },
+     { package_name: "INV_QUANTITY_TREE_PUB", api_class: "fusion", in_dictionary: 1, module: "INV", module_source: "prefix", functions: 0, statements: 0 }],
+    [api("INV_CONVERT", "CONVERT_QTY", 3), api("INV_CONVERT", "INV_UM_CONVERT", 2), api("HZ_FORMAT_PUB", "FORMAT_ADDRESS", 9, { module: "HZ" })],
+    [{ package_name: "INV_CONVERT", function_name: "CONVERT_QTY", table_name: "EGP_SYSTEM_ITEMS_B", statements: 3, share: 0.3 },
+     { package_name: "INV_CONVERT", function_name: "INV_UM_CONVERT", table_name: "EGP_SYSTEM_ITEMS_B", statements: 1, share: 0.1 },
+     { package_name: "HZ_FORMAT_PUB", function_name: "FORMAT_ADDRESS", table_name: "HZ_PARTIES", statements: 9, share: 0.5 }],
+    "1");
+  assert.deepEqual(r, { packages: 2, apis: 3, apiTables: 3 });
+  assert.equal(await db.plsql.version(), "1");
+  const ft = await db.plsql.forTable("EGP_SYSTEM_ITEMS_B", 10);
+  assert.deepEqual(ft.map((x) => [x.function_name, x.table_statements, x.share]), [["CONVERT_QTY", 3, 0.3], ["INV_UM_CONVERT", 1, 0.1]]);
+  assert.equal(ft[0].samples!.includes("CONVERT_QTY"), true);
+  // every token must match; `_` is escaped (INV_UM must not match INVXUM-style names via the LIKE wildcard)
+  assert.deepEqual((await db.plsql.search(["convert", "qty"], 10)).map((x) => x.function_name), ["CONVERT_QTY"]);
+  assert.deepEqual((await db.plsql.search(["INV_UM"], 10)).map((x) => x.function_name), ["INV_UM_CONVERT"]);
+  assert.deepEqual((await db.plsql.search(["nope"], 10)), []);
+  assert.deepEqual((await db.plsql.apisOfPackage("INV_CONVERT", 10)).map((x) => x.function_name), ["CONVERT_QTY", "INV_UM_CONVERT"]);
+  assert.equal((await db.plsql.package("INV_QUANTITY_TREE_PUB"))!.statements, 0, "a dictionary package with no corpus usage still resolves");
+  assert.equal(await db.plsql.package("NOPE"), null);
+  assert.deepEqual((await db.plsql.packagesLike(["quantity"], 10)).map((x) => x.package_name), ["INV_QUANTITY_TREE_PUB"]);
+  // rebuild replaces, never accumulates
+  await db.plsql.replaceAll([], [api("INV_CONVERT", "CONVERT_QTY", 1)], [], "2");
+  assert.deepEqual(await db.plsql.counts(), { packages: 0, apis: 1, apiTables: 0 });
+  assert.equal(await db.plsql.version(), "2");
+});
+
 test("flex: snapshots, queries, counts, config-report merge", async () => {
   const now = "2026-01-01T00:00:00.000Z";
   const n = await db.flex.replaceSnapshot("flexfields", "admin-export", [

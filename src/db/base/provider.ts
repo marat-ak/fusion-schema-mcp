@@ -3,12 +3,13 @@
  * Group classes (BaseMeta, BaseSchema, ...) hold the portable default SQL of EVERY statement as an
  * overridable method; a provider swaps in a subclass for the groups whose statements diverge.
  */
-import type { CatalogProvider, MetaApi, SchemaApi, CorpusApi, RegistriesApi, FlexApi, LayoutApi, RulesApi, EnrichApi, ColCacheApi } from "../provider.js";
+import type { CatalogProvider, MetaApi, SchemaApi, CorpusApi, RegistriesApi, PlsqlApi, FlexApi, LayoutApi, RulesApi, EnrichApi, ColCacheApi } from "../provider.js";
 
 export type TableName =
   | "tables" | "columns" | "pkeys" | "fkeys" | "indexes" | "relationships" | "tables_fts" | "meta"
   | "report_queries" | "report_queries_vec" | "report_queries_vec_multi"
   | "table_grain" | "grain_meta" | "table_usages" | "usage_meta" | "table_predicates" | "pred_meta" | "table_join_columns"
+  | "plsql_packages" | "plsql_api" | "plsql_api_tables" | "plsql_meta"
   | "layout_patterns" | "layout_patterns_vec" | "layout_meta"
   | "flexfields" | "adf_extensions"
   | "enrich_usage" | "batch_jobs" | "batch_items" | "gjob_jobs" | "gjob_items" | "gjob_control"
@@ -21,6 +22,7 @@ export abstract class BaseProvider implements CatalogProvider {
   abstract schema: SchemaApi;
   abstract corpus: CorpusApi;
   abstract registries: RegistriesApi;
+  abstract plsql: PlsqlApi;
   abstract flex: FlexApi;
   abstract layout: LayoutApi;
   abstract rules: RulesApi;

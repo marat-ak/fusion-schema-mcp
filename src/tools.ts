@@ -109,6 +109,7 @@ export function buildServer(): McpServer {
             ...(v.suggestions?.length ? { suggestions: v.suggestions.slice(0, 3) } : {}),
             ...(stats.mostlyUsedFilters ? { mostlyUsedFilters: stats.mostlyUsedFilters.slice(0, 5) } : {}),
             ...(stats.mostlyUsedJoinFilters ? { mostlyUsedJoinFilters: stats.mostlyUsedJoinFilters.slice(0, 5) } : {}),
+            ...(stats.mostlyUsedApis ? { mostlyUsedApis: stats.mostlyUsedApis.slice(0, 3) } : {}),
           });
         }
         return reply("validateTable", { names }, { tables: out });
@@ -244,6 +245,35 @@ export function buildServer(): McpServer {
       const usages = (await catalog.tableUsages(String(table), { limit: 3, brief: true })).usages;
       return reply("getTableGrain", { table }, { ...grain, ...(usages.length ? { topUsages: usages } : {}) });
     },
+  );
+
+  server.registerTool(
+    "findPlsqlApi",
+    {
+      title: "Which Oracle-shipped PL/SQL package/function does the job? (real-corpus inventory)",
+      description:
+        "Inventory of the PL/SQL packages and functions that REAL Fusion report SQL calls (451 packages, " +
+        "~2,900 functions, from ~26K statements) plus the pod's full package dictionary (6,935 names). " +
+        "Use BEFORE re-deriving a business computation with joins — quantities, UOM/currency conversion, " +
+        "rates, formatted names/addresses/phones, profile/session/security context, flexfield " +
+        "concatenation, status text — an official package usually exists and is the correct answer. " +
+        "Three lookups, combinable: `query` = words of the computation matched against PACKAGE.FUNCTION " +
+        "names (e.g. 'convert qty', 'format address', 'closest rate', 'user partyid'); `package` = all " +
+        "functions of one package (+ exists/inDictionary even when the corpus never calls it); `table` = " +
+        "apis real reports call alongside that table (the pushed `mostlyUsedApis` of validateTable/" +
+        "getColumns, unbounded). Each api returns statements/units/reports counts, argument-count " +
+        "samples, top co-read tables and 1-2 real call snippets with the corpus id of their statement " +
+        "(getReportQuery({id}) gives the full SQL). Call the api from SQL directly, or from an inline " +
+        "`/*+ WITH_PLSQL */ WITH FUNCTION` wrapper when it has OUT parameters.",
+      inputSchema: {
+        query: z.string().optional().describe("words of the business computation (matched against package/function names)"),
+        package: z.string().optional().describe("exact package name, e.g. INV_CONVERT"),
+        table: z.string().optional().describe("exact table/view name — apis real reports call together with it"),
+        limit: z.number().int().min(1).max(40).optional().describe("max apis per lookup (default 12)"),
+      },
+    },
+    async ({ query, package: pkg, table, limit }) =>
+      reply("findPlsqlApi", { query, package: pkg, table, limit }, await catalog.findPlsqlApi({ query, package: pkg, table, limit })),
   );
 
   server.registerTool(

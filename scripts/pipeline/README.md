@@ -466,11 +466,13 @@ because the two corpora differ in membership (23,746 rows there, 23,471 embeddab
 | `p3_reconcile.sql` | test every model claim, then `work.r_tables` — the reconciled fact set | 10 s |
 | `p2_recheck.sh`  | after an enrichment run: `load` (journal → record → promote → reconcile → report → own), `export` (grounding moved), `run` (enrich) — see *Recheck* | load 40 s |
 | `p3_rel.sql`     | `work.relationships` derived from `f_joins` + `meta_fkeys` | 6 s |
+| `p3_calls.sh`    | PL/SQL call facts (`p3_calls.sql` DDL → `p3_calls.py extract` → `work.f_calls`), classified + rolled up by `p3_calls_post.sql` into `work.plsql_api` / `plsql_api_tables` / `plsql_packages` (dictionary PACKAGE objects ∪ called packages), exported to `data/plsql_api_usage.{json,csv,md}` | 45 s |
 | `p4_vectors.sql` | the `work.embeddings` table | 1 s |
 | `p4_run.sh`      | incremental re-embed by `text_hash`, sharded (`p4_embed.mts` per shard): embeds changed slots only, deletes stale slots / gone owners; full on an empty table | 27 min full / ~2 min incremental, 12 shards |
 | `p4_knn.mts`     | KNN probe of `work.embeddings` (+ `v2026_09` alongside) — p4's own gate, since p6 needs p5 | 40 s |
 | `p5_ddl.sh`      | create `v<ver>` from the PRODUCT's `scripts/pg-import/ddl.sql` | 2 s |
 | `p5_fill.sql`    | populate all 25 release tables from `work` (described statements, `sql:` ids, parse-derived fact columns, `r_tables` registries) | 72 s |
+| `p5_plsql.sh`    | `v<ver>.plsql_packages` / `plsql_api` / `plsql_api_tables` / `plsql_meta` (ddl_version 3) from `work.plsql_*` — one transaction, DELETE + INSERT, re-runnable against an existing release (samples restricted to shipped ids, api_tables to real objects) | 2 s |
 | `p5_index.sql`   | pgvector index on every embedding column | |
 | `p6_verify.sql`  | the release gate: counts, content equality, dangling, stamps | 2 min |
 | `p6_knn.mts`     | exact-KNN spot check through the serving statement | 30 s |
