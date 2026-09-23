@@ -1,6 +1,13 @@
 # Catalog release pipeline
 
-Builds the `work` schema in `fusion_dev` on `stack-db`, and from it a `v<ver>` release schema.
+Builds the `work` schema in `fusion_dev` on `stack-db`, and from it a `v<ver>` release schema;
+`p9_release.sh` moves a release into the served database.
+
+**`fusion_dev.v<ver>` is a RELEASE — immutable after `p7_own.sql`, byte-equal to what is
+distributed. Only `work` is scratch. Any content change — one more table, one more row — is a
+NEW label through the full chain (`p5_ddl.sh <ver>` → … → `p7_own.sql`), never an edit of an
+existing `v<ver>`.** (Learned 2026-09-22: `p5_plsql.sh v2026_10` run against the distributed
+release left `fusion_dev.v2026_10` ≠ `fusion.v2026_10`; reverted 2026-09-23, `v2026_11` built.)
 
 ## The model — three levels
 
@@ -470,28 +477,43 @@ because the two corpora differ in membership (23,746 rows there, 23,471 embeddab
 | `p4_vectors.sql` | the `work.embeddings` table | 1 s |
 | `p4_run.sh`      | incremental re-embed by `text_hash`, sharded (`p4_embed.mts` per shard): embeds changed slots only, deletes stale slots / gone owners; full on an empty table | 27 min full / ~2 min incremental, 12 shards |
 | `p4_knn.mts`     | KNN probe of `work.embeddings` (+ `v2026_09` alongside) — p4's own gate, since p6 needs p5 | 40 s |
-| `p5_ddl.sh`      | create `v<ver>` from the PRODUCT's `scripts/pg-import/ddl.sql` | 2 s |
-| `p5_fill.sql`    | populate all 25 release tables from `work` (described statements, `sql:` ids, parse-derived fact columns, `r_tables` registries) | 72 s |
-| `p5_plsql.sh`    | `v<ver>.plsql_packages` / `plsql_api` / `plsql_api_tables` / `plsql_meta` (ddl_version 3) from `work.plsql_*` — one transaction, DELETE + INSERT, re-runnable against an existing release (samples restricted to shipped ids, api_tables to real objects) | 2 s |
-| `p5_index.sql`   | pgvector index on every embedding column | |
-| `p6_verify.sql`  | the release gate: counts, content equality, dangling, stamps | 2 min |
-| `p6_knn.mts`     | exact-KNN spot check through the serving statement | 30 s |
+| `run_sql.sh`     | runner for the release `.sql` steps: `bash run_sql.sh <file.sql> <ver> [psql args]` substitutes `{{V}}`, stages the file in `stack-db`, runs it with `ON_ERROR_STOP` (`DB=` selects the database, default `fusion_dev`) | — |
+| `p5_ddl.sh`      | `p5_ddl.sh <ver>` (label REQUIRED, `v<YYYY_MM>`): create `v<ver>` from the PRODUCT's `scripts/pg-import/ddl.sql`, stamp `work.build_meta.ddl_version` from its header | 2 s |
+| `p5_fill.sql`    | populate the release tables from `work` (described statements, `sql:` ids, parse-derived fact columns, `r_tables` registries); `catalog_meta.ddl_version` = `work.build_meta.ddl_version` | 72 s |
+| `p5_plsql.sh`    | `p5_plsql.sh <ver>`: `v<ver>.plsql_packages` / `plsql_api` / `plsql_api_tables` / `plsql_meta` (ddl_version 3) from `work.plsql_*` — one transaction, DELETE + INSERT, a step of the chain for the release being BUILT (samples restricted to shipped ids, api_tables to real objects) | 2 s |
+| `p5_index.sql`   | pgvector HNSW index on every searched embedding column | 40 s |
+| `p6_verify.sql`  | the release gate: counts, content equality, dangling, stamps. Sections that read `work` / `v2026_09` are guarded (`\if`) so the same file runs in the served database after p9 | 2 min |
+| `p6_knn.mts`     | exact-KNN spot check through the serving statement (`VER=<ver>` required; `v2026_09` is the baseline it is read against) | 30 s |
 | `p7_own.sql`     | `ALTER ... OWNER TO :owner` (default `fusion_dev`; `fusion` after a restore) — the last act of every build | 1 s |
 | `p8_verify.sql`  | VERIFICATION ONLY against `v2026_09`; writes nothing | 20 s |
+| `p9_release.sh`  | `p9_release.sh <ver> <target-db> <owner>` — the release move: dump `v<ver>` from `fusion_dev`, restore ALONGSIDE the served version (never drops the previous one), `p7_own.sql` with the target's role, `meta.seeds` from the release's OWN stamps (`catalog_meta.ddl_version` / `embedding_version`, gated against the `ddl.sql` header), `meta.active_version` switched LAST, `p6_verify.sql` in the target, the served-version line. Re-run = no-op with a message; a leftover schema = refused | ~3 min |
 
 ```bash
 wsl -d CloudBeaver -u root -e bash -lc \
   'docker cp <file>.sql stack-db:/tmp/ && docker exec stack-db psql -U postgres -d fusion_dev -v ON_ERROR_STOP=1 -f /tmp/<file>.sql'
 ```
 
-The `.sh` / `.mts` steps run themselves:
+The release `.sql` steps (`p5_fill`, `p5_index`, `p6_verify`) name the release as `{{V}}` and run
+through `run_sql.sh <file> <ver>` (`p7_own.sql` runs through the same runner, taking its
+`-v schemas=` / `-v owner=`); the `.sh` / `.mts` steps run themselves. A full release build from a
+finished `work`:
 
 ```bash
-wsl -d CloudBeaver -u root -e bash -lc 'bash /mnt/c/.../scripts/pipeline/p2_qwen.sh'
-wsl -d CloudBeaver -u root -e bash -lc 'bash /mnt/c/.../scripts/pipeline/p3_parse.sh'
-wsl -d CloudBeaver -u root -e bash -lc 'bash /mnt/c/.../scripts/pipeline/p4_run.sh 12'
-wsl -d CloudBeaver -u root -e bash -lc 'bash /mnt/c/.../scripts/pipeline/p5_ddl.sh v2026_10'
+P=/mnt/c/.../scripts/pipeline; V=v2026_11          # the label: v<YYYY_MM>, the next free one
+wsl -d CloudBeaver -u root -e bash -lc "bash $P/p5_ddl.sh $V"                                   # DDL + work.build_meta.ddl_version
+wsl -d CloudBeaver -u root -e bash -lc "bash $P/run_sql.sh p5_fill.sql $V"
+wsl -d CloudBeaver -u root -e bash -lc "bash $P/p5_plsql.sh $V"
+wsl -d CloudBeaver -u root -e bash -lc "bash $P/run_sql.sh p5_index.sql $V"
+wsl -d CloudBeaver -u root -e bash -lc "bash $P/run_sql.sh p6_verify.sql $V"
+wsl -d CloudBeaver -u root -e bash -lc "docker run --rm --network oservices_default -v /tmp/pipeline-p6:/app/scripts/pipeline \
+  -e DATABASE_URL=postgres://postgres:<pw>@stack-db:5432/fusion_dev -e VER=$V schema-mcp-build:latest npx tsx /app/scripts/pipeline/p6_knn.mts"
+wsl -d CloudBeaver -u root -e bash -lc "bash $P/run_sql.sh p7_own.sql $V -v schemas=work,$V -v owner=fusion_dev"   # the last act: the release is now immutable
+wsl -d CloudBeaver -u root -e bash -lc "bash $P/p9_release.sh $V fusion fusion"                 # move + switch (see below)
 ```
+
+(`p6_knn.mts` is staged on the distro fs first — `cp scripts/pipeline/*.mts /tmp/pipeline-p6/` —
+because the 9p `/mnt/c` mount does not bind-mount reliably; `p4_run.sh` does the same.) The
+earlier `p2_qwen.sh` / `p3_parse.sh` / `p4_run.sh 12` steps take no label: they build `work`.
 
 Heredocs and inline SQL through the WSL bridge mangle quoting — always `docker cp` a file.
 
@@ -575,21 +597,39 @@ fixed-assets probe (3/6 exact vs 2/6 HNSW) — the documented 95 % recall at `hn
 - `col_vec` carried, `flexfields`/`adf_extensions` carried (our demo pod's configuration in a
   vendor schema — flagged in the script since the first build).
 
-### Into `fusion`, and the PG provider (2026-09-21)
+### Into `fusion` — `p9_release.sh` (2026-09-23; the 2026-09-21 move was done by hand)
 
 The release schema moves between databases as a plain custom-format dump; `meta` is
-database-level and is written by hand (the upgrade job does not exist yet):
+database-level. `p9_release.sh <ver> <target-db> <owner>` is the whole move, and the first
+concrete piece of the "upgrade job" the DB-library plan named:
 
 ```bash
-docker exec stack-db bash -c 'pg_dump -U postgres -Fc -n v2026_10 -f /tmp/v2026_10.dump fusion_dev'
-docker exec stack-db psql -U postgres -d fusion -c 'DROP SCHEMA IF EXISTS v2026_10 CASCADE'
-docker exec stack-db bash -c 'pg_restore -U postgres --no-owner -d fusion /tmp/v2026_10.dump'   # 1m06s
-docker cp p7_own.sql stack-db:/tmp/ && docker exec stack-db psql -U postgres -d fusion \
-  -v schemas='v2026_10' -v owner='fusion' -f /tmp/p7_own.sql                                    # the serving role owns it
-# meta: seeds (version, embedding_model='bge-small-en-v1.5-384', ddl_version='2', activated_at) + active_version='v2026_10'
+wsl -d CloudBeaver -u root -e bash -lc 'bash /mnt/c/.../scripts/pipeline/p9_release.sh v2026_11 fusion fusion'
 ```
 
-`p7_own.sql` takes the owner as a variable now (`-v owner=`, default `fusion_dev`). Verified in
+It refuses unless the release exists in `fusion_dev` with its own stamps, the target has
+`meta.seeds` + `meta.active_version`, and the target does not already hold `v<ver>` (a re-run
+against the served version is a no-op with a message; a leftover schema is refused, never
+dropped). Then: `pg_dump -Fc -n v<ver>` → `pg_restore --no-owner --exit-on-error` ALONGSIDE the
+served version (the previous schema stays — rollback is
+`UPDATE meta.active_version SET version='<previous>'`, which `refreshIfMoved()` follows) →
+`p7_own.sql -v schemas=v<ver> -v owner=<owner>` → `ddl_version` + `embedding_version` read FROM
+THE RESTORED `catalog_meta` (never typed; `ddl_version` gated against the `ddl.sql` header, i.e.
+what the serving image's `EXPECTED_DDL_VERSION` speaks) → `ANALYZE` → one transaction: upsert
+`meta.seeds`, then switch `meta.active_version` LAST → `p6_verify.sql` in the target
+(release-only sections) → the `served: db=… active_version=… ddl_version=… embedding_model=…`
+line. After it: the serving image must be built from a `ddl.sql` with the same header, then
+`docker compose build fusion-schema-mcp && up -d` from `devops/`. Rehearsed 2026-09-23 against a
+throwaway `fusion_rehearsal` (meta block + `v2026_10` served, `v2026_11` moved in: 388 MB dump,
+2 min, byte-equal on every table, second run no-op, `v2026_10` re-activatable, dropped).
+`pg_restore` REBUILDS the three HNSW indexes, and a parallel build fails on the container's
+`/dev/shm` (`could not resize shared memory segment`) — p9 runs it with
+`PGOPTIONS='-c max_parallel_maintenance_workers=0 -c maintenance_work_mem=1GB'`, the same setting
+`p5_index.sql` uses; the 2026-09-21 hand restore only got through by luck.
+
+The 2026-09-21 move of `v2026_10` was the same sequence by hand (`DROP SCHEMA IF EXISTS` first —
+the one thing p9 does NOT do). `p7_own.sql` takes the owner as a variable (`-v owner=`, default
+`fusion_dev`). Verified then in
 `fusion` as role `fusion`: all 25 tables count-identical to `fusion_dev.v2026_10` (26,020 /
 104,147 / 29,802 …), four `vector` columns, the three HNSW indexes restored (197 MB / 51 MB /
 456 kB) and chosen by the planner, exact-KNN top-10 identical across the two databases, 0 objects
@@ -741,15 +781,26 @@ That comparison has not been measured.
 - The embedder is the product's own (`src/corpus/embed.ts` + `embedTexts()`), imported, never
   reimplemented, and run inside `schema-mcp-build:latest` where the bge-small cache lives.
 - Scripts run as `postgres`, so the last act of a build is `p7_own.sql`. It re-owns `work` ONLY
-  unless told otherwise (`psql -v schemas='work,v2026_10'`): ownership is a write, and a build must
+  unless told otherwise (`psql -v schemas='work,v2026_11'`): ownership is a write, and a build must
   not reach into a schema it did not produce.
+- **`fusion_dev.v<ver>` is a release: immutable after `p7_own.sql`, byte-equal to what `p9` moved
+  into `fusion`. Only `work` is scratch.** Any content change is a NEW label through the full
+  chain; no step is ever re-run against an existing release (`p5_ddl.sh` starts with
+  `DROP SCHEMA IF EXISTS v<ver>`, so a re-run of a label is a rebuild, not an edit — and a label
+  that `fusion` serves is never rebuilt). Labels are `v<YYYY_MM>` (`provider.ts` rejects anything
+  else), the next free one. The one table the serving container writes into the active version
+  schema at runtime is `col_vec` (the column-embedding cache, `schemas.ts` role `version`); it
+  grows in `fusion` and is the only tolerated drift.
+- `meta.seeds.ddl_version` / `embedding_model` are never typed: `p5_fill` stamps them into
+  `catalog_meta` from `work.build_meta` (which `p5_ddl.sh` took from the `ddl.sql` header), and
+  `p9` copies the stamps of the restored schema.
 
 ## What the build does NOT create
 
 `meta.seeds`, `meta.active_version`, `meta.library_migrations` and the whole `customer` schema are
-DATABASE-level, not version-level: `scripts/pg-import/import.mts` writes the first two and
-`src/db/postgres/migrations.ts` the last. A serving database needs them in addition to the version
-schema.
+DATABASE-level, not version-level: `scripts/pg-import/import.mts` writes the first two on a first
+import, `p9_release.sh` on every release move, and `src/db/postgres/migrations.ts` the last. A
+serving database needs them in addition to the version schema.
 
 `work.embeddings` and `work.layout_pattern` exist only after `p4` runs — a fresh `work` has no
 vectors until `p4_vectors.sql` + `p4_run.sh` are run. The 2026-09-20 build ran them: 23,471 owners

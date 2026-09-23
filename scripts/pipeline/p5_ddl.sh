@@ -9,11 +9,12 @@
 # this build's write scope) and substitutes both {{S}} and {{V}} with the version
 # schema, which is exactly what a version schema is: corpus + vendor in one place.
 #
-#   wsl -d CloudBeaver -u root -e bash -lc 'bash /mnt/c/.../scripts/pipeline/p5_ddl.sh [v2026_10]'
+#   wsl -d CloudBeaver -u root -e bash -lc 'bash /mnt/c/.../scripts/pipeline/p5_ddl.sh v2026_11'
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-V="${1:-v2026_10}"
+V="${1:-}"
+[[ "$V" =~ ^v[0-9]{4}_[0-9]{2}$ ]] || { echo "usage: $(basename "$0") <ver>   (v<YYYY_MM>, the label is REQUIRED — a default would target a distributed release)"; exit 2; }
 DB="${DB:-fusion_dev}"
 DDL="$REPO/scripts/pg-import/ddl.sql"
 STAGE=/tmp/pipeline-p5

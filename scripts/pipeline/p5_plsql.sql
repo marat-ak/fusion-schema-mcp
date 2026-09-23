@@ -2,12 +2,11 @@
 -- P5d — the PL/SQL API inventory of a release schema, from `work` (p3_calls.*).
 --
 -- Fills {{V}}.plsql_packages / plsql_api / plsql_api_tables / plsql_meta (ddl_version 3).
--- {{V}} is substituted by p5_plsql.sh. Idempotent and re-runnable on its own: ONE
--- transaction, DELETE then INSERT — so it also repairs a release that was built
--- before this step existed (the reason it is a separate step and not a paragraph
--- of p5_fill.sql: it must be runnable against an EXISTING release schema without
--- rebuilding the corpus, and it must be part of the chain so a rebuild never
--- silently drops the inventory the way the runtime-inserted custom rows were dropped).
+-- {{V}} is substituted by p5_plsql.sh. ONE transaction, DELETE then INSERT, on the
+-- release being BUILT (a separate step so the inventory has its own gate line, not a
+-- paragraph of p5_fill.sql; part of the chain so a rebuild never silently drops it the
+-- way the runtime-inserted custom rows were dropped). It is NOT a repair tool: a built
+-- release is immutable, and a release that lacks the inventory gets a new label.
 --
 -- Scope: counts are over ALL L3 statements (work.plsql_api, the analysis of record);
 -- `samples` keep only statements the release ships (getReportQuery must resolve every

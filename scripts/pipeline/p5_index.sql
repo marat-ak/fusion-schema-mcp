@@ -31,31 +31,31 @@ SET maintenance_work_mem = '1GB';
 -- /dev/shm; single-threaded is the difference between 31 s and a hard failure.
 SET max_parallel_maintenance_workers = 0;
 
-DROP INDEX IF EXISTS v2026_10.ix_rq_embedding_hnsw;
-DROP INDEX IF EXISTS v2026_10.ix_rq_multi_embedding_hnsw;
-DROP INDEX IF EXISTS v2026_10.ix_layout_vec_embedding_hnsw;
+DROP INDEX IF EXISTS {{V}}.ix_rq_embedding_hnsw;
+DROP INDEX IF EXISTS {{V}}.ix_rq_multi_embedding_hnsw;
+DROP INDEX IF EXISTS {{V}}.ix_layout_vec_embedding_hnsw;
 
 -- multi-vector KNN: what findSimilarQueries actually searches
 CREATE INDEX ix_rq_multi_embedding_hnsw
-  ON v2026_10.report_queries_vec_multi USING hnsw (embedding vector_l2_ops);
+  ON {{V}}.report_queries_vec_multi USING hnsw (embedding vector_l2_ops);
 
 -- single-vector KNN: the fallback path when a corpus has no multi vectors
 CREATE INDEX ix_rq_embedding_hnsw
-  ON v2026_10.report_queries USING hnsw (embedding vector_l2_ops);
+  ON {{V}}.report_queries USING hnsw (embedding vector_l2_ops);
 
 -- layout-pattern KNN (224 vectors — an index is not needed at this size, it is
 -- here so every SEARCHED embedding column is indexed the same way)
 CREATE INDEX ix_layout_vec_embedding_hnsw
-  ON v2026_10.layout_patterns_vec USING hnsw (embedding vector_l2_ops);
+  ON {{V}}.layout_patterns_vec USING hnsw (embedding vector_l2_ops);
 
--- NOT indexed: v2026_10.col_vec.vec. It is a column-text embedding CACHE that is
+-- NOT indexed: {{V}}.col_vec.vec. It is a column-text embedding CACHE that is
 -- only ever read by `WHERE hash IN (...)` (src/db/base/colCache.ts) — no distance
 -- query touches it, so a vector index there would be dead weight. Reported rather
 -- than silently built or silently skipped.
 
-ANALYZE v2026_10.report_queries_vec_multi;
-ANALYZE v2026_10.report_queries;
-ANALYZE v2026_10.layout_patterns_vec;
+ANALYZE {{V}}.report_queries_vec_multi;
+ANALYZE {{V}}.report_queries;
+ANALYZE {{V}}.layout_patterns_vec;
 
-SELECT indexname, pg_size_pretty(pg_relation_size('v2026_10.' || indexname)) AS size
-FROM   pg_indexes WHERE schemaname = 'v2026_10' AND indexdef LIKE '%hnsw%' ORDER BY 1;
+SELECT indexname, pg_size_pretty(pg_relation_size('{{V}}.' || indexname)) AS size
+FROM   pg_indexes WHERE schemaname = '{{V}}' AND indexdef LIKE '%hnsw%' ORDER BY 1;
