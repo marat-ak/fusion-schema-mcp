@@ -2,7 +2,7 @@ node_modules
 dist
 catalog.sqlite
 catalog.sqlite-*
-# split-DB build artifacts / stray local zips (the seeds are built INSIDE the image, not copied in)
+# local sqlite build artifacts / stray zips — the image bakes NO catalog data (2026-09-25)
 schema.sqlite
 schema.sqlite-*
 reports.sqlite
@@ -14,16 +14,12 @@ catalog-data
 *.log
 npm-debug.log*
 .git
-# keep data/ (needed by the build stage compile) but drop the human-readable report
-data/goal2_relationships_report.md
 
-# SHIP-SAFETY: never bake the Oracle-catalog-extracted SQL corpus (~1.1GB) into the image.
-# The runtime report_queries corpus is populated at runtime via the /ingest API (poller),
-# so the enrich store and its intermediate artifacts must stay out of the build context.
-# NOTE: data/*.csv (META_*.csv) and data/*.json (mined_relationships.json, otbi_relations.json)
-# are intentionally NOT excluded — the schema-catalog compile step needs them.
-data/enrich.sqlite*
-data/*.jsonl
+# SHIP-SAFETY + build-context size: the whole data/ tree (META_*.csv ~250MB, mined relationships,
+# the ~1.1GB Oracle-catalog-extracted SQL corpus enrich.sqlite, jsonl runs) stays out. Nothing in
+# the image reads it: the catalog is served from Postgres (or a sqlite seed VOLUME), never compiled
+# at build time.
+data
 _gem_compare.json
 **/*_gem_compare.json
 

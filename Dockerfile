@@ -1,7 +1,9 @@
-# Multi-stage: build TS, compile the split seed DBs, then ship a lean self-provisioning runtime.
+# Multi-stage: build TS (+ warm the embedding model), then ship a lean runtime = code + model cache.
 # Debian base both stages so the better-sqlite3 native module matches at runtime.
+# NO catalog data is baked: the catalog is served from the provider CATALOG_DB names at runtime
+# (postgres: DATABASE_URL on stack-db; sqlite: a seed volume at SEED_DIR provisioned into DATA_DIR).
 
-# ---- build stage: install deps, build TS, compile CSV -> schema.sqlite + reports.sqlite seed ----
+# ---- build stage: install deps, build TS, warm the model cache ----
 FROM node:22-bookworm AS build
 WORKDIR /app
 
@@ -15,10 +17,11 @@ RUN npm install
 COPY tsconfig.json ./
 COPY VERSION ./VERSION
 COPY src ./src
-# tests + the no-SQL-outside-db gate run in THIS stage (`docker run --rm -e CATALOG_DB=sqlite <build-image> npm test`)
+# tests + the no-SQL-outside-db gate run in THIS stage
+# (`docker run --rm -e CATALOG_DB=sqlite <build-image> npm test`, postgres variant in test/fixture.ts)
 COPY test ./test
 COPY scripts/no-sql-outside-db.sh ./scripts/no-sql-outside-db.sh
-# the landed Postgres DDL (ddl_version 1) — the contract suite seeds its throwaway database from it
+# the landed Postgres DDL — the contract suite seeds its throwaway database from it
 COPY scripts/pg-import/ddl.sql ./scripts/pg-import/ddl.sql
 RUN npm run build
 # non-TS corpus assets ride along into dist (tsc copies only .ts): layout-pattern JSONL + fixtures.
@@ -28,42 +31,28 @@ RUN cp -r src/corpus/layoutPatterns dist/corpus/layoutPatterns \
     && rm -rf dist/corpus/layoutPatterns/shard-*
 
 # Warm the bge-small embedding model into node_modules/.cache so the runtime can embed query intents
-# (findSimilarQueries) and re-embed during provisioning, offline.
+# (findSimilarQueries) and re-embed during sqlite provisioning, offline.
 RUN node -e "import('@xenova/transformers').then(async t=>{const p=await t.pipeline('feature-extraction','Xenova/bge-small-en-v1.5');await p('warm',{pooling:'mean',normalize:true});console.log('bge-small cached');})"
 
-# Compile the seed DBs from the DB_SCHEMA CSVs (data/ must be present in the build context; the
-# report corpus is EMPTY in CI because data/enrich.sqlite is .dockerignored — that is expected, the
-# real corpus is populated at runtime by the poller /ingest or restored via migrate-split). Then zip
-# the seeds so provision.js can unpack them into the /app/data volume on first start.
-COPY data ./data
-# compile reads the CSVs from DATA_DIR (required, no default) through the catalog DB library
-ENV DATA_DIR=/app/data
-ENV CATALOG_DB=sqlite
-RUN npm run compile && node dist/zip-seed.js
-
-# ---- runtime stage: node + dist + node_modules (model cache) + baked seed; DBs live on a volume ----
+# ---- runtime stage: node + dist + node_modules (model cache). NO seed, NO provider default. ----
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 ENV MCP_PORT=8979
 ENV MCP_HOST=0.0.0.0
-ENV DATA_DIR=/app/data
-ENV SEED_DIR=/app/seed
-# the catalog DB provider (src/db): required, no default
-ENV CATALOG_DB=sqlite
+# CATALOG_DB (sqlite | postgres) is REQUIRED from the deployment — no image default. Per mode:
+#   postgres: DATABASE_URL                       (nothing SQLite is touched, no /app/data writes)
+#   sqlite:   DATA_DIR + SEED_DIR (seed zips + VERSION on a volume; provisioned by entrypoint.sh)
 
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
-
-# Baked, versioned seed — NOT under /app/data (the volume mount would mask it).
-COPY --from=build /app/schema.sqlite.zip /app/seed/schema.sqlite.zip
-COPY --from=build /app/reports.sqlite.zip /app/seed/reports.sqlite.zip
-COPY --from=build /app/VERSION /app/seed/VERSION
+# the embedding-model stamp this build speaks (src/version.ts; PgMeta.verify compares it to meta.seeds)
+COPY --from=build /app/VERSION ./VERSION
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 8979
-# entrypoint self-provisions the /app/data volume from /app/seed, then starts the server.
+# entrypoint provisions DATA_DIR from SEED_DIR only when CATALOG_DB=sqlite, then starts the server.
 ENTRYPOINT ["/entrypoint.sh"]

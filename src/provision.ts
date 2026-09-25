@@ -1,9 +1,10 @@
 /**
- * Self-provisioning / upgrade step. Run BEFORE the server (entrypoint.sh -> node dist/provision.js).
+ * SQLITE-MODE provisioning / upgrade step. Run BEFORE the server by entrypoint.sh ONLY when
+ * CATALOG_DB=sqlite (postgres mode never runs it; the image bakes no seed since 2026-09-25).
  *
- * Compares the image's baked seed (/app/seed/VERSION + schema.sqlite.zip + reports.sqlite.zip)
- * against the on-disk split DBs' version meta (schema.sqlite `meta`) and brings the data volume up
- * to date, per this matrix:
+ * Compares the seed volume (SEED_DIR/VERSION + schema.sqlite.zip + reports.sqlite.zip — all three
+ * REQUIRED, a missing one is a loud failure, never an empty DB) against the on-disk split DBs'
+ * version meta (schema.sqlite `meta`) and brings the data volume up to date, per this matrix:
  *
  *   schema.sqlite missing      -> unzip seed schema.sqlite
  *   schema_version differs      -> replace schema.sqlite from seed
@@ -18,7 +19,8 @@
  * Re-embedding uses the LOCAL embedder (corpus/embed.ts, no external call). Unzip uses fflate (no
  * system `unzip`/`sqlite3` needed). Version meta in schema.sqlite is refreshed to the seed values at
  * the end so the next start is a no-op. File ops stay here; every statement is a library method.
- * Env: DATA_DIR (required), SEED_DIR (required), optional *_DB overrides (src/db/sqlite/paths.ts).
+ * Env: CATALOG_DB=sqlite (required), DATA_DIR (required), SEED_DIR (required — the seed VERSION is
+ * read from THERE only, never from the repo VERSION), optional *_DB overrides (src/db/sqlite/paths.ts).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -26,27 +28,36 @@ import { unzipSync } from "fflate";
 import { embed } from "./corpus/embed.js";
 import { openCatalogDb, type CatalogDb } from "./db/index.js";
 import { sqliteFilesFromEnv, requireDataDir, type SqliteFiles } from "./db/sqlite/paths.js";
-import { readVersionFile, type Versions } from "./version.js";
+import type { Versions } from "./version.js";
 
 function log(m: string) { console.error(`[provision] ${m}`); }
 
 function seedDir(): string {
   const d = process.env.SEED_DIR;
-  if (!d) throw new Error("SEED_DIR is required (the image's baked seed directory) — no default");
+  if (!d) throw new Error("SEED_DIR is required (the seed volume: VERSION + *.sqlite.zip) — no default");
   return d;
 }
 
-/** Unzip <SEED_DIR>/<name>.zip (a single-entry zip holding <name>) to destFile. */
-function unzipSeed(name: string, destFile: string): boolean {
+/** The seed's version triple: <SEED_DIR>/VERSION, all three keys required. No repo/default fallback. */
+function readSeedVersion(): Versions {
+  const file = path.join(seedDir(), "VERSION");
+  if (!fs.existsSync(file)) throw new Error(`${file} missing — the seed volume must carry VERSION; refusing to provision`);
+  const v = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<Versions>;
+  for (const k of ["schema", "queries", "embedding"] as const) {
+    if (typeof v[k] !== "string" || !v[k]) throw new Error(`${file}: key "${k}" missing — refusing to provision`);
+  }
+  return { schema: v.schema!, queries: v.queries!, embedding: v.embedding! };
+}
+
+/** Unzip <SEED_DIR>/<name>.zip (a single-entry zip holding <name>) to destFile. Missing seed = failure. */
+function unzipSeed(name: string, destFile: string): void {
   const zipPath = path.join(seedDir(), `${name}.zip`);
-  if (!fs.existsSync(zipPath)) { log(`seed ${zipPath} missing — cannot provision ${name}`); return false; }
-  const files = unzipSync(fs.readFileSync(zipPath));
-  const entry = files[name] ?? Object.values(files)[0];
-  if (!entry) { log(`seed zip ${zipPath} empty`); return false; }
+  if (!fs.existsSync(zipPath)) throw new Error(`seed ${zipPath} missing — cannot provision ${name}; refusing to start on an empty DB`);
+  const entry = unzipSync(fs.readFileSync(zipPath))[name];
+  if (!entry) throw new Error(`seed zip ${zipPath} has no entry "${name}"`);
   fs.mkdirSync(path.dirname(destFile), { recursive: true });
   fs.writeFileSync(destFile, Buffer.from(entry));
   log(`unzipped seed ${name} -> ${destFile} (${(entry.length / 1048576).toFixed(1)} MB)`);
-  return true;
 }
 
 function open(files: SqliteFiles): Promise<CatalogDb> {
@@ -67,7 +78,7 @@ async function reEmbed(db: CatalogDb, targets: { rid: number; description: strin
 /** queries_version bump: replace otbi/view rows from the seed, keep bip-report, rebuild vec. */
 async function refreshOtbiView(db: CatalogDb, dataDir: string) {
   const tmp = path.join(dataDir, ".seed-reports.sqlite");
-  if (!unzipSeed("reports.sqlite", tmp)) return;
+  unzipSeed("reports.sqlite", tmp);
   try {
     const n = await db.corpus.replaceSourcesFromSeed(tmp, ["otbi", "view"]);
     // Re-embed ONLY the refreshed otbi/view rows that arrived without a blob.
@@ -88,11 +99,13 @@ async function reEmbedAll(db: CatalogDb) {
 }
 
 async function main() {
+  if (process.env.CATALOG_DB !== "sqlite") {
+    throw new Error(`provisioning is the sqlite provider's boot step only (CATALOG_DB=${JSON.stringify(process.env.CATALOG_DB ?? null)}) — nothing to do for any other provider`);
+  }
+  const seed = readSeedVersion();
   const dataDir = requireDataDir();
   fs.mkdirSync(dataDir, { recursive: true });
   const files = sqliteFilesFromEnv();
-  const seedVersionFile = path.join(seedDir(), "VERSION");
-  const seed = fs.existsSync(seedVersionFile) ? readVersionFile(seedVersionFile) : readVersionFile();
 
   const hadSchema = fs.existsSync(files.schema);
   const hadReports = fs.existsSync(files.reports);

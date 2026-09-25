@@ -1,7 +1,8 @@
 /**
- * Build-time helper: zip the compiled seed DBs (schema.sqlite / reports.sqlite) into single-entry
- * zips (schema.sqlite.zip / reports.sqlite.zip) that the Dockerfile COPYs into /app/seed and
- * provision.ts unzips at start. Uses fflate so no system `zip` is required.
+ * Dev-box helper (sqlite mode only): zip the compiled seed DBs (schema.sqlite / reports.sqlite) into
+ * single-entry zips (schema.sqlite.zip / reports.sqlite.zip). Place them + the VERSION file on the
+ * seed VOLUME a sqlite-mode container mounts at SEED_DIR; provision.ts unzips them at start. The
+ * image itself bakes no seed (2026-09-25). Uses fflate so no system `zip` is required.
  *
  * Run: node dist/zip-seed.js   (after npm run compile)
  */

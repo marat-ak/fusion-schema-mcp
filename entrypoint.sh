@@ -1,9 +1,13 @@
 #!/bin/sh
-# Container entrypoint: self-provision/upgrade the split DBs from the baked seed, then start the MCP.
-# provision.js compares /app/seed/VERSION to the on-disk schema.sqlite meta and seeds/refreshes the
-# /app/data volume (schema.sqlite + reports.sqlite + cache.sqlite) before the server binds.
+# Container entrypoint. CATALOG_DB (sqlite | postgres) is REQUIRED — no default, no fallback.
+#   sqlite   -> provision.js seeds/upgrades DATA_DIR from SEED_DIR (zips + VERSION) before the server binds.
+#   postgres -> straight to the server; nothing SQLite is touched, nothing is written under /app.
 set -e
 
-node /app/dist/provision.js
+case "${CATALOG_DB:-}" in
+  sqlite)   node /app/dist/provision.js ;;
+  postgres) ;;
+  *) echo "[entrypoint] CATALOG_DB must be \"sqlite\" or \"postgres\" (got \"${CATALOG_DB:-}\") — required, no default" >&2; exit 1 ;;
+esac
 
 exec node /app/dist/server.js

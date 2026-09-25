@@ -50,11 +50,16 @@ docker compose up -d
 curl http://localhost:8979/health
 ```
 
-The multi-stage image compiles the catalog at build time and ships only `dist/` + the zipped
-seed DBs under `/app/seed/` (the 250MB CSVs are dropped from the runtime image). On start,
-`entrypoint.sh` runs `provision.js`, which unpacks/upgrades `schema.sqlite` + `reports.sqlite` +
-`cache.sqlite` in the `DATA_DIR` volume. A pre-split single `catalog.sqlite` is converted once
-with `node dist/migrate-split.js <catalog.sqlite> --schema <dir>/schema.sqlite --reports <dir>/reports.sqlite`.
+The image is code + the bge-small model cache ONLY — no catalog data is compiled or baked
+(since 2026-09-25). `CATALOG_DB` is REQUIRED from the deployment (no image default):
+
+- `postgres` (dev): `DATABASE_URL` → the `fusion` database on `stack-db`; nothing SQLite is
+  touched and nothing is written under `/app`.
+- `sqlite`: `DATA_DIR` + `SEED_DIR` — a seed VOLUME carrying `VERSION` + `schema.sqlite.zip` +
+  `reports.sqlite.zip` (built on a dev box with `npm run compile && npm run zip-seed`); on start
+  `entrypoint.sh` runs `provision.js`, which unpacks/upgrades the split DBs in `DATA_DIR`. A missing
+  seed file is a loud boot failure, never an empty catalog. A pre-split single `catalog.sqlite` is
+  converted once with `node dist/migrate-split.js <catalog.sqlite> --schema <dir>/schema.sqlite --reports <dir>/reports.sqlite`.
 
 ## Connecting an agent
 
@@ -72,9 +77,11 @@ e.g. Claude Agent SDK / Codex SDK `mcpServers` config, or the MCP inspector.
 |---|---|---|
 | `MCP_PORT` | `8979` | HTTP port |
 | `MCP_HOST` | `0.0.0.0` | bind host |
-| `DATA_DIR` | `/app/data` (image) / `./data` (checkout) | dir holding the split DBs; also the source CSV/JSON dir for the compile step |
+| `CATALOG_DB` | — (required) | `postgres` (+ `DATABASE_URL`) or `sqlite` (+ `DATA_DIR`, `SEED_DIR`) |
+| `DATABASE_URL` | — (required, postgres) | the `fusion` database |
+| `DATA_DIR` | — (required, sqlite) | dir holding the split DBs; also the source CSV/JSON dir for the dev-box compile step |
 | `SCHEMA_DB` | `<DATA_DIR>/schema.sqlite` | schema tables (tables/columns/keys/relationships/meta) |
 | `REPORTS_DB` | `<DATA_DIR>/reports.sqlite` | report corpus (report_queries + fts + vec) |
 | `CACHE_DB` | `<DATA_DIR>/cache.sqlite` | column-search embedding cache |
-| `SEED_DIR` | `/app/seed` | baked seed zips + VERSION read by `provision.js` |
+| `SEED_DIR` | — (required, sqlite) | seed volume: `VERSION` + `schema.sqlite.zip` + `reports.sqlite.zip` read by `provision.js` |
 | `MCP_URL` | `http://127.0.0.1:8979/mcp` | smoke-client target |

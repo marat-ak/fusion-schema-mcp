@@ -5,7 +5,7 @@ contains: []
 needs:
   always: []
   per_target:
-    dev: [reranker]      # dev-only GPU rerank helper; fail-open KNN without it
+    dev: [reranker, stack-db]   # reranker: dev-only GPU rerank helper (fail-open KNN without it); stack-db: the `fusion` catalog database (CATALOG_DB=postgres)
     prod-vultr: []
     appliance: []
   optional: []
@@ -14,7 +14,7 @@ images:
 config_ship:
   - path: fusion-schema-mcp/.env (gitignored)
     to: "env_file per target; appliance: /data/env/fusion-schema-mcp.env (firstboot, empty ok)"
-    note: "catalog SQLite ships INSIDE the image (build artifact, never git)"
+    note: "image = code + bge model cache ONLY (no catalog data since 2026-09-25). CATALOG_DB is REQUIRED per target, no image default: postgres -> DATABASE_URL (the `fusion` database on stack-db); sqlite -> DATA_DIR + SEED_DIR (a seed VOLUME carrying VERSION + schema.sqlite.zip + reports.sqlite.zip, provisioned by entrypoint.sh)"
 target_notes:
-  appliance: "ENRICH_INTERVAL=0 (frozen pre-enriched corpus); /data/catalog mount"
+  appliance: "ENRICH_INTERVAL=0 (frozen pre-enriched corpus); /data/catalog mount = sqlite-mode DATA_DIR — the chain must now set CATALOG_DB=sqlite + SEED_DIR explicitly (the image no longer defaults them)"
   dev: "corpus enrichment profile services live in root compose under profiles: [corpus]"
