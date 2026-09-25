@@ -2,6 +2,8 @@
 # Debian base both stages so the better-sqlite3 native module matches at runtime.
 # NO catalog data is baked: the catalog is served from the provider CATALOG_DB names at runtime
 # (postgres: DATABASE_URL on stack-db; sqlite: a seed volume at SEED_DIR provisioned into DATA_DIR).
+# The container starts through /entry (oservices-setup Config API, module stack.fusion) which execs
+# /entrypoint.sh.
 
 # ---- build stage: install deps, build TS, warm the model cache ----
 FROM node:22-bookworm AS build
@@ -34,6 +36,21 @@ RUN cp -r src/corpus/layoutPatterns dist/corpus/layoutPatterns \
 # (findSimilarQueries) and re-embed during sqlite provisioning, offline.
 RUN node -e "import('@xenova/transformers').then(async t=>{const p=await t.pipeline('feature-extraction','Xenova/bge-small-en-v1.5');await p('warm',{pooling:'mean',normalize:true});console.log('bge-small cached');})"
 
+# ---- entry stage: the oservices-setup Config API startup wrapper (setup V1 task 9) ----
+# The shared client library arrives as the NAMED build context `oservices-config`
+# (devops compose: build.additional_contexts.oservices-config: ../oservices-setup/config;
+# standalone: docker build --build-context oservices-config=../oservices-setup/config .).
+# entry/go.mod's `replace … => ../config` resolves against this layout (config + entry as siblings).
+FROM golang:1.23 AS entry
+WORKDIR /src
+COPY --from=oservices-config / /src/config
+COPY entry /src/entry
+# the test suite execs the real entrypoint.sh to prove its CATALOG_DB gate survives (main_test.go)
+COPY entrypoint.sh /src/entrypoint.sh
+WORKDIR /src/entry
+RUN go test ./...
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o /entry .
+
 # ---- runtime stage: node + dist + node_modules (model cache). NO seed, NO provider default. ----
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
@@ -53,6 +70,9 @@ COPY --from=build /app/VERSION ./VERSION
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+COPY --from=entry /entry /entry
+
 EXPOSE 8979
-# entrypoint provisions DATA_DIR from SEED_DIR only when CATALOG_DB=sqlite, then starts the server.
-ENTRYPOINT ["/entrypoint.sh"]
+# /entry (setup V1): wait for stack.fusion on oservices-setup, persist + report, then exec
+# /entrypoint.sh (CATALOG_DB gate + sqlite provisioning + node dist/server.js) — unchanged below it.
+ENTRYPOINT ["/entry"]

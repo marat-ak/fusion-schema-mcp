@@ -3,7 +3,7 @@ name: fusion-schema-mcp
 kind: service
 contains: []
 needs:
-  always: []
+  always: [oservices-setup]
   per_target:
     dev: [reranker, stack-db]   # reranker: dev-only GPU rerank helper (fail-open KNN without it); stack-db: the `fusion` catalog database (CATALOG_DB=postgres)
     prod-vultr: []
@@ -11,10 +11,17 @@ needs:
   optional: []
 images:
   - gnimsys/fusion-schema-mcp:latest
+env_contract:
+  SETUP_URL: "http://oservices-setup:8998 — REQUIRED bootstrap (the /entry Config API client)"
+  SERVICE_ID: "fusion-schema-mcp — REQUIRED bootstrap; module read = stack.fusion (C1)"
+  CATALOG_DB: "postgres | sqlite — REQUIRED bootstrap, data-plane provider selector (never a module key)"
+  DATABASE_URL: "the `fusion` database on stack-db — REQUIRED with CATALOG_DB=postgres (install-time secret, never in the store)"
+modules:
+  stack.fusion: "CATALOG_VERSION → boot log line only (V1); the D14 upgrade job is the real consumer"
 config_ship:
   - path: fusion-schema-mcp/.env (gitignored)
     to: "env_file per target; appliance: /data/env/fusion-schema-mcp.env (firstboot, empty ok)"
-    note: "image = code + bge model cache ONLY (no catalog data since 2026-09-25). CATALOG_DB is REQUIRED per target, no image default: postgres -> DATABASE_URL (the `fusion` database on stack-db); sqlite -> DATA_DIR + SEED_DIR (a seed VOLUME carrying VERSION + schema.sqlite.zip + reports.sqlite.zip, provisioned by entrypoint.sh)"
+    note: "boot = /entry → /entrypoint.sh (setup V1 task 9); image = code + bge model cache ONLY (no catalog data since 2026-09-25). CATALOG_DB is REQUIRED per target, no image default: postgres -> DATABASE_URL (the `fusion` database on stack-db); sqlite -> DATA_DIR + SEED_DIR (a seed VOLUME carrying VERSION + schema.sqlite.zip + reports.sqlite.zip, provisioned by entrypoint.sh)"
 target_notes:
   appliance: "ENRICH_INTERVAL=0 (frozen pre-enriched corpus); /data/catalog mount = sqlite-mode DATA_DIR — the chain must now set CATALOG_DB=sqlite + SEED_DIR explicitly (the image no longer defaults them)"
   dev: "corpus enrichment profile services live in root compose under profiles: [corpus]"

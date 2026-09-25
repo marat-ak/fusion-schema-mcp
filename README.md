@@ -27,6 +27,14 @@ Oracle DB — later round). No agent, no CloudBeaver UI (later rounds).
 `mined_relationships.json`. The compile step filters junk table rows to `TABLE`/`VIEW` and
 builds the split seed DBs `schema.sqlite` + `reports.sqlite` (FTS5 + lookup indexes).
 
+## Boot
+
+The container starts through `/entry` (setup V1 task 9): it waits for the `stack.fusion` module on
+the oservices-setup Config API (`SETUP_URL`), logs `[entry] stack.fusion rev=N` and
+`[entry] stack.fusion CATALOG_VERSION=<v|(unset)>`, reports its status, then execs
+`/entrypoint.sh` unchanged (the `CATALOG_DB` gate below still applies). A standalone build needs
+the named build context: `docker build --build-context oservices-config=../oservices-setup/config .`.
+
 ## Build & run (CloudBeaver WSL distro)
 
 All commands run inside the `CloudBeaver` WSL distro. Scripts avoid PowerShell→wsl quoting.
