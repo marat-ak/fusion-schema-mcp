@@ -38,9 +38,11 @@ API key for bulk.** A full-corpus Opus run ≈ $200-260 at API rates, ~half that
 
 ## Recommended procedure (bulk, all-Opus, from scratch)
 
-Prereqs: `ENRICH_API_KEY` or `ANTHROPIC_API_KEY = sk-ant-api…` in `fusion-schema-mcp/.env`, with
-enough prepaid credits (dryRun tells you how much). `ENRICH_PROVIDER=agent` in compose is fine —
-the BATCH endpoints use the API key directly regardless of provider.
+Prereqs: `ENRICH_API_KEY` or `ANTHROPIC_API_KEY = sk-ant-api…`, with enough prepaid credits
+(dryRun tells you how much). No compose chain loads `fusion-schema-mcp/.env` into the container
+any more (no-host-paths, 2026-09-28) — this is a deliberate Batch-API run, so supply the key as an
+explicit input for it, not by dropping it in this repo's `.env`. `ENRICH_PROVIDER=agent` in
+compose is fine — the BATCH endpoints use the API key directly regardless of provider.
 
 1. **Estimate first (no spend):**
    `POST /ingest/batch/submit?sources=bip-report,view&dryRun=1` → `{wouldSubmit, estUsd}`.

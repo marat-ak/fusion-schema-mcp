@@ -18,10 +18,17 @@ env_contract:
   DATABASE_URL: "the `fusion` database on stack-db — REQUIRED with CATALOG_DB=postgres (install-time secret, never in the store)"
 modules:
   stack.fusion: "CATALOG_VERSION → boot log line only (V1); the D14 upgrade job is the real consumer"
-config_ship:
-  - path: fusion-schema-mcp/.env (gitignored)
-    to: "env_file per target; appliance: /data/env/fusion-schema-mcp.env (firstboot, empty ok)"
-    note: "boot = /entry → /entrypoint.sh (setup V1 task 9); image = code + bge model cache ONLY (no catalog data since 2026-09-25). CATALOG_DB is REQUIRED per target, no image default: postgres -> DATABASE_URL (the `fusion` database on stack-db); sqlite -> DATA_DIR + SEED_DIR (a seed VOLUME carrying VERSION + schema.sqlite.zip + reports.sqlite.zip, provisioned by entrypoint.sh)"
+config_ship: []   # no-host-paths (2026-09-28): fusion-schema-mcp/.env is no longer config-shipped
+                  # on any target — dev and prod both dropped the env_file entirely
+                  # (ENRICH_PROVIDER=agent, the compose default, needs no provider key; a
+                  # deliberate gemini/anthropic provider run needs its key supplied as an explicit
+                  # input, not this file). Appliance's /data/env/fusion-schema-mcp.env is
+                  # firstboot-GENERATED on the VM's data disk, not sourced from this repo's .env.
+                  # boot = /entry → /entrypoint.sh (setup V1 task 9); image = code + bge model
+                  # cache ONLY (no catalog data since 2026-09-25). CATALOG_DB is REQUIRED per
+                  # target, no image default: postgres -> DATABASE_URL (the `fusion` database on
+                  # stack-db); sqlite -> DATA_DIR + SEED_DIR (a seed VOLUME carrying VERSION +
+                  # schema.sqlite.zip + reports.sqlite.zip, provisioned by entrypoint.sh)
 target_notes:
   appliance: "ENRICH_INTERVAL=0 (frozen pre-enriched corpus); /data/catalog mount = sqlite-mode DATA_DIR — the chain must now set CATALOG_DB=sqlite + SEED_DIR explicitly (the image no longer defaults them)"
   dev: "corpus enrichment profile services live in root compose under profiles: [corpus]"

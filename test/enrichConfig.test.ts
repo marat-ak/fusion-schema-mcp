@@ -20,9 +20,11 @@ function withEnv(vars: Partial<Record<(typeof ENV_KEYS)[number], string>>, fn: (
   }
 }
 
-// Prod's fusion-schema-mcp/.env holds only ANTHROPIC_API_KEY + GOOGLE_STUDIO_API_KEY, mounted via
-// env_file for a stack that runs ENRICH_PROVIDER=agent. This pins the evidence that the agent
-// provider never reads either key, with or without them present — so the env_file is a no-op today.
+// Until 2026-09-28 (no-host-paths), prod's fusion-schema-mcp/.env (ANTHROPIC_API_KEY +
+// GOOGLE_STUDIO_API_KEY) was mounted via a compose env_file into a stack running
+// ENRICH_PROVIDER=agent — this test pinned the evidence that the agent provider never reads
+// either key, with or without them present, so that env_file was always a no-op on this path
+// (the verdict that let dev and prod both drop it; f9a134a).
 test("agent provider never resolves an apiKey, whether or not ANTHROPIC_API_KEY/GOOGLE_STUDIO_API_KEY are set", () => {
   withEnv({ ENRICH_PROVIDER: "agent" }, () => {
     assert.equal(getEnrichConfig().apiKey, "", "no provider keys set: apiKey stays empty");
