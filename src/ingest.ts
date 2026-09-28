@@ -44,7 +44,7 @@ import { redoQueue } from "./corpus/ingestStore.js";
 import { extractModels } from "./corpus/extractArchive.js";
 import { hashSql, hashSqlNormalized, type SqlSource } from "./corpus/sources.js";
 import { enrichOne } from "./corpus/enrichAdapters.js";
-import { getEnrichConfig } from "./corpus/enrichConfig.js";
+import { getEnrichConfig, providerRequiresApiKey } from "./corpus/enrichConfig.js";
 import { runGeminiBatches } from "./corpus/geminiBatch.js";
 import { setGeminiControl, getGeminiControl, driveGeminiReenrich, openGeminiJobs, allGeminiJobs } from "./corpus/geminiBatchApi.js";
 import { buildEnrichPrompt, parseEnrichReply } from "./corpus/enrichPrompt.js";
@@ -120,7 +120,7 @@ let enrichRunning = false;
 
 /** Run the enrich worker over PENDING staging rows via a concurrency-limited pool.
  *  `limit` (>0) caps how many pending rows this run processes — used for controlled test batches. */
-async function runEnrich(store: EnrichStore, limit?: number): Promise<{ enriched: number; failed: number; pending: number; skipped?: string }> {
+export async function runEnrich(store: EnrichStore, limit?: number): Promise<{ enriched: number; failed: number; pending: number; skipped?: string }> {
   if (enrichRunning) return { enriched: 0, failed: 0, pending: (await store.counts()).pending, skipped: "already running" };
   enrichRunning = true;
   try {
@@ -128,7 +128,7 @@ async function runEnrich(store: EnrichStore, limit?: number): Promise<{ enriched
     let pend = await store.pendingRows();
     if (limit && limit > 0) pend = pend.slice(0, limit);
     if (pend.length === 0) return { enriched: 0, failed: 0, pending: 0 };
-    if (!cfg.apiKey && cfg.provider !== "custom") {
+    if (!cfg.apiKey && providerRequiresApiKey(cfg.provider)) {
       console.error(`[ingest] enrich: no key for provider "${cfg.provider}" — leaving ${pend.length} row(s) pending`);
       return { enriched: 0, failed: 0, pending: pend.length, skipped: "no key" };
     }

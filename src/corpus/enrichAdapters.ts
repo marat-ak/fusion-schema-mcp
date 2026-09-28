@@ -15,7 +15,7 @@
 import crypto from "node:crypto";
 import type { SqlSource } from "./sources.js";
 import { buildEnrichPrompt, parseEnrichReply, buildBatchEnrichPrompt, parseBatchReply, shapeBatchItem } from "./enrichPrompt.js";
-import { getEnrichConfig, type EnrichConfig } from "./enrichConfig.js";
+import { getEnrichConfig, providerRequiresApiKey, type EnrichConfig } from "./enrichConfig.js";
 import { recordUsage } from "./ingestStore.js";
 
 export interface EnrichResult {
@@ -109,7 +109,7 @@ export async function enrichOne(sql: string, title: string, override?: { model?:
     else if (provider === "anthropic") cfg.apiKey = (process.env.ENRICH_API_KEY ?? process.env.ANTHROPIC_API_KEY ?? "").trim();
     else if (provider === "openai") cfg.apiKey = (process.env.OPENAI_API_KEY ?? "").trim();
   }
-  if (!cfg.apiKey && cfg.provider !== "custom" && cfg.provider !== "agent") {
+  if (!cfg.apiKey && providerRequiresApiKey(cfg.provider)) {
     throw new Error(`no ENRICH_API_KEY configured for provider "${cfg.provider}"`);
   }
   switch (cfg.provider) {

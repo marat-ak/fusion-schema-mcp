@@ -31,6 +31,18 @@ export interface EnrichConfig {
   concurrency: number;
 }
 
+/**
+ * Providers whose adapter never reads cfg.apiKey: "agent" authenticates to fusion-agent's
+ * internal LLM endpoint with INGEST_TOKEN (see enrichAdapters.enrichAgent/enrichAgentBatch);
+ * "custom" sends it only if present. Every caller that gates on "do we have a key before
+ * enriching" (enrichAdapters.enrichOne, ingest.runEnrich) MUST use this — a caller that grows its
+ * own copy of this list and forgets "agent" or "custom" will wrongly skip a working provider as
+ * "no key".
+ */
+export function providerRequiresApiKey(provider: EnrichProvider): boolean {
+  return provider !== "custom" && provider !== "agent";
+}
+
 /** Best-effort read of KEY=VALUE from the repo-root .env (never throws). */
 function fromDotEnv(key: string): string {
   try {
