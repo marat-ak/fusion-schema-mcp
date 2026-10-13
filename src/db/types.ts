@@ -36,7 +36,11 @@ export interface CorpusRow {
   tables_used: string | null; joins: string | null; filters: string | null; lookup_types: string | null; security_predicate: string | null;
 }
 export interface SiblingRow { id: string; sqlChars: number; description: string | null }
-export interface CorpusRowLite { id: string; source: string; title: string; description: string | null }
+/** A title-prefix hit: `title` is the L2 unit title that matched (a `unit_titles` alias or the row's own),
+ *  `canonicalTitle` the corpus row's title (the primary unit's — equal to `title` when the alias is it). */
+export interface CorpusRowLite { id: string; source: string; title: string; canonicalTitle: string; description: string | null }
+/** One L2 unit title → the corpus row carrying its statement (ddl_version 4 `unit_titles`). */
+export interface UnitTitleRow { title: string; id: string; source: string }
 export interface QueueRow { id: string; title: string; sql: string; source: string }
 export interface MaterializeRow {
   id: string; title: string; originalSql: string; cleanSql: string | null; description: string;
@@ -80,6 +84,107 @@ export interface PlsqlApiRow {
 export interface PlsqlApiTableRow { package_name: string; function_name: string; table_name: string; statements: number; share: number }
 /** an api row joined to its co-occurrence with ONE table */
 export interface PlsqlApiForTable extends PlsqlApiRow { table_statements: number; share: number }
+
+// ---- OTBI presentation catalog (pipeline-built: scripts/pipeline/p3_otbi.* → p5_otbi.sql) ----
+export interface OtbiSubjectAreaRow {
+  name: string; pillar: string | null; n_folders: number; n_fact_folders: number; n_columns: number;
+  fact_folders: string | null; in_lineage: number; in_crawl: number; in_corpus: number; text_hash: string | null;
+}
+export interface OtbiFolderRow {
+  subject_area: string; name: string; kind: string; kind_source: string; description: string | null; desc_source: string | null;
+  db_tables: string | null; n_columns: number; n_measures: number; in_lineage: number; in_crawl: number; in_corpus: number;
+  unit_id: string | null; grain_note: string | null; nested: number; ordinal: number | null; text_hash: string | null;
+}
+export interface OtbiColumnRow {
+  subject_area: string; folder: string; name: string; data_type: string | null; kind: string; aggregation: string | null;
+  expression: string | null; db_refs: string | null; vo_refs: string | null; indexed: number; description: string | null; desc_source: string | null;
+  gap_cause: string | null; in_lineage: number; in_crawl: number; in_probe: number; ordinal: number | null; text_hash: string | null;
+}
+/** One KNN hit over `otbi_vec`: the hash resolves to every entity that shares the text. */
+export interface OtbiVecHit { text_hash: string; kind: string; distance: number }
+export interface OtbiVecRow { text_hash: string; kind: string; vec: Float32Array }
+export interface OtbiCounts { subjectAreas: number; folders: number; columns: number; vectors: number; vos: number; columnRefs: number; areaDuties: number; areaJobs: number }
+/** The VO hop (ddl_version 9): one BI view object behind one presentation folder. */
+export interface OtbiVoRow { subject_area: string; folder: string; vo_path: string; vo_def: string; db_objects: string; vo_attrs: string }
+/** The exposure index (ddl_version 9): one physical column one presentation column reads (otbi_column.db_refs exploded). */
+export interface OtbiColumnRefRow {
+  subject_area: string; folder: string; folder_kind: string; column_name: string; table_name: string; db_column: string; src: string; via_expression: number;
+}
+/** A column ref with the presentation column's expression (the masking-shape check of the column whitelist). */
+export interface OtbiColumnRefExpr extends OtbiColumnRefRow { expression: string | null }
+/** Subject area -> duty role code (ddl_version 9) from Oracle's TBI guides, the code verbatim. */
+export interface OtbiAreaDutyRow {
+  subject_area: string; duty_code: string; duty_name: string; guide: string; guide_release: string; matched_by: string; guide_area: string;
+}
+/** What replaceAll writes besides the presentation catalog: the VO hop, the area -> duty map and its release
+ *  stamps (the exposure index is derived from the columns' db_refs in the same transaction). */
+/** Subject area -> guide JOB role code (ddl_version 10): through the area's duty codes or the job page itself. */
+export interface OtbiAreaJobRow { subject_area: string; job_code: string; job_name: string | null; matched_by: string; guide: string }
+export interface OtbiLineageInput {
+  vos: OtbiVoRow[]; areaDuties: OtbiAreaDutyRow[]; areaJobs: OtbiAreaJobRow[]; guideRelease: string; unmappedAreas: Record<string, string>;
+}
+
+// ---- security (data-access facts, ddl_version 5; table_disallowed 6; names-only objects 7) ----
+/** One `table_security` row: a context detected on one column of one object → the reference object
+ *  the condition is generated on (the VIA_JOIN form). */
+export interface TableSecurityRow {
+  table_name: string; column_name: string; context: string; urda_column: string;
+  ref_object: string | null; ref_column: string | null; is_primary: number; confidence: string; evidence: number; reason: string | null;
+}
+/** An object with an unresolved context column that no corpus source uses: never read in secured SQL. */
+export interface TableDisallowedRow { table_name: string; reason: string }
+/** One curated area/product → (object, privilege) row (ddl_version 8: names NOT NULL, `instance_scope`
+ *  = '*' or ONE pod host); it OVERRIDES the resolver's rule for the tables of that product / subject area. */
+export interface SecAreaPrivilegeRow {
+  area_or_product: string; ordinal: number; obj_name: string; privilege: string; source: string; evidence: string; instance_scope: string;
+  /** the (area, entity) key (ddl_version 9): the VO reference entity the evidence names; null = an area/product-level row */
+  entity_table: string | null;
+  vo_def: string | null;
+  /** ddl_version 10: TABLE.COLUMN the entity joins in the evidence (a trace names it) — decides the column of that table */
+  context_column: string | null;
+}
+/** A reference-data table (ddl_version 10): its family, the base it translates (translation), the evidence. */
+export interface ReferenceFamilyRow { table_name: string; family: string; base_table: string | null; evidence: string }
+/** The whole data-access fact set of a release (what replaceAll writes). */
+export interface SecurityFacts {
+  rows: TableSecurityRow[]; disallowed: TableDisallowedRow[]; areaPrivileges: SecAreaPrivilegeRow[]; referenceFamilies: ReferenceFamilyRow[];
+  meta: Record<string, string>;
+}
+
+// ---- security: the per-instance customer layer (library migrations v2 + v3 / sqlite factsdb; src/securityLayer.ts) ----
+/** The loaded layer of one pod instance: the export stamp that serves it (one layer per host). */
+export interface SecInstanceRow { instance: string; stamp: string; loaded_at: string; grantee: string; counts: string }
+/** One FND_OBJECTS registration of the instance (names only): the FROM object + key columns of the isolated form. */
+export interface SecInstanceObjectRow {
+  instance: string; obj_name: string; database_object_name: string;
+  pk1_column: string | null; pk2_column: string | null; pk3_column: string | null; pk4_column: string | null; pk5_column: string | null;
+}
+/** One (object, privilege) that carries an active ALLOW grant on the instance, whoever the grantee, with the
+ *  signature of its WHOLE grant set (v3 — the same `grant_sig` as U's: every granted pair forms equivalence
+ *  classes, which is what pool 2 of the privilege choice decides on). */
+export interface SecInstancePrivilegeRow { instance: string; obj_name: string; privilege: string; grant_sig: string; n_grants: number }
+/** A customer copy of an FBI / analysis duty → the seeded duty it copies (v3, names only; e.g. a
+ *  `<prefix>_FBI_…_DUTY_HCM_NEW` role → `ORA_FBI_…_DUTY_HCM`). */
+export interface SecDutyAliasRow { instance: string; duty_role: string; seeded_role: string }
+/** U: one (object, privilege, instance type) granted to the BI server identity. `grant_sig` is the
+ *  signature of the pair's WHOLE grant set (grantee, instance type, instance-set NAME): two
+ *  privileges with equal signatures produce the same predicate for every user. */
+export interface SecUPairRow { instance: string; obj_name: string; privilege: string; instance_type: string; grant_sig: string; n_grants: number }
+/** The HCM route: one (duty role, object, privilege) held by an FBI / analysis duty. */
+export interface SecDutyPairRow { instance: string; duty_role: string; obj_name: string; privilege: string; grant_sig: string; n_grants: number }
+/** What the loader hands replaceLayer (rows without the instance column). */
+export interface SecLayerInput {
+  grantee: string;
+  objects: Omit<SecInstanceObjectRow, "instance">[];
+  privileges: Omit<SecInstancePrivilegeRow, "instance">[];
+  u: Omit<SecUPairRow, "instance">[];
+  duties: Omit<SecDutyPairRow, "instance">[];
+  aliases: Omit<SecDutyAliasRow, "instance">[];
+  roleGrants: Omit<SecRoleGrantRow, "instance">[];
+}
+/** v4: one (role, object, privilege) a seeded job / abstract / discretionary role holds on the pod — names only. */
+export interface SecRoleGrantRow { instance: string; role_name: string; obj_name: string; privilege: string }
+export interface SecLayerCounts { objects: number; privileges: number; u: number; duties: number; aliases: number; roleGrants: number }
 
 // ---- flex ----
 export type FlexKind = "flexfields" | "adf_extensions";

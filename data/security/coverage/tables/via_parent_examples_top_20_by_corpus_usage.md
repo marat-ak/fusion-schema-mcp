@@ -1,0 +1,22 @@
+| table | usage | join column | parent | parent class | source | NOT NULL | chain verdict | hops |
+|---|---|---|---|---|---|---|---|---|
+| ZCA_OBJECT_SHARE_VIEW | 314 | OBJECT_ID | SVC_SERVICE_REQUESTS.SR_ID | DIRECT | corpus_join (147 stmts, 100%) | yes | strict | 1 |
+| POZ_SUPPLIERS | 301 | PARTY_ID | HZ_PARTIES.PARTY_ID | DIRECT | fk | yes | strict | 1 |
+| JTF_RS_REP_MANAGERS | 296 | RESOURCE_ID | HZ_PARTIES.PARTY_ID | DIRECT | fk | yes | strict | 1 |
+| ZCA_SALES_ACCOUNTS | 257 | PARTY_ID | HZ_PARTIES.PARTY_ID | DIRECT | fk | yes | strict | 1 |
+| HZ_PERSON_PROFILES | 190 | PARTY_ID | HZ_PARTIES.PARTY_ID | DIRECT | fk | yes | strict | 1 |
+| ZCA_S_ACCT_RESOURCES | 181 | RESOURCE_ID | HZ_PARTIES.PARTY_ID | DIRECT | fk | yes | strict | 1 |
+| HZ_PARTY_USG_ASSIGNMENTS | 171 | PARTY_ID | HZ_PARTIES.PARTY_ID | DIRECT | fk | yes | strict | 1 |
+| HZ_ORGANIZATION_PROFILES | 157 | PARTY_ID | HZ_PARTIES.PARTY_ID | DIRECT | fk | yes | strict | 1 |
+| ZX_REP_TRX_JX_EXT_T | 124 | DETAIL_TAX_LINE_ID | ZX_REP_TRX_DETAIL_T.DETAIL_TAX_LINE_ID | VIA_JOIN | corpus_join (104 stmts, 95%) | no | leaky | 1 |
+| PJF_OPEN_XFACE_REPORT | 123 | XFACE_REC_ID | PJF_PROJ_ELEMENTS_XFACE.PROJ_ELEMENT_XFACE_ID | VIA_JOIN | corpus_join (6 stmts, 67%) | no | leaky | 1 |
+| HRA_EVAL_SECTIONS | 122 | EVALUATION_ID | HRA_EVALUATIONS.EVALUATION_ID | DIRECT | corpus_join (108 stmts, 95%) | no | leaky | 1 |
+| HRA_EVAL_PARTICIPANTS | 111 | EVALUATION_ID | HRA_EVALUATIONS.EVALUATION_ID | DIRECT | corpus_join (87 stmts, 100%) | no | leaky | 1 |
+| CE_BANK_ACCOUNTS | 103 | BANK_BRANCH_ID | HZ_PARTIES.PARTY_ID | DIRECT | fk | yes | strict | 1 |
+| RCV_SHIPMENT_LINES | 102 | SHIPMENT_HEADER_ID | RCV_SHIPMENT_HEADERS.SHIPMENT_HEADER_ID | VIA_JOIN | fk | yes | leaky | 1 |
+| HRQ_QSTNR_PARTICIPANTS | 93 | PARTICIPANT_ID | HRA_EVAL_PARTICIPANTS.EVAL_PARTICIPANT_ID | VIA_PARENT | corpus_join (5 stmts, 83%) | no | leaky | 1 |
+| XLE_REGISTRATIONS | 90 | SOURCE_ID | XLE_ENTITY_PROFILES.LEGAL_ENTITY_ID | DIRECT | corpus_join (51 stmts, 61%) | no | leaky | 1 |
+| HRA_EVAL_RATINGS | 87 | EVAL_PARTICIPANT_ID | HRA_EVAL_PARTICIPANTS.EVAL_PARTICIPANT_ID | VIA_PARENT | corpus_join (86 stmts, 60%) | no | leaky | 1 |
+| JTF_RS_ROLE_RELATIONS | 87 | ROLE_RESOURCE_ID | JTF_RS_GROUP_MEMBERS.GROUP_MEMBER_ID | VIA_PARENT | corpus_join (50 stmts, 100%) | yes | strict | 1 |
+| PJO_PLANNING_OPTIONS | 87 | PLAN_VERSION_ID | PJO_PLAN_VERSIONS_B.PLAN_VERSION_ID | DIRECT | corpus_join (71 stmts, 99%) | yes | strict | 1 |
+| EGP_CATEGORY_SET_VALID_CATS | 84 | CATEGORY_ID | EGP_CATEGORIES_B.CATEGORY_ID | DIRECT | fk | yes | strict | 1 |

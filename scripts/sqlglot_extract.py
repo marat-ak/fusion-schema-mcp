@@ -3,7 +3,12 @@
 Per sql_unit: parse with sqlglot (dialect=oracle), two-phase schema-fed qualify, then walk the AST:
   x_tables      physical tables/views referenced (CTE names excluded, flagged)
   x_columns     alias-resolved column references w/ context (select|where|join|group|order|having)
-  x_joins       equi-join pairs (ANSI ON + comma-join WHERE equalities), join type
+  x_joins       equi-join pairs (ANSI ON + comma-join WHERE equalities), join type; SEMI = a
+                `col IN (SELECT c …)` or a correlated equality inside EXISTS (…)
+
+Resolution: a column's alias is looked up in its own scope, then the enclosing ones (correlated
+subqueries); an inline view / CTE column is followed to the physical column its projection selects
+(every UNION branch). An equality is attributed only by the scope that owns it.
   x_predicates  <table.column> <op> <literal> facts + found_in (where|join|case|exists|subquery|having)
   x_params      :binds and &lexical parameters (BIP)
   x_projection  top-level output columns: alias + source expression (the unit's public interface)
@@ -34,7 +39,7 @@ import time
 import sqlglot
 from sqlglot import exp
 from sqlglot.optimizer.qualify import qualify
-from sqlglot.optimizer.scope import traverse_scope
+from sqlglot.optimizer.scope import Scope, traverse_scope
 
 #: The ONE parser build these facts are valid for. Bumping it invalidates every f_* row —
 #: stamp it into facts_meta.parser_version and rebuild.
@@ -50,6 +55,7 @@ SCHEMA_DB = "/data/schema.sqlite"
 DIALECT = "oracle"
 LIT_MAX = 120
 EXPR_MAX = 200
+RESOLVE_DEPTH = 12   # inline-view / CTE nesting followed when resolving a column to its physical source
 BATCH = 400          # units fetched per work batch
 PROCS = max(2, mp.cpu_count() - 1)
 
@@ -171,34 +177,89 @@ def extract_one(unit):
             qparsed.append(stmt)  # qualify is best-effort; raw stmt still walkable
 
     for stmt in qparsed:
-        # ---- scope-aware alias resolution: per scope, alias -> physical table (or None if derived)
+        # ---- scope-aware resolution: a column -> the physical (TABLE, COLUMN) pairs it reads
         try:
             scopes = list(traverse_scope(stmt))
         except Exception:
             scopes = []
+        by_expr = {id(s.expression): s for s in scopes}
+        memo = {}
 
-        def resolve(scope, col):
-            """Column -> physical table name, resolved through THIS scope's sources."""
+        def _source(scope, al):
+            """The source an alias names: THIS scope first, then the enclosing scopes (a correlated
+            subquery names its outer query's alias). (source, crossed-a-scope) or (None, False)."""
+            s, crossed = scope, False
+            while s is not None:
+                src = s.sources.get(al) or s.sources.get(al.upper()) or s.sources.get(al.lower())
+                if src is not None:
+                    return src, crossed
+                s, crossed = s.parent, True
+            return None, False
+
+        def _output(sc, name, pos, depth):
+            """The physical pairs behind output column `name` (or position `pos`) of an inline view /
+            CTE / set-operation scope: the projection's column resolved in that scope; a UNION yields
+            the column at that position in EVERY branch."""
+            key = (id(sc), name, pos)
+            if key in memo:
+                return memo[key]
+            memo[key] = []                    # cycle guard (recursive CTE)
+            out = []
+            if depth <= RESOLVE_DEPTH:
+                if sc.union_scopes:
+                    if pos is None:           # a set operation's column names are its FIRST branch's
+                        left = sc
+                        while left.union_scopes:
+                            left = left.union_scopes[0]
+                        sel = left.expression
+                        if isinstance(sel, exp.Select):
+                            pos = next((i for i, p in enumerate(sel.selects) if (p.alias_or_name or "").upper() == name), None)
+                    if pos is not None:
+                        for u in sc.union_scopes:
+                            out += _output(u, None, pos, depth + 1)
+                elif isinstance(sc.expression, exp.Select):
+                    projs = sc.expression.selects
+                    e = (projs[pos] if pos < len(projs) else None) if pos is not None else \
+                        next((p for p in projs if (p.alias_or_name or "").upper() == name), None)
+                    x = e.this if isinstance(e, exp.Alias) else e
+                    if isinstance(x, exp.Column):
+                        out = resolve(sc, x, depth + 1)
+            memo[key] = out
+            return out
+
+        def resolve(scope, col, depth=0):
+            """Column -> [(TABLE, COLUMN)] it reads: the alias through this scope and its enclosing ones,
+            an inline view / CTE followed to the physical column its projection selects."""
+            name = (col.name or "").upper()
             al = col.table or ""
             if al:
-                src = scope.sources.get(al) or scope.sources.get(al.upper()) or scope.sources.get(al.lower())
+                src, _ = _source(scope, al)
                 if isinstance(src, exp.Table):
                     nm = (src.name or "").upper()
-                    return nm if nm in tables else None
-                return None  # derived table / CTE / unknown alias
+                    return [(nm, name)] if nm in tables else []
+                if isinstance(src, Scope):
+                    return _output(src, name, None, depth)
+                return []                     # unknown alias
             # unqualified: unique physical source in scope wins
             phys = [s for s in scope.sources.values() if isinstance(s, exp.Table)]
             if len(phys) == 1:
                 nm = (phys[0].name or "").upper()
-                return nm if nm in tables else None
-            return None
+                return [(nm, name)] if nm in tables else []
+            return []
+
+        def _subquery_scope(q):
+            while isinstance(q, (exp.Subquery, exp.Paren)):
+                sc = by_expr.get(id(q))
+                if sc is not None:
+                    return sc
+                q = q.this
+            return by_expr.get(id(q))
 
         for scope in scopes:
             # columns w/ context
             for c in scope.find_all(exp.Column):
-                tn = resolve(scope, c)
-                if tn:
-                    columns.append((tn, (c.name or "").upper(), _context_of(c)))
+                for tn, cn in resolve(scope, c):
+                    columns.append((tn, cn, _context_of(c)))
 
             # predicates: <col> op <literal>
             for node in scope.find_all(exp.Binary):
@@ -207,33 +268,50 @@ def extract_one(unit):
                     col, lit = (l, r) if isinstance(l, exp.Column) else (r, l) if isinstance(r, exp.Column) else (None, None)
                     if col is None or not _is_literal(lit):
                         continue
-                    tn = resolve(scope, col)
-                    if not tn:
-                        continue
-                    predicates.append((tn, (col.name or "").upper(), node.key.upper(), _lit_text(lit), _context_of(node)))
+                    for tn, cn in resolve(scope, col):
+                        predicates.append((tn, cn, node.key.upper(), _lit_text(lit), _context_of(node)))
             for node in scope.find_all(exp.In):
                 col = node.this
                 if isinstance(col, exp.Column) and node.expressions and all(_is_literal(e) for e in node.expressions):
-                    tn = resolve(scope, col)
-                    if tn:
-                        lits = ",".join(_lit_text(e) for e in node.expressions)[:LIT_MAX]
-                        predicates.append((tn, (col.name or "").upper(), "IN", lits, _context_of(node)))
+                    lits = ",".join(_lit_text(e) for e in node.expressions)[:LIT_MAX]
+                    for tn, cn in resolve(scope, col):
+                        predicates.append((tn, cn, "IN", lits, _context_of(node)))
+                # semi-join: <col> [NOT] IN (SELECT c FROM t …) — the column at the same position of the
+                # subquery's projection (every UNION branch), a tuple IN pairwise
+                q = node.args.get("query")
+                isc = _subquery_scope(q) if q is not None else None
+                if isc is not None:
+                    lhs = node.this.expressions if isinstance(node.this, exp.Tuple) else [node.this]
+                    for i, lc in enumerate(lhs):
+                        if not isinstance(lc, exp.Column):
+                            continue
+                        for lt, lcn in resolve(scope, lc):
+                            for rt, rcn in _output(isc, None, i, 0):
+                                if lt != rt:
+                                    joins.append((lt, lcn, rt, rcn, "SEMI"))
             for node in scope.find_all(exp.Between):
                 col = node.this
                 if isinstance(col, exp.Column) and _is_literal(node.args.get("low")) and _is_literal(node.args.get("high")):
-                    tn = resolve(scope, col)
-                    if tn:
-                        lit = f"{_lit_text(node.args['low'])} AND {_lit_text(node.args['high'])}"[:LIT_MAX]
-                        predicates.append((tn, (col.name or "").upper(), "BETWEEN", lit, _context_of(node)))
+                    lit = f"{_lit_text(node.args['low'])} AND {_lit_text(node.args['high'])}"[:LIT_MAX]
+                    for tn, cn in resolve(scope, col):
+                        predicates.append((tn, cn, "BETWEEN", lit, _context_of(node)))
 
-            # joins: ANSI ON equalities + comma-join WHERE equalities (col = col across tables)
+            # joins: ANSI ON equalities + comma-join WHERE equalities (col = col across tables), each
+            # equality in the scope that owns it (a nested subquery's are its own scope's); a correlated
+            # equality inside EXISTS (…) is a semi-join
+            in_exists = isinstance(scope.expression.parent, exp.Exists)
+
             def join_pairs(node_, jtype):
                 for eqn in node_.find_all(exp.EQ):
+                    if eqn.find_ancestor(exp.Select) is not scope.expression:
+                        continue
                     l, r = eqn.left, eqn.expression
                     if isinstance(l, exp.Column) and isinstance(r, exp.Column):
-                        lt, rt = resolve(scope, l), resolve(scope, r)
-                        if lt and rt and lt != rt:
-                            joins.append((lt, (l.name or "").upper(), rt, (r.name or "").upper(), jtype))
+                        crossed = in_exists and any(c.table and _source(scope, c.table)[1] for c in (l, r))
+                        for lt, lcn in resolve(scope, l):
+                            for rt, rcn in resolve(scope, r):
+                                if lt != rt:
+                                    joins.append((lt, lcn, rt, rcn, "SEMI" if crossed else jtype))
 
             for j in scope.find_all(exp.Join):
                 on = j.args.get("on")

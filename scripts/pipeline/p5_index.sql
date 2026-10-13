@@ -34,6 +34,7 @@ SET max_parallel_maintenance_workers = 0;
 DROP INDEX IF EXISTS {{V}}.ix_rq_embedding_hnsw;
 DROP INDEX IF EXISTS {{V}}.ix_rq_multi_embedding_hnsw;
 DROP INDEX IF EXISTS {{V}}.ix_layout_vec_embedding_hnsw;
+DROP INDEX IF EXISTS {{V}}.ix_otbi_vec_embedding_hnsw;
 
 -- multi-vector KNN: what findSimilarQueries actually searches
 CREATE INDEX ix_rq_multi_embedding_hnsw
@@ -48,6 +49,10 @@ CREATE INDEX ix_rq_embedding_hnsw
 CREATE INDEX ix_layout_vec_embedding_hnsw
   ON {{V}}.layout_patterns_vec USING hnsw (embedding vector_l2_ops);
 
+-- OTBI presentation texts: what searchOtbi searches (ddl_version 4, p5_otbi.sql)
+CREATE INDEX ix_otbi_vec_embedding_hnsw
+  ON {{V}}.otbi_vec USING hnsw (embedding vector_l2_ops);
+
 -- NOT indexed: {{V}}.col_vec.vec. It is a column-text embedding CACHE that is
 -- only ever read by `WHERE hash IN (...)` (src/db/base/colCache.ts) — no distance
 -- query touches it, so a vector index there would be dead weight. Reported rather
@@ -56,6 +61,7 @@ CREATE INDEX ix_layout_vec_embedding_hnsw
 ANALYZE {{V}}.report_queries_vec_multi;
 ANALYZE {{V}}.report_queries;
 ANALYZE {{V}}.layout_patterns_vec;
+ANALYZE {{V}}.otbi_vec;
 
 SELECT indexname, pg_size_pretty(pg_relation_size('{{V}}.' || indexname)) AS size
 FROM   pg_indexes WHERE schemaname = '{{V}}' AND indexdef LIKE '%hnsw%' ORDER BY 1;

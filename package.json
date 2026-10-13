@@ -16,6 +16,7 @@
     "provision:dev": "tsx src/provision.ts",
     "migrate-split": "node dist/migrate-split.js",
     "migrate-split:dev": "tsx src/migrate-split.ts",
+    "sec-layer": "node dist/securityLayer.js",
     "start": "node dist/server.js",
     "dev": "tsx src/server.ts",
     "smoke": "node dist/smoke.js",

@@ -104,6 +104,151 @@ export const DDL_REPORTS = `
   CREATE INDEX IF NOT EXISTS main.ix_plsql_api_tables_t ON plsql_api_tables(table_name, statements DESC);
   CREATE TABLE IF NOT EXISTS main.plsql_meta (k TEXT PRIMARY KEY, v TEXT);
 
+  CREATE TABLE IF NOT EXISTS main.otbi_subject_area (
+    name           TEXT PRIMARY KEY,
+    pillar         TEXT,
+    n_folders      INTEGER NOT NULL DEFAULT 0,
+    n_fact_folders INTEGER NOT NULL DEFAULT 0,
+    n_columns      INTEGER NOT NULL DEFAULT 0,
+    fact_folders   TEXT,
+    in_lineage     INTEGER NOT NULL DEFAULT 0,
+    in_crawl       INTEGER NOT NULL DEFAULT 0,
+    in_corpus      INTEGER NOT NULL DEFAULT 0,
+    text_hash      TEXT
+  );
+  CREATE TABLE IF NOT EXISTS main.otbi_folder (
+    subject_area TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    kind_source  TEXT NOT NULL,
+    description  TEXT,
+    desc_source  TEXT,
+    db_tables    TEXT,
+    n_columns    INTEGER NOT NULL DEFAULT 0,
+    n_measures   INTEGER NOT NULL DEFAULT 0,
+    in_lineage   INTEGER NOT NULL DEFAULT 0,
+    in_crawl     INTEGER NOT NULL DEFAULT 0,
+    in_corpus    INTEGER NOT NULL DEFAULT 0,
+    unit_id      TEXT,
+    grain_note   TEXT,
+    nested       INTEGER NOT NULL DEFAULT 0,
+    ordinal      INTEGER,
+    text_hash    TEXT,
+    PRIMARY KEY (subject_area, name)
+  );
+  CREATE TABLE IF NOT EXISTS main.otbi_column (
+    subject_area TEXT NOT NULL,
+    folder       TEXT NOT NULL,
+    name         TEXT NOT NULL,
+    data_type    TEXT,
+    kind         TEXT NOT NULL,
+    aggregation  TEXT,
+    expression   TEXT,
+    db_refs      TEXT,
+    vo_refs      TEXT,
+    indexed      INTEGER NOT NULL DEFAULT 0,
+    description  TEXT,
+    desc_source  TEXT,
+    gap_cause    TEXT,
+    in_lineage   INTEGER NOT NULL DEFAULT 0,
+    in_crawl     INTEGER NOT NULL DEFAULT 0,
+    in_probe     INTEGER NOT NULL DEFAULT 0,
+    ordinal      INTEGER,
+    text_hash    TEXT,
+    PRIMARY KEY (subject_area, folder, name)
+  );
+  CREATE INDEX IF NOT EXISTS main.ix_otbi_column_hash ON otbi_column(text_hash);
+  CREATE INDEX IF NOT EXISTS main.ix_otbi_folder_hash ON otbi_folder(text_hash);
+  CREATE VIRTUAL TABLE IF NOT EXISTS main.otbi_vec USING vec0(embedding FLOAT[${EMBED_DIM}], +text_hash TEXT, +kind TEXT);
+  CREATE TABLE IF NOT EXISTS main.otbi_meta (k TEXT PRIMARY KEY, v TEXT);
+  -- the VO hop, the exposure index and the area -> duty map (same shape as ddl.sql ddl_version 9)
+  CREATE TABLE IF NOT EXISTS main.otbi_vo (
+    subject_area TEXT NOT NULL,
+    folder       TEXT NOT NULL,
+    vo_path      TEXT NOT NULL,
+    vo_def       TEXT NOT NULL,
+    db_objects   TEXT NOT NULL,
+    vo_attrs     TEXT NOT NULL,
+    PRIMARY KEY (subject_area, folder, vo_path, vo_def)
+  );
+  CREATE INDEX IF NOT EXISTS main.ix_otbi_vo_def ON otbi_vo(vo_def);
+  CREATE TABLE IF NOT EXISTS main.otbi_column_ref (
+    subject_area   TEXT NOT NULL,
+    folder         TEXT NOT NULL,
+    folder_kind    TEXT NOT NULL,
+    column_name    TEXT NOT NULL,
+    table_name     TEXT NOT NULL,
+    db_column      TEXT NOT NULL,
+    src            TEXT NOT NULL,
+    via_expression INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (subject_area, folder, column_name, table_name, db_column)
+  );
+  CREATE INDEX IF NOT EXISTS main.ix_otbi_column_ref_table ON otbi_column_ref(table_name, db_column);
+  CREATE INDEX IF NOT EXISTS main.ix_otbi_column_ref_area ON otbi_column_ref(subject_area, table_name);
+  CREATE TABLE IF NOT EXISTS main.otbi_area_duty (
+    subject_area  TEXT NOT NULL,
+    duty_code     TEXT NOT NULL,
+    duty_name     TEXT NOT NULL,
+    guide         TEXT NOT NULL,
+    guide_release TEXT NOT NULL,
+    matched_by    TEXT NOT NULL,
+    guide_area    TEXT NOT NULL,
+    PRIMARY KEY (subject_area, duty_code)
+  );
+  CREATE TABLE IF NOT EXISTS main.otbi_area_job (
+    subject_area TEXT NOT NULL,
+    job_code     TEXT NOT NULL,
+    job_name     TEXT,
+    matched_by   TEXT NOT NULL,
+    guide        TEXT NOT NULL,
+    PRIMARY KEY (subject_area, job_code)
+  );
+  CREATE TABLE IF NOT EXISTS main.unit_titles (
+    title  TEXT NOT NULL,
+    id     TEXT NOT NULL,
+    source TEXT NOT NULL,
+    PRIMARY KEY (title, id)
+  );
+  CREATE INDEX IF NOT EXISTS main.ix_unit_titles_id ON unit_titles(id);
+
+  CREATE TABLE IF NOT EXISTS main.table_security (
+    table_name  TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    context     TEXT NOT NULL,
+    urda_column TEXT NOT NULL,
+    ref_object  TEXT,
+    ref_column  TEXT,
+    is_primary  INTEGER NOT NULL DEFAULT 0,
+    confidence  TEXT NOT NULL,
+    evidence    INTEGER NOT NULL DEFAULT 0,
+    reason      TEXT,
+    PRIMARY KEY (table_name, column_name, context)
+  );
+  CREATE TABLE IF NOT EXISTS main.table_disallowed (
+    table_name TEXT PRIMARY KEY,
+    reason     TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS main.sec_area_privilege (
+    area_or_product TEXT NOT NULL,
+    ordinal         INTEGER NOT NULL,
+    obj_name        TEXT NOT NULL,
+    privilege       TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    evidence        TEXT NOT NULL,
+    instance_scope  TEXT NOT NULL,
+    entity_table    TEXT,
+    vo_def          TEXT,
+    context_column  TEXT,
+    PRIMARY KEY (area_or_product, ordinal)
+  );
+  CREATE TABLE IF NOT EXISTS main.sec_meta (k TEXT PRIMARY KEY, v TEXT);
+  CREATE TABLE IF NOT EXISTS main.table_reference_family (
+    table_name TEXT PRIMARY KEY,
+    family     TEXT NOT NULL,
+    base_table TEXT,
+    evidence   TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS main.layout_patterns (
     rowid INTEGER PRIMARY KEY,
     id TEXT UNIQUE NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL,
@@ -215,6 +360,64 @@ export const DDL_FACTS = `
   );
   CREATE INDEX IF NOT EXISTS factsdb.ix_table_rules ON table_rules(table_name, enabled);
   CREATE TABLE IF NOT EXISTS factsdb.facts_meta (k TEXT PRIMARY KEY, v TEXT);
+  -- the per-instance data-access security layer (names only; src/securityLayer.ts loads it, never boot) —
+  -- same shape as the Postgres library migrations v2 + v3 (src/db/postgres/ddl.ts)
+  CREATE TABLE IF NOT EXISTS factsdb.sec_instance (
+    instance  TEXT PRIMARY KEY,
+    stamp     TEXT NOT NULL,
+    loaded_at TEXT NOT NULL,
+    grantee   TEXT NOT NULL,
+    counts    TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS factsdb.sec_instance_object (
+    instance             TEXT NOT NULL,
+    obj_name             TEXT NOT NULL,
+    database_object_name TEXT NOT NULL,
+    pk1_column TEXT, pk2_column TEXT, pk3_column TEXT, pk4_column TEXT, pk5_column TEXT,
+    PRIMARY KEY (instance, obj_name)
+  );
+  CREATE INDEX IF NOT EXISTS factsdb.ix_sec_instance_object_db ON sec_instance_object(instance, database_object_name);
+  CREATE TABLE IF NOT EXISTS factsdb.sec_instance_privilege (
+    instance  TEXT NOT NULL,
+    obj_name  TEXT NOT NULL,
+    privilege TEXT NOT NULL,
+    grant_sig TEXT NOT NULL,
+    n_grants  INTEGER NOT NULL,
+    PRIMARY KEY (instance, obj_name, privilege)
+  );
+  CREATE TABLE IF NOT EXISTS factsdb.sec_instance_u (
+    instance      TEXT NOT NULL,
+    obj_name      TEXT NOT NULL,
+    privilege     TEXT NOT NULL,
+    instance_type TEXT NOT NULL,
+    grant_sig     TEXT NOT NULL,
+    n_grants      INTEGER NOT NULL,
+    PRIMARY KEY (instance, obj_name, privilege, instance_type)
+  );
+  CREATE TABLE IF NOT EXISTS factsdb.sec_instance_duty (
+    instance  TEXT NOT NULL,
+    duty_role TEXT NOT NULL,
+    obj_name  TEXT NOT NULL,
+    privilege TEXT NOT NULL,
+    grant_sig TEXT NOT NULL,
+    n_grants  INTEGER NOT NULL,
+    PRIMARY KEY (instance, duty_role, obj_name, privilege)
+  );
+  CREATE INDEX IF NOT EXISTS factsdb.ix_sec_instance_duty_obj ON sec_instance_duty(instance, obj_name);
+  CREATE TABLE IF NOT EXISTS factsdb.sec_instance_duty_alias (
+    instance    TEXT NOT NULL,
+    duty_role   TEXT NOT NULL,
+    seeded_role TEXT NOT NULL,
+    PRIMARY KEY (instance, duty_role)
+  );
+  CREATE TABLE IF NOT EXISTS factsdb.sec_instance_role_grant (
+    instance  TEXT NOT NULL,
+    role_name TEXT NOT NULL,
+    obj_name  TEXT NOT NULL,
+    privilege TEXT NOT NULL,
+    PRIMARY KEY (instance, role_name, obj_name, privilege)
+  );
+  CREATE INDEX IF NOT EXISTS factsdb.ix_sec_instance_role_grant_obj ON sec_instance_role_grant(instance, obj_name);
 `;
 
 /** compile-time lookup indexes on the schema catalog (built AFTER the bulk load for speed). */

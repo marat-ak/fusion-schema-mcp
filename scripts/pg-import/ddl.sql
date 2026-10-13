@@ -1,5 +1,5 @@
 -- fusion database DDL (spec 2026-09-16 D13, plan decisions 2026-09-18): schema-per-version catalog.
--- ddl_version: 3
+-- ddl_version: 10
 --
 -- Blocks (applied by import.mts, in this order):
 --   @block meta    — schema `meta`: seeds + the single-row active_version pointer
@@ -300,6 +300,205 @@ CREATE TABLE IF NOT EXISTS {{V}}.plsql_api_tables (
 );
 CREATE INDEX IF NOT EXISTS ix_plsql_api_tables_t ON {{V}}.plsql_api_tables (table_name, statements DESC);
 CREATE TABLE IF NOT EXISTS {{V}}.plsql_meta (k text PRIMARY KEY, v text);
+
+-- OTBI presentation catalog (ddl_version 4): subject areas → presentation folders → presentation columns
+-- of the BI logical model, names VERBATIM (double spaces, the `- ` / `-- ` child-folder prefixes),
+-- built by scripts/pipeline/p3_otbi.* (lineage workbooks ∪ SOAP crawl ∪ probes) and projected by
+-- p5_otbi.sql. Every description is derived from existing data (no LLM); `gap_cause` says why one is
+-- missing. `otbi_vec` holds ONE vector per distinct entity text (otbi_*.text_hash → otbi_vec.text_hash):
+-- a column text carries no subject area / folder, so "Department Name" across 300 subject areas is one
+-- vector; searchOtbi resolves a hit back to every entity that shares the hash.
+CREATE TABLE IF NOT EXISTS {{V}}.otbi_subject_area (
+  name           text PRIMARY KEY,
+  pillar         text,                    -- cx / fin / grc / hcm / ppm / scm-and-prc (comma-joined when shared)
+  n_folders      integer NOT NULL DEFAULT 0,
+  n_fact_folders integer NOT NULL DEFAULT 0,
+  n_columns      integer NOT NULL DEFAULT 0,
+  fact_folders   text,                    -- JSON array (text)
+  in_lineage     integer NOT NULL DEFAULT 0,
+  in_crawl       integer NOT NULL DEFAULT 0,
+  in_corpus      integer NOT NULL DEFAULT 0,
+  text_hash      text
+);
+CREATE TABLE IF NOT EXISTS {{V}}.otbi_folder (
+  subject_area text NOT NULL,
+  name         text NOT NULL,
+  kind         text NOT NULL,             -- fact / dimension
+  kind_source  text NOT NULL,             -- measures / name / default
+  description  text,
+  desc_source  text,
+  db_tables    text,                      -- JSON array (text)
+  n_columns    integer NOT NULL DEFAULT 0,
+  n_measures   integer NOT NULL DEFAULT 0,
+  in_lineage   integer NOT NULL DEFAULT 0,
+  in_crawl     integer NOT NULL DEFAULT 0,
+  in_corpus    integer NOT NULL DEFAULT 0,
+  unit_id      text,                      -- the otbi L2 unit `otbi:<SA>__<Folder>` behind the folder, when one exists
+  grain_note   text,                      -- table_grain notes of the mapped multi-row tables
+  nested       integer NOT NULL DEFAULT 0, -- a `A > B > C` extension-folder path
+  ordinal      integer,
+  text_hash    text,
+  PRIMARY KEY (subject_area, name)
+);
+CREATE TABLE IF NOT EXISTS {{V}}.otbi_column (
+  subject_area text NOT NULL,
+  folder       text NOT NULL,
+  name         text NOT NULL,
+  data_type    text,
+  kind         text NOT NULL,             -- attribute / measure
+  aggregation  text,                      -- sum / count / count distinct / min / max / avg
+  expression   text,                      -- resolved physical expression when the column is not one plain DB column
+  db_refs      text,                      -- JSON array (text): [{t, c, src:[lineage / probe / crawl]}]
+  vo_refs      text,                      -- JSON array (text): the BI view-object usage paths behind the column (ddl_version 9)
+  indexed      integer NOT NULL DEFAULT 0,
+  description  text,
+  desc_source  text,                      -- table_remark / view_remark / expression_remarks
+  gap_cause    text,                      -- set when description is NULL
+  in_lineage   integer NOT NULL DEFAULT 0,
+  in_crawl     integer NOT NULL DEFAULT 0,
+  in_probe     integer NOT NULL DEFAULT 0,
+  ordinal      integer,
+  text_hash    text,
+  PRIMARY KEY (subject_area, folder, name)
+);
+CREATE INDEX IF NOT EXISTS ix_otbi_column_hash   ON {{V}}.otbi_column (text_hash);
+CREATE INDEX IF NOT EXISTS ix_otbi_folder_hash   ON {{V}}.otbi_folder (text_hash);
+CREATE TABLE IF NOT EXISTS {{V}}.otbi_vec (
+  text_hash text PRIMARY KEY,
+  kind      text NOT NULL,                -- column / folder / subject_area
+  embedding vector(384) NOT NULL
+);
+CREATE TABLE IF NOT EXISTS {{V}}.otbi_meta (k text PRIMARY KEY, v text);
+
+-- The VO hop (ddl_version 9, plan 2026-10-04 C1): per presentation folder, the BI view objects behind it
+-- (r13-26B lineage workbooks): vo_def = the VO definition, vo_path = its usage path in the BI model,
+-- db_objects = the physical objects its mapped attributes read, vo_attrs = [{attr, db_object, db_column}].
+CREATE TABLE IF NOT EXISTS {{V}}.otbi_vo (
+  subject_area text NOT NULL,
+  folder       text NOT NULL,
+  vo_path      text NOT NULL,
+  vo_def       text NOT NULL,
+  db_objects   text NOT NULL,             -- JSON array (text)
+  vo_attrs     text NOT NULL,             -- JSON array (text): [{attr, db_object, db_column}]
+  PRIMARY KEY (subject_area, folder, vo_path, vo_def)
+);
+CREATE INDEX IF NOT EXISTS ix_otbi_vo_def ON {{V}}.otbi_vo (vo_def);
+-- The exposure index (ddl_version 9, C2): one row per physical column a presentation column reads
+-- (otbi_column.db_refs exploded) — table -> subject areas / folders / columns in one indexed read.
+-- via_expression = 1 when the presentation column is an expression over its refs.
+CREATE TABLE IF NOT EXISTS {{V}}.otbi_column_ref (
+  subject_area   text NOT NULL,
+  folder         text NOT NULL,
+  folder_kind    text NOT NULL,           -- fact / dimension (the folder's kind)
+  column_name    text NOT NULL,           -- the presentation column
+  table_name     text NOT NULL,
+  db_column      text NOT NULL,
+  src            text NOT NULL,           -- lineage / probe / crawl, comma-joined
+  via_expression integer NOT NULL DEFAULT 0,
+  PRIMARY KEY (subject_area, folder, column_name, table_name, db_column)
+);
+CREATE INDEX IF NOT EXISTS ix_otbi_column_ref_table ON {{V}}.otbi_column_ref (table_name, db_column);
+CREATE INDEX IF NOT EXISTS ix_otbi_column_ref_area  ON {{V}}.otbi_column_ref (subject_area, table_name);
+-- Subject area -> duty role CODE (ddl_version 9, C5) from Oracle's "Subject Areas for Transactional
+-- Business Intelligence" guides (scripts/pipeline/p3_tbi_guides.py -> data/otbi/tbi_guides/<release>/):
+-- keyed on the catalog's area name (normalized-name match, or a curated rename alias with its evidence);
+-- the codes VERBATIM as the guide prints them (the per-pod HCM mapping happens at plan time). An area
+-- without a row is unmapped (otbi_meta.area_duty_unmapped) = denied by the subject-area gate.
+CREATE TABLE IF NOT EXISTS {{V}}.otbi_area_duty (
+  subject_area  text NOT NULL,            -- the catalog's area name (verbatim)
+  duty_code     text NOT NULL,            -- the guide's Code Name (verbatim)
+  duty_name     text NOT NULL,
+  guide         text NOT NULL,            -- FAOFB / FAOHB / ... (comma-joined when several guides list the pair)
+  guide_release text NOT NULL,
+  matched_by    text NOT NULL,            -- name | alias
+  guide_area    text NOT NULL,            -- the guide's own area name
+  PRIMARY KEY (subject_area, duty_code)
+);
+-- Subject area -> guide JOB role code (ddl_version 10, revised phase 3 / job-role consensus): the job roles the
+-- TBI guides name for the area — through the area's duty codes (duty pages: job_codes) or on the job page itself
+-- (its subject areas, normalized name / rename alias). The consensus privilege of an (area, object) = what these
+-- job roles hold on the object on the pod (customer.sec_instance_role_grant), the codes verbatim.
+CREATE TABLE IF NOT EXISTS {{V}}.otbi_area_job (
+  subject_area  text NOT NULL,
+  job_code      text NOT NULL,            -- the guide's Code Name (ORA_*_JOB / _ABSTRACT / …), verbatim
+  job_name      text,                     -- the job page's name (NULL when only a duty page names the code)
+  matched_by    text NOT NULL,            -- duty (via one of the area's duty codes) | page (the job page lists the area)
+  guide         text NOT NULL,
+  PRIMARY KEY (subject_area, job_code)
+);
+
+-- every L2 unit title → the corpus row that carries its statement (ddl_version 4). A statement shared by
+-- several units (one OTBI physical SQL serves up to 14,009 `<SA>.<Folder>` titles) is ONE corpus row
+-- whose `title` is the primary unit's; the other titles resolve only through here. Replaces the
+-- 50-per-row `reports` alias scan for title lookups (`reports` keeps the bip `.xdm` paths).
+CREATE TABLE IF NOT EXISTS {{V}}.unit_titles (
+  title  text NOT NULL,
+  id     text NOT NULL,                   -- report_queries.id (sql:<hash>)
+  source text NOT NULL,                   -- bip-report / otbi / view / catalog
+  PRIMARY KEY (title, id)
+);
+CREATE INDEX IF NOT EXISTS ix_unit_titles_title ON {{V}}.unit_titles (title text_pattern_ops);
+CREATE INDEX IF NOT EXISTS ix_unit_titles_id    ON {{V}}.unit_titles (id);
+
+-- Data-access security facts (ddl_version 5; table_disallowed 6; names-only 7; curated rows scoped by
+-- instance, never nameless 8; (area, entity) keys + no pod export 9), built by
+-- scripts/pipeline/p5_security.sql from the release catalog + the pinned parse facts +
+-- p5_security_rules.json + Oracle's seeded policy extract (never at boot). NAMES ONLY (spec 2026-10-02
+-- §7): no predicate text and no pod id is stored — the condition is produced on the target pod by
+-- FND_DATA_SECURITY.GET_SECURITY_PREDICATE(privilege, object, alias) at SQL-generation time. What
+-- differs per pod (registrations, grants, duties) lives ONLY in the customer layer
+-- `customer.sec_instance_*` (src/db/postgres/ddl.ts) — the seed export's sec_object / sec_privilege
+-- copies are gone (ddl_version 9).
+-- table_security = one row per (object, column, URDA context) — the context column -> reference
+-- object map; is_primary = the ONE context the table-keyed plan secures; confidence 'ambiguous' = an
+-- unresolved column on a USED object — the p6 gate fails a release that carries one.
+-- table_disallowed = the objects with an unresolved context column that no corpus source uses.
+-- sec_area_privilege = the curated area/product -> (object, privilege) rows that OVERRIDE the resolver's
+-- rule, each scoped to one instance host or '*', optionally keyed to the (area, entity) the evidence
+-- names (entity_table, vo_def); every row names its object and privilege.
+-- sec_meta = version stamps, the context order + evidence objects, the HCM prefixes, the
+-- privilege-prefix aliases, the audited primary contexts, the sensitive objects, stats.
+-- table_reference_family (ddl_version 10) = the reference-data tables of the dictionary (lookup, translation,
+-- calendar, currency, territory / geography), each by its name pattern AND its reference-shaped columns (the
+-- evidence text names both): an end user reads them even when they relate to secured data (the structural
+-- none rule); a translation table only while its base is not secured on the pod (checked at plan time).
+CREATE TABLE IF NOT EXISTS {{V}}.table_security (
+  table_name  text NOT NULL,
+  column_name text NOT NULL,
+  context     text NOT NULL,              -- BU|LEDGER|DAS|BOOK|SET|INV_ORG|ITM_ORG|COST_ORG|MFG_ORG|PRJ_ORG|INTERCO|BUDGET
+  urda_column text NOT NULL,              -- the FUN_USER_ROLE_DATA_ASGNMNTS column that identifies the context (detection evidence)
+  ref_object  text,                       -- the registered reference object the condition is generated on (FUN_ALL_BUSINESS_UNITS_V, GL_LEDGERS, …)
+  ref_column  text,                       -- its key the context column joins (BU_ID, LEDGER_ID, …)
+  is_primary  integer NOT NULL DEFAULT 0,
+  confidence  text NOT NULL,              -- oracle_policy|oracle_precedent|module|fk|corpus_join|lineage|name|prefix|sibling|curated|ambiguous
+  evidence    integer NOT NULL DEFAULT 0, -- distinct corpus statements backing the resolution (oracle_policy: its instance sets)
+  reason      text,
+  PRIMARY KEY (table_name, column_name, context)
+);
+CREATE TABLE IF NOT EXISTS {{V}}.table_disallowed (
+  table_name text PRIMARY KEY,
+  reason     text NOT NULL                -- the unresolved column(s) and the empty corpus usage
+);
+CREATE TABLE IF NOT EXISTS {{V}}.sec_area_privilege (
+  area_or_product text NOT NULL,          -- catalog application short name (tables.module) or an OTBI subject-area / business-area name
+  ordinal         integer NOT NULL,
+  obj_name        text NOT NULL,          -- FND_OBJECTS.OBJ_NAME the row decides the privilege of
+  privilege       text NOT NULL,          -- FND_FORM_FUNCTIONS.FUNCTION_NAME
+  source          text NOT NULL,          -- trace|inferred (= the grade of its conditions)
+  evidence        text NOT NULL,
+  instance_scope  text NOT NULL,          -- '*' or ONE pod host (as runSql reports `instance`); several hosts = several rows
+  entity_table    text,                   -- the (area, entity) key: the VO reference entity the evidence names (NULL = an area/product-level row)
+  vo_def          text,                   -- the VO definition the evidence came from, when known
+  context_column  text,                   -- ddl_version 10: TABLE.COLUMN the entity joins in the evidence (a trace names it) — decides the column
+  PRIMARY KEY (area_or_product, ordinal)
+);
+CREATE TABLE IF NOT EXISTS {{V}}.sec_meta (k text PRIMARY KEY, v text);
+CREATE TABLE IF NOT EXISTS {{V}}.table_reference_family (
+  table_name text PRIMARY KEY,
+  family     text NOT NULL,               -- lookup|translation|calendar|currency|territory
+  base_table text,                        -- translation: the base table it translates (NULL when the dictionary has none)
+  evidence   text NOT NULL                -- the name pattern and the reference-shaped columns that place it
+);
 
 CREATE TABLE IF NOT EXISTS {{V}}.table_grain (
   table_name      text PRIMARY KEY,

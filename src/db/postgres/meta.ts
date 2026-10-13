@@ -5,19 +5,25 @@ import type { TableName } from "../base/provider.js";
 import type { PostgresProvider } from "./provider.js";
 
 /** The `ddl_version` header of scripts/pg-import/ddl.sql this code is written against. */
-export const EXPECTED_DDL_VERSION = "3"; // v2: punctuation-stripped tsvector (FTS5 tokenizer parity); v3: plsql_* inventory tables
-/** The library migrations (./ddl.ts) a serving database must already carry. */
-export const EXPECTED_LIBRARY_VERSION = 1;
+export const EXPECTED_DDL_VERSION = "10"; // v2: punctuation-stripped tsvector (FTS5 tokenizer parity); v3: plsql_* inventory tables; v4: otbi_* presentation catalog + unit_titles; v5: table_security / sec_meta data-access facts; v6: table_disallowed; v7: names-only sec_object / sec_privilege / sec_area_privilege (table_grants + the variant column gone); v8: sec_area_privilege names NOT NULL + instance_scope (the `pending` rows gone); v9: otbi_vo / otbi_column_ref / otbi_area_duty + otbi_column.vo_refs, sec_area_privilege (area, entity) keys, the pod export copies sec_object / sec_privilege gone; v10: otbi_area_job + table_reference_family + sec_area_privilege.context_column
+/** The library migrations (./ddl.ts) a serving database must already carry. v2: the per-instance security layer;
+ *  v3: the grant-set signature on every granted pair + the customer duty aliases (every loaded layer emptied — reload). */
+export const EXPECTED_LIBRARY_VERSION = 4;
 
 const ALL_TABLES: TableName[] = [
   "tables", "columns", "pkeys", "fkeys", "indexes", "relationships", "meta",
   "report_queries", "report_queries_vec_multi",
   "table_grain", "grain_meta", "table_usages", "usage_meta", "table_predicates", "pred_meta", "table_join_columns",
   "plsql_packages", "plsql_api", "plsql_api_tables", "plsql_meta",
+  "otbi_subject_area", "otbi_folder", "otbi_column", "otbi_vec", "otbi_meta", "unit_titles",
+  "otbi_vo", "otbi_column_ref", "otbi_area_duty", "otbi_area_job", "table_reference_family",
+  "table_security", "table_disallowed", "sec_area_privilege", "sec_meta",
   "layout_patterns", "layout_patterns_vec", "layout_meta",
   "flexfields", "adf_extensions", "enrich", "col_vec",
   "enrich_usage", "batch_jobs", "batch_items", "gjob_jobs", "gjob_items", "gjob_control",
   "table_rules", "facts_meta",
+  "sec_instance", "sec_instance_object", "sec_instance_privilege", "sec_instance_u", "sec_instance_duty", "sec_instance_duty_alias",
+  "sec_instance_role_grant",
 ];
 
 /**

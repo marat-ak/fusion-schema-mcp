@@ -31,6 +31,10 @@ const ROLE: Record<TableName, Role> = {
   table_grain: "version", grain_meta: "version", table_usages: "version", usage_meta: "version",
   table_predicates: "version", pred_meta: "version", table_join_columns: "version",
   plsql_packages: "version", plsql_api: "version", plsql_api_tables: "version", plsql_meta: "version",
+  otbi_subject_area: "version", otbi_folder: "version", otbi_column: "version", otbi_vec: "version", otbi_meta: "version",
+  unit_titles: "version",
+  otbi_vo: "version", otbi_column_ref: "version", otbi_area_duty: "version", otbi_area_job: "version", table_reference_family: "version",
+  table_security: "version", table_disallowed: "version", sec_area_privilege: "version", sec_meta: "version",
   layout_patterns: "version", layout_patterns_vec: "version", layout_meta: "version",
   // rebuildable embedding cache: ddl_version 1 puts it in the version schema; an upgrade re-embeds
   col_vec: "version",
@@ -43,6 +47,9 @@ const ROLE: Record<TableName, Role> = {
   table_rules: "customer", facts_meta: "customer",
   enrich_usage: "customer", batch_jobs: "customer", batch_items: "customer",
   gjob_jobs: "customer", gjob_items: "customer", gjob_control: "customer",
+  // the per-instance data-access security layer (library migrations v2 + v3; refreshed independently of releases)
+  sec_instance: "customer", sec_instance_object: "customer", sec_instance_privilege: "customer",
+  sec_instance_u: "customer", sec_instance_duty: "customer", sec_instance_duty_alias: "customer", sec_instance_role_grant: "customer",
 
   // no Postgres counterpart
   tables_fts: "absent", report_queries_vec: "absent",

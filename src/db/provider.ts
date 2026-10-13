@@ -37,11 +37,16 @@ export interface SchemaApi {
 export interface CorpusApi {
   knn(vec: Float32Array, k: number, opts?: { source?: string; multi?: boolean }): Promise<T.CorpusHit[]>;
   hasMultiVectors(): Promise<boolean>;
+  /** Title lookups resolve through `unit_titles` (every L2 unit title → its statement's row) OR the row's
+   *  own `title` (a runtime-ingested row has no unit_titles entry). "Largest SQL wins" among several rows. */
   byTitle(title: string): Promise<T.CorpusRow | null>;
   byId(id: string): Promise<T.CorpusRow | null>;
   siblings(title: string): Promise<T.SiblingRow[]>;
   byTitlePrefix(pattern: string, limit: number): Promise<T.CorpusRowLite[]>;
   nearTitles(pattern: string): Promise<string[]>;
+  /** Full replace of `unit_titles` (the upgrade job / tests; the release build fills it in p5_fill.sql). */
+  replaceUnitTitles(rows: T.UnitTitleRow[]): Promise<number>;
+  unitTitleCount(): Promise<number>;
   count(): Promise<number>;
   ids(): Promise<Set<string>>;
   titleAndSql(id: string): Promise<{ title: string; sql: string } | null>;
@@ -71,6 +76,8 @@ export interface RegistriesApi {
   usageCount(table: string): Promise<number>;
   predicates(table: string): Promise<T.PredicateRow[]>;
   topPredicates(table: string, limit: number): Promise<T.PredicateStat[]>;
+  /** the distinct columns real report SQL filters this table on (table_predicates) — the end-user filter-only keys */
+  predicateColumns(table: string): Promise<string[]>;
   version(kind: T.RegistryKind): Promise<string | null>;
   setVersion(kind: T.RegistryKind, v: string): Promise<void>;
   count(kind: T.RegistryKind): Promise<number>;
@@ -90,6 +97,88 @@ export interface PlsqlApi {
   version(): Promise<string | null>;
   /** Full rebuild of the four tables in one transaction (the upgrade job / tests; never boot). */
   replaceAll(pkgs: T.PlsqlPackageRow[], apis: T.PlsqlApiRow[], apiTables: T.PlsqlApiTableRow[], version: string): Promise<{ packages: number; apis: number; apiTables: number }>;
+}
+
+export interface OtbiApi {
+  subjectArea(name: string): Promise<T.OtbiSubjectAreaRow | null>;
+  subjectAreaNames(): Promise<string[]>;
+  folders(subjectArea: string): Promise<T.OtbiFolderRow[]>;
+  folder(subjectArea: string, name: string): Promise<T.OtbiFolderRow | null>;
+  columns(subjectArea: string, folder: string): Promise<T.OtbiColumnRow[]>;
+  /** where else in ONE subject area a column name occurs (the lint's "did you mean this folder") */
+  foldersWithColumn(subjectArea: string, column: string): Promise<string[]>;
+  /** every (subject area, folder, kind) whose presentation columns read this table (the exposure index otbi_column_ref) */
+  foldersOfTable(table: string): Promise<{ subject_area: string; folder: string; kind: string }[]>;
+  /** the column refs of a table inside the given subject areas, each with its presentation column's expression */
+  columnRefsOfTable(table: string, subjectAreas: string[]): Promise<T.OtbiColumnRefExpr[]>;
+  /** per physical column of a table: in how many distinct subject areas a presentation column reads it */
+  exposedIn(table: string): Promise<{ db_column: string; areas: number }[]>;
+  /** the distinct physical tables the FACT folders of a subject area read */
+  factTablesOfArea(subjectArea: string): Promise<string[]>;
+  /** the VOs behind the folders of a subject area that read a table (otbi_vo.db_objects contains it) */
+  vosOfTableInArea(table: string, subjectArea: string): Promise<T.OtbiVoRow[]>;
+  /** the TBI-guide duty codes of a subject area (verbatim), ordered by code */
+  areaDuties(subjectArea: string): Promise<T.OtbiAreaDutyRow[]>;
+  /** the TBI-guide JOB role codes of a subject area (ddl_version 10), ordered by code */
+  areaJobs(subjectArea: string): Promise<T.OtbiAreaJobRow[]>;
+  /** every physical table some subject area reads (the exposure index), ordered by name */
+  readTableNames(): Promise<string[]>;
+  /** otbi_meta as k -> v (version, guide_release, area_duty_unmapped, ...) */
+  meta(): Promise<Record<string, string>>;
+  /** KNN over otbi_vec — one hit per distinct text; the caller resolves hashes to entities */
+  knn(vec: Float32Array, k: number): Promise<T.OtbiVecHit[]>;
+  columnsByHash(hashes: string[], subjectArea: string | undefined, perHash: number): Promise<T.OtbiColumnRow[]>;
+  foldersByHash(hashes: string[], subjectArea: string | undefined): Promise<T.OtbiFolderRow[]>;
+  subjectAreasByHash(hashes: string[]): Promise<T.OtbiSubjectAreaRow[]>;
+  counts(): Promise<T.OtbiCounts>;
+  version(): Promise<string | null>;
+  /** Full rebuild of the OTBI tables in one transaction (the upgrade job / tests; never boot; the release build
+   *  fills them in p5_otbi.sql): the exposure index is derived from the columns' db_refs exactly as p5_otbi.sql does. */
+  replaceAll(sas: T.OtbiSubjectAreaRow[], folders: T.OtbiFolderRow[], columns: T.OtbiColumnRow[], vecs: T.OtbiVecRow[], version: string,
+    lineage: T.OtbiLineageInput): Promise<T.OtbiCounts>;
+}
+
+export interface SecurityApi {
+  /** every table_security row of one object, primary first */
+  forTable(table: string): Promise<T.TableSecurityRow[]>;
+  /** the object's table_disallowed row, or null */
+  disallowed(table: string): Promise<T.TableDisallowedRow | null>;
+  /** the curated rows on one object whose scope is '*' or this instance, in curated order (the resolver matches the area) */
+  areaPrivileges(objName: string, instance: string): Promise<T.SecAreaPrivilegeRow[]>;
+  /** sec_meta as k → v (version stamps, context order, hcm prefixes, privilege-prefix aliases, export stamp, stats) */
+  meta(): Promise<Record<string, string>>;
+  version(): Promise<string | null>;
+  counts(): Promise<{ rows: number; tables: number; disallowed: number; areaRows: number; referenceTables: number }>;
+  /** the reference-family row of one table (ddl_version 10), or null */
+  referenceFamily(table: string): Promise<T.ReferenceFamilyRow | null>;
+  /** Full rebuild of the five tables in one transaction (the upgrade job / tests; the release build fills them in p5_security.sql; never boot). */
+  replaceAll(f: T.SecurityFacts): Promise<{ rows: number; disallowed: number; areaRows: number; referenceTables: number; meta: number }>;
+
+  // ---- the per-instance customer layer (names only; src/securityLayer.ts loads it — an admin action, never boot) ----
+  /** the layer row of one pod host (exactly as runSql reports `instance`), or null when none is loaded */
+  layer(instance: string): Promise<T.SecInstanceRow | null>;
+  /** every loaded layer (for the unknown-instance error: the hosts that exist) */
+  layers(): Promise<T.SecInstanceRow[]>;
+  /** the instance's registration under this OBJ_NAME, or null */
+  instanceObject(instance: string, objName: string): Promise<T.SecInstanceObjectRow | null>;
+  /** the instance's registrations whose OBJ_NAME or database object is this catalog table (exact OBJ_NAME first) */
+  instanceObjectsForTable(instance: string, table: string): Promise<T.SecInstanceObjectRow[]>;
+  /** does (object, privilege) carry an active grant on the instance (any grantee)? */
+  instancePrivilegeExists(instance: string, objName: string, privilege: string): Promise<boolean>;
+  /** every granted (object, privilege) of one object on the instance with its grant-set signature (privilege order) — pool 2 */
+  grantedPairs(instance: string, objName: string): Promise<T.SecInstancePrivilegeRow[]>;
+  /** U rows of one object (privilege, instance type order) */
+  uPairs(instance: string, objName: string): Promise<T.SecUPairRow[]>;
+  /** the duty-map rows of one object (duty, privilege order) */
+  dutyPairs(instance: string, objName: string): Promise<T.SecDutyPairRow[]>;
+  /** the customer duty copies of the instance → their seeded twins (duty order) */
+  dutyAliases(instance: string): Promise<T.SecDutyAliasRow[]>;
+  /** the distinct FBI / analysis duty role names holding grants on the instance (the HCM code mapping of the gate) */
+  dutyRoles(instance: string): Promise<string[]>;
+  /** v4: the (role, privilege) pairs the given roles hold on one object on the instance (role, privilege order) — the job-role consensus */
+  roleGrants(instance: string, objName: string, roles: string[]): Promise<{ role_name: string; privilege: string }[]>;
+  /** Replace the whole layer of one instance in ONE transaction (idempotent; a new stamp replaces the previous rows). */
+  replaceLayer(instance: string, stamp: string, layer: T.SecLayerInput, nowIso: string): Promise<T.SecLayerCounts>;
 }
 
 export interface FlexApi {
@@ -163,7 +252,7 @@ export interface ColCacheApi {
 }
 
 export interface CatalogProvider {
-  meta: MetaApi; schema: SchemaApi; corpus: CorpusApi; registries: RegistriesApi; plsql: PlsqlApi; flex: FlexApi;
+  meta: MetaApi; schema: SchemaApi; corpus: CorpusApi; registries: RegistriesApi; plsql: PlsqlApi; otbi: OtbiApi; security: SecurityApi; flex: FlexApi;
   layout: LayoutApi; rules: RulesApi; enrich: EnrichApi; colCache: ColCacheApi;
   /** rev poll hook (per request): reload the active version + name snapshot when they moved. No-op on sqlite. */
   refreshIfMoved(): Promise<boolean>;

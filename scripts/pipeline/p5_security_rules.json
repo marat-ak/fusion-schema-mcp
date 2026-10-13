@@ -1,0 +1,261 @@
+{
+  "version": "8",
+  "_doc": "Curated input of scripts/pipeline/p5_security.sql (data-access security facts, ddl_version 10). Source of every rule: docs/data-access-analysis-2026-09-29.md 'Recommendations for Step 2' + spec docs/superpowers/specs/2026-09-29-end-user-mode-design.md sections 5 and 7 + plan 2026-09-30 (R1-R6, disallow the unused) + Oracle's own seeded policies (oracle_datasec_policies.csv, 2026-09-30, a local gitignored input). Nothing of any customer pod is read here (2026-10-05: the pod data-security export and its sec_object / sec_privilege copies are gone - what differs per pod lives in the customer layer). Order of application: exclude -> exactNames -> suffixes -> Oracle policy (replaces every candidate of the columns it covers) -> organizationId chain (Oracle policy, then the module family, head it) -> overrides -> unresolved (used: build fails at p6; unused: disallowed) -> primary (+ its audit per name prefix -> sec_meta.primary_audit) -> the area map (with its (area, entity) keys and, ddl_version 10, the context column a trace names) -> the reference families (-> table_reference_family, ddl_version 10) -> the sensitive objects (-> sec_meta.sensitive_objects). No predicate text lives here (spec section 7): the condition is produced on the target pod by FND_DATA_SECURITY.GET_SECURITY_PREDICATE from the object + privilege NAMES the release ships. A change here is a new release label through the full chain (releases are immutable).",
+
+  "contexts": [
+    { "context": "BU",       "urda": "ORG_ID",              "ref": "FUN_ALL_BUSINESS_UNITS_V.BU_ID",               "evidenceRefs": ["FUN_ALL_BUSINESS_UNITS_V", "FUN_BU_PERF_V"] },
+    { "context": "LEDGER",   "urda": "LEDGER_ID",           "ref": "GL_LEDGERS.LEDGER_ID",                          "evidenceRefs": ["GL_LEDGERS", "GL_LEDGERS_PUBLIC_V"] },
+    { "context": "BOOK",     "urda": "BOOK_ID",             "ref": "FA_BOOK_CONTROLS.BOOK_TYPE_CODE",               "evidenceRefs": ["FA_BOOK_CONTROLS"] },
+    { "context": "INV_ORG",  "urda": "INV_ORGANIZATION_ID", "ref": "INV_ORG_PARAMETERS.ORGANIZATION_ID",            "evidenceRefs": ["INV_ORG_PARAMETERS", "INV_ORG_PARAMETERS_V", "INV_ORGANIZATION_DEFINITIONS_V"] },
+    { "context": "ITM_ORG",  "urda": "ITM_ORGANIZATION_ID", "ref": "INV_ORG_PARAMETERS.ORGANIZATION_ID",            "evidenceRefs": ["INV_ORG_PARAMETERS", "INV_ORG_PARAMETERS_V", "INV_ORGANIZATION_DEFINITIONS_V"] },
+    { "context": "COST_ORG", "urda": "CST_ORGANIZATION_ID", "ref": "CST_COST_ORGS_V.COST_ORG_ID",                   "evidenceRefs": ["CST_COST_ORGS_V"] },
+    { "context": "MFG_ORG",  "urda": "MFG_ORGANIZATION_ID", "ref": "RCS_MFG_PARAMETERS.ORGANIZATION_ID",            "evidenceRefs": ["RCS_MFG_PARAMETERS", "RCS_ORG_DEFINITIONS_LW_V"] },
+    { "context": "PRJ_ORG",  "urda": "PRJ_ORGANIZATION_ID", "ref": "HR_ORG_UNIT_CLASSIFICATIONS_F.ORGANIZATION_ID", "evidenceRefs": ["HR_ORG_UNIT_CLASSIFICATIONS_F", "HR_ORGANIZATION_V"] },
+    { "context": "INTERCO",  "urda": "INTERCO_ORG_ID",      "ref": "FUN_INTERCO_ORGANIZATIONS.INTERCO_ORG_ID",      "evidenceRefs": ["FUN_INTERCO_ORGANIZATIONS"] },
+    { "context": "BUDGET",   "urda": "CONTROL_BUDGET_ID",   "ref": "XCC_CONTROL_BUDGETS.CONTROL_BUDGET_ID",         "evidenceRefs": ["XCC_CONTROL_BUDGETS"] },
+    { "context": "DAS",      "urda": "ACCESS_SET_ID",       "ref": "GL_ACCESS_SETS.ACCESS_SET_ID",                  "evidenceRefs": ["GL_ACCESS_SETS", "GL_ACCESS_SET_LEDGERS"] },
+    { "context": "SET",      "urda": "SET_ID",              "ref": "FND_SETID_SETS_VL.SET_ID",                      "evidenceRefs": ["FND_SETID_SETS_VL"] }
+  ],
+
+  "exclude": {
+    "_doc": "object level: catalog noise (MLOG$ / trailing-underscore copies), GRC ETL copies (GTG_), the URDA table itself and the other data-access lists (MO global org access, VCS collaboration data access sets — access lists, not business data), HCM (secured by security profiles - out of scope), views that already embed security. column level: remark says internal/unused; per-context object patterns (MSC_ access sets are SCM Planning data access sets, not GL).",
+    "objectNameRe": "^MLOG\\$|_$|^GTG_",
+    "objects": ["FUN_USER_ROLE_DATA_ASGNMNTS", "MO_GLOB_ORG_ACCESS_TMP", "VCS_DATA_ACCESS_SETS"],
+    "hcmPrefixes": ["PER", "HR", "HRX", "PAY", "BEN", "HRC", "HRT", "IRC", "CMP", "ANC", "HXT", "HWM", "HRG", "HRY", "HWR", "HEY", "WLF"],
+    "securedViewTextRe": "FUN_USER_ROLE_DATA_ASGNMNTS|FND_GRANTS|HZ_SESSION_UTIL|FND_SESSION_ROLE_SETS",
+    "columnRemarkRe": "internal use only|no longer used|obsolete",
+    "contextObjectRe": { "DAS": "^MSC_" }
+  },
+
+  "exactNames": [
+    { "column": "ORG_ID",                       "context": "BU" },
+    { "column": "BU_ID",                        "context": "BU" },
+    { "column": "BUSINESS_UNIT_ID",             "context": "BU" },
+    { "column": "LEDGER_ID",                    "context": "LEDGER" },
+    { "column": "SET_OF_BOOKS_ID",              "context": "LEDGER" },
+    { "column": "BOOK_TYPE_CODE",               "context": "BOOK",     "objectRe": "^FA_" },
+    { "column": "INVENTORY_ORGANIZATION_ID",    "context": "INV_ORG" },
+    { "column": "INV_ORGANIZATION_ID",          "context": "INV_ORG" },
+    { "column": "INVENTORY_ORG_ID",             "context": "INV_ORG" },
+    { "column": "INV_ORG_ID",                   "context": "INV_ORG" },
+    { "column": "COST_ORG_ID",                  "context": "COST_ORG" },
+    { "column": "CARRYING_OUT_ORGANIZATION_ID", "context": "PRJ_ORG" },
+    { "column": "PJC_ORGANIZATION_ID",          "context": "PRJ_ORG" },
+    { "column": "EXPENDITURE_ORGANIZATION_ID",  "context": "PRJ_ORG" },
+    { "column": "INTERCO_ORG_ID",               "context": "INTERCO" },
+    { "column": "CONTROL_BUDGET_ID",            "context": "BUDGET",   "objectRe": "^XCC_" },
+    { "column": "ACCESS_SET_ID",                "context": "DAS" },
+    { "column": "SET_ID",                       "context": "SET",      "remarkRe": "reference data set",
+      "prefixes": ["FND", "HZ", "AR", "RA", "PJF", "QP", "ZX", "FA", "CST", "POZ", "PO", "IBY", "CE"] }
+  ],
+
+  "suffixes": [
+    { "_doc": "only on an object with no exact-name column of the same context; never %_SET_ID",
+      "columnRe": "^[A-Z0-9_]+_BU_ID$", "context": "BU", "preference": ["PRC_BU_ID", "REQ_BU_ID"] },
+    { "columnRe": "^(PRIMARY|SECONDARY)_LEDGER_ID$", "context": "LEDGER", "preference": ["PRIMARY_LEDGER_ID"] }
+  ],
+
+  "oraclePolicy": {
+    "_doc": "Oracle's own seeded data-security policies (oracle_datasec_policies.csv next to this file, staged by p5_security.sh; provenance in scripts/pipeline/README.md) are the TOP-confidence source. An instance set that filters a column of its object by `<col> IN (SELECT <URDA context column> FROM FUN_USER_ROLE_DATA_ASGNMNTS ...)` at the predicate's top level (shape direct) makes that column's context the one Oracle uses (confidence oracle_policy; evidence = its instance sets, named in the reason with the OBJ_NAME); every rule / chain / curated candidate of the column is replaced, whatever the object exclusions say. One column, several contexts (one instance set per module): the object's standard set (standardSetCode) decides and the others are named in the reason; without a standard set the column is a reported conflict, no fact. Every other shape - derived through a mapping object, EXISTS through another object, a generic DATASEC_CONTEXT, a non-context URDA column, unparsed - is reported in sec_meta (policy_sets / policy_columns), never guessed into a fact. The instance-set code = the set name after its compacted OBJ_NAME: the longest catalog application short name it starts with, else its leading letters.",
+    "standardSetCode": "STD"
+  },
+
+  "moduleFamilies": {
+    "_doc": "Module org-context rule, derived from the extract (never typed here): an org-family instance set (its predicate uses the URDA column of one of `contexts`) whose code is a catalog application gives that application the set's context (code evidence: INV_ORG_PARAMETERS ENQ / MNT sets, the HTS *_WIE / *_MNT / *INV sets, CSTCOSTORGSINV, DOSSUPPLYLINESDOS4, POHEADERSALLRCVWAREHOUSE ...); a set of another code securing an object's own ORGANIZATION_ID gives the object's application that context (object evidence: CSEASSETSBMNT77). Code evidence first; several contexts = mixed, not applied, reported. The standard code (oraclePolicy.standardSetCode) is the object's own set, not a module. `judgment` = applications with no such evidence, assigned by the reason given (the build fails if one also has evidence). The rule decides a generic ORGANIZATION_ID of an object without its own Oracle policy, after the declared FK and ahead of the votes / lineage / prefix; organizationId.domains must agree with it.",
+    "contexts": ["INV_ORG", "MFG_ORG"],
+    "judgment": [
+      { "app": "WIS", "context": "MFG_ORG",
+        "reason": "judgment: no WIS-coded instance set - the WIE-coded HTS sets secure WIS_WORK_CENTERS_B by URDA.MFG_ORGANIZATION_ID, the MNT-coded ones by INV_ORGANIZATION_ID (work centers are shared); work definitions are manufacturing (most WIS ORGANIZATION_ID column remarks name the manufacturing plant)" },
+      { "app": "QA", "context": "INV_ORG",
+        "reason": "judgment: no QA-coded instance set - quality inspection belongs to Quality Management with the ENQ-coded set (INVORGPARAMETERSENQ -> URDA.INV_ORGANIZATION_ID); QA_IP_EVENTS.ORGANIZATION_ID remark = inventory organization" }
+    ]
+  },
+
+  "organizationId": {
+    "_doc": "generic ORGANIZATION_ID, first signal wins: Oracle policy on the column -> FK parent family -> module family (moduleFamilies, objects without their own policy) -> [vote] -> the object's own prefix family -> [vote] -> sibling columns -> [vote] -> HCM view lineage (excluded) -> own id space (single-column key of a TABLE, or only such keys as partners: not a context) -> non-org partners (every corpus join partner column fails orgIdPartnerRe: not a context) -> unresolved. [vote] = fixpoint over the columns resolved so far: a resolved view pass-through partner decides, else the corpus join partners' COLUMN contexts (any context) vote by statements. A family is the domain of a name prefix; the max count wins, a tie goes to the object's own prefix family, else unresolved. HCM siblings exclude the column. An INV_ORG resolution on an item (itemOrgPrefixes) object becomes ITM_ORG (inventory union item org).",
+    "column": "ORGANIZATION_ID",
+    "domains": {
+      "INV_ORG": ["INV", "RCV", "WSH", "EGP", "EGO", "CST", "CMR", "MSC", "MSS", "SCH", "DOS", "CMK", "EGI"],
+      "MFG_ORG": ["WIE", "WIS", "WIP", "RCS", "QSC", "SMO"],
+      "PRJ_ORG": ["PJF", "PJC", "PJB", "PJS", "PJT", "PJO", "PJR", "GMS"]
+    },
+    "siblings": {
+      "INV_ORG": ["INVENTORY_ITEM_ID", "SUBINVENTORY_CODE"],
+      "MFG_ORG": ["WORK_ORDER_ID", "WORK_DEFINITION_ID", "WORK_CENTER_ID"],
+      "PRJ_ORG": ["PROJECT_ID", "TASK_ID"],
+      "HCM": ["PERSON_ID", "ASSIGNMENT_ID", "BUSINESS_GROUP_ID"]
+    },
+    "ambiguousCandidates": ["BU", "INV_ORG", "MFG_ORG", "PRJ_ORG"],
+    "orgIdPartnerRe": "^(ORG_ID|BU_ID|BUSINESS_UNIT_ID|ORGANIZATION_ID|LEDGER_ID|SET_OF_BOOKS_ID|[A-Z0-9_]+_(ORG|ORGANIZATION|BU|LEDGER)_ID)$"
+  },
+
+  "itemOrgPrefixes": ["EGP", "EGO", "EGI"],
+
+  "_overrides_doc": "op add = one more curated context row on the column; op set = the column's context is exactly this one (replaces every name / chain candidate of the column); op none = the column is not a security context (every candidate of THAT column dropped, the object's other columns keep theirs; no context). Only for what the generic rules leave unresolved on a USED object.",
+  "overrides": [
+    { "op": "add", "table": "FUN_TRX_HEADERS", "column": "INITIATOR_ID", "context": "INTERCO",
+      "reason": "curated: the intercompany transaction carries the initiator interco org as INITIATOR_ID (OTBI relation -> FUN_INTERCO_ORGANIZATIONS.INTERCO_ORG_ID)" },
+    { "op": "add", "table": "FUN_TRX_HEADERS", "column": "RECIPIENT_ID", "context": "INTERCO",
+      "reason": "curated: the intercompany transaction carries the recipient interco org as RECIPIENT_ID (OTBI relation -> FUN_INTERCO_ORGANIZATIONS.INTERCO_ORG_ID)" },
+    { "op": "add", "table": "FUN_TRX_BATCHES", "column": "INITIATOR_ID", "context": "INTERCO",
+      "reason": "curated: the intercompany batch carries the initiator interco org as INITIATOR_ID (OTBI relation -> FUN_INTERCO_ORGANIZATIONS.INTERCO_ORG_ID)" },
+    { "op": "set", "table": "OSS_COVERAGE_DISCOUNTS", "column": "ORGANIZATION_ID", "context": "ITM_ORG",
+      "reason": "curated: the inventory organization of the covered service item (column remark) - item org (inventory org union item org); no FK, join or lineage resolves it" },
+    { "op": "set", "table": "ACA_QI_PR_V", "column": "ORGANIZATION_ID", "context": "INV_ORG",
+      "reason": "curated: UNION view of ENQ_ISSUES_VL.ORGANIZATION_ID (INV_ORG by corpus joins to INV_ORGANIZATION_DEFINITIONS_V) and EGO_ENGINEERING_CHANGES_VL.ORGANIZATION_ID - the pass-through lineage cannot follow a union" },
+    { "op": "none", "table": "HZ_IMP_GROUP_MEMBERS", "column": "ORGANIZATION_ID",
+      "reason": "curated: a resource group id (column remark: Resource Group identifier), not a data-access organization" }
+  ],
+
+  "primaryByPrefix": {
+    "_doc": "is_primary marks the ONE context column the table-keyed plan secures (src/corpus/dataAccess.ts, plan 2026-10-04 decision 1: OTBI applies one context per table, the every-context policy is gone): the first context of the object's prefix `contexts` list that the object carries, else the first in `contexts` order; then the rule order, the suffix preference, the column ordinal. A table with MORE than one context column is secured on its primary only when its name prefix carries an `audit` = evidence that OTBI applies exactly that context (source trace = an OTBI LOGLEVEL-7 trace on a pod; crawl = the demo-pod OTBI crawl's physical SQL) and the primary row IS one of the audited `contexts`; otherwise the plan blocks it, naming the missing audit. Shipped as sec_meta.primary_audit (audited prefixes only); the p6 gate fails a malformed audit. A crawl audit is admitted ONLY where the demo-crawl grant block names the column / entity it binds to (decision 2026-10-05): GL (Ledgers.LEDGER_ID) and DOO (BU.BU_ID); the SLA reconciliation areas bind GL_LEDGERS to AP / AR reconciliation tables, so they audit no XLA prefix. Candidates still to trace (plan 2026-10-04 decision 12): PJC -> BU, XCC -> BUDGET then LEDGER, EGP / EGO -> ITM_ORG, FUN -> INTERCO, the PRC_BU_ID over REQ_BU_ID suffix preference, and every other prefix below.",
+    "AP": { "contexts": ["BU"], "audit": { "source": "trace",
+      "evidence": "Kornit TEST OTBI LOGLEVEL-7 trace 2026-10-02, subject area Payables Invoices - Transactions Real Time: AP_INVOICES_ALL carries BU (ORG_ID), LEDGER (SET_OF_BOOKS_ID) and PRJ_ORG (EXPENDITURE_ORGANIZATION_ID) context columns and OTBI applied ONE data-security condition, on InvoiceHeader.ORG_ID = BusinessUnit.BU_ID (FUN_ALL_BUSINESS_UNITS_V / AP_REPORT_PAYABLES_DATA); proof = the trace's predicate block, SHA-256 5747a1ca58d2202d4a4a234804e150a60b4d762ae6adf86c330d4994b8c8a426, 2,569 chars (LF line ends, alias BusinessUnit), char-identical to GET_SECURITY_PREDICATE in the same user's runSql session (2026-10-03); the trace itself stays local, untracked" } },
+    "AR": { "contexts": ["BU"] }, "RA": { "contexts": ["BU"] }, "PO": { "contexts": ["BU"] }, "POZ": { "contexts": ["BU"] }, "POR": { "contexts": ["BU"] },
+    "DOO": { "contexts": ["BU"], "audit": { "source": "crawl",
+      "evidence": "demo-pod OTBI crawl (fa-exqw-dev2, 2026-07; docs/data-access-otbi-match-2026-10-03.md AQ3): in the six Distributed Order Orchestration areas the one data-security block binds to the business-unit entity - FUN_ALL_BUSINESS_UNITS_V BU, the condition on BU.BU_ID (instance set FUNALLBUSINESSUNITSVSTD, 128 of 144 occurrences on the BU entity, the rest on PJC_COMMITMENT_TXNS); no block on another context of the DOO facts" } }, "PJC": { "contexts": ["BU"] }, "EXM": { "contexts": ["BU"] }, "IBY": { "contexts": ["BU"] }, "CN": { "contexts": ["BU"] },
+    "CE": { "contexts": ["BU"] }, "OKC": { "contexts": ["BU"] },
+    "GL": { "contexts": ["LEDGER"], "audit": { "source": "crawl",
+      "evidence": "demo-pod OTBI crawl (fa-exqw-dev2, 2026-07; docs/data-access-otbi-match-2026-10-03.md AQ3): in General Ledger - Journals, Average Daily Balances and Transactional Average Daily Balances the one data-security block binds to the ledger entity - GL_LEDGERS next to GL_JE_HEADERS, the condition on Ledgers.LEDGER_ID (instance set GLLEDGERSSTD); no block on another context of the GL facts" } }, "XLA": { "contexts": ["LEDGER"] }, "FV": { "contexts": ["LEDGER"] }, "XCC": { "contexts": ["BUDGET", "LEDGER"] },
+    "FA": { "contexts": ["BOOK"] },
+    "INV": { "contexts": ["INV_ORG"] }, "WSH": { "contexts": ["INV_ORG"] }, "RCV": { "contexts": ["INV_ORG"] }, "MSC": { "contexts": ["INV_ORG"] },
+    "EGP": { "contexts": ["ITM_ORG", "INV_ORG"] }, "EGO": { "contexts": ["ITM_ORG", "INV_ORG"] },
+    "CST": { "contexts": ["COST_ORG"] },
+    "WIE": { "contexts": ["MFG_ORG"] }, "WIS": { "contexts": ["MFG_ORG"] },
+    "PJF": { "contexts": ["PRJ_ORG"] },
+    "FUN": { "contexts": ["INTERCO"] }
+  },
+
+  "precedent": {
+    "_doc": "Oracle precedent = a statement of these sources that filters by `SELECT <urda col> FROM FUN_USER_ROLE_DATA_ASGNMNTS`; every co-read object carrying a detected column of that context gets confidence oracle_precedent (evidence = those statements). BIP is not a source: the one Oracle-shipped BIP shape secures a parameter LOV, the rest are custom reports.",
+    "sources": ["otbi", "view"]
+  },
+
+  "privilegePrefixAliases": {
+    "_doc": "The resolver's module filter (src/corpus/dataAccess.ts ruleChoice): among the NAMED pairs granted to the BI server identity on the resolved object (generic read / update / delete / insert never count), the privilege whose prefix is the SECURED TABLE's module (tables.module) or one of the aliases of that module listed here - Oracle registers some products' data-security privileges under another application code (analysis 2026-10-03 AQ1 / AQ4; the BU view carries AP / AR / DOO privileges, the FACT's module picks). Shipped as sec_meta.privilege_prefix_aliases. Evidence per alias: EGP -> EGO (Product Management privileges are EGO_VIEW_ITEM_*_DATA on EGP_SYSTEM_ITEMS_B); WIE / WIS -> RCS (the manufacturing plant object RCS_MFG_PARAMETERS carries RCS_PLANT_PARAMETERS_DATA); MNT / QA / ENQ -> RCS (RCS_MAINTENANCE_ORG_DATA / RCS_QUALITY_ORG_DATA on INV_ORG_PARAMETERS - two candidates, a curated row still decides); CMR -> CML (receipt-accounting privileges are CML_*; Kornit's U holds none, inert there); FOS -> DOO (demo-pod id identity: the secured folders of the Supply Chain Financial Orchestration area are DOO's - inferred). HR is NOT listed: HCM tables and objects take the duty route.",
+    "map": { "EGP": ["EGO"], "WIE": ["RCS"], "WIS": ["RCS"], "MNT": ["RCS"], "QA": ["RCS"], "ENQ": ["RCS"], "CMR": ["CML"], "FOS": ["DOO"] }
+  },
+
+  "areaPrivileges": {
+    "_doc": "Curated area -> (object, privilege) NAME rows that OVERRIDE the resolver's rule (src/corpus/dataAccess.ts choosePrivilege). `area` = the catalog application short name (tables.module, e.g. AP), an OTBI subject-area name (exact) or the business area a subject-area name starts with (e.g. Payables -> every 'Payables ... - ... Real Time'); a subject-area row applies to the tables that are FACTS of that area (fact folders) when it names a reference object, and to a table that appears in ANY folder of the area when it names the table's own registered object (the direct route - the Item entity is secured even as a dimension); `object` = the FND_OBJECTS.OBJ_NAME the row decides the privilege of - it applies to a table only when that object IS the table's resolved object (the table itself on the direct route, the context column's reference object on the reference route); `privilege` = FND_FORM_FUNCTIONS.FUNCTION_NAME; `source` = the grade the row's conditions carry: trace (an OTBI LOGLEVEL-7 trace proved the pair) | inferred (name / id-identity / grant-set evidence, not proven) - nothing else (the build and the p6 gate fail on any other value); `instances` = REQUIRED, the pod hosts the row applies to (exactly as runSql reports `instance`) or [\"*\"] - one shipped row per host. `entity` = the (area, entity) key (ddl_version 9): the VO reference entity the row's evidence names (the table that carries the grant block in the crawl / trace); an area-keyed plan applies the row to a table only when that entity is the table's resolved entity in the area; match order (area, entity) > (area) > (product). `voDef` = the VO definition the evidence came from, when known. `column` (ddl_version 10) = TABLE.COLUMN the entity is joined to in the evidence (a LOGLEVEL-7 trace names it; scripts/pipeline/sec_trace.py writes it): in that area the table is secured on exactly that column of the context. The KNOWN area privilege beats the module rule for every table of the area on the same object (user decision 4 of 2026-10-05): a row keyed to the table's entity first, else any row of the area on that object. One privilege per (area, object) - rows that disagree fail the build. Rows written by sec_trace.py (source trace) replace the area's row on the same object; a trace that disagrees with an existing trace row is refused there. Every named pair must exist in the seed export (a typo fails the build) and must carry a grant on the target instance at run time (else blocked). Two applying rows that disagree = blocked, no silent pick. The 35 demo-pod OTBI areas (fa-exqw-dev2 crawl, 86,973 traces) were resolved by predicate-text match on 2026-10-03 (docs/data-access-otbi-match-2026-10-03.md AQ3 / Appendix E): the object is certain for all 35; the privilege is rule-grade for 11, id-identity for 6, a proposal (P3 / P4 / P7) for 18 - all shipped as `inferred` until a Kornit LOGLEVEL-7 trace per family upgrades them to `trace`. A table whose resolved object has no applying row takes the sensitive override, the duty map (HCM), the rule (U n module prefix) or pool 2 (all of the pod's grants n module prefix, one grant-set class only) - never a privilege-less call.",
+    "rows": [
+      { "area": "AP", "object": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "AP_REPORT_PAYABLES_DATA", "source": "trace", "instances": ["*"],
+        "evidence": "Kornit TEST OTBI LOGLEVEL-7 trace 2026-10-02: AP_INVOICES_ALL secured through InvoiceHeader.ORG_ID = BusinessUnit.BU_ID with the API condition on FUN_ALL_BUSINESS_UNITS_V / AP_REPORT_PAYABLES_DATA (instance sets STD + INTERCO + the GLOBAL slot; the branches are the user's grants at generation time); predicate block SHA-256 5747a1ca58d2202d4a4a234804e150a60b4d762ae6adf86c330d4994b8c8a426, 2,569 chars (the trace stays local, untracked)" },
+      {"area": "Payables", "object": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "AP_REPORT_PAYABLES_DATA", "source": "trace", "instances": ["*"], "entity": "FUN_BU_PERF_V", "column": "AP_INVOICES_ALL.ORG_ID",
+        "evidence": "OTBI LOGLEVEL-7 trace Session Monitor.html (2026-10-05, ids resolved on fa-evbp-test-saasfaprod1.fa.ocs.oraclecloud.com): 2 grant block(s) on FUN_ALL_BUSINESS_UNITS_V / AP_REPORT_PAYABLES_DATA in 4 statement(s), entity FUN_BU_PERF_V (alias BusinessUnit, key BU_ID) joined by AP_INVOICES_ALL.ORG_ID; instance types SET, 2 instance set(s); blocks SHA-256 060fc9087b307c07e44421b4bffe3fd7ad318a85c4c223077f385d6487865ceb, 2,457 chars (the trace stays local, untracked; no predicate text here)" },
+
+      { "area": "General Ledger - Journals Real Time", "object": "GL_LEDGERS", "entity": "GL_LEDGERS", "privilege": "GL_REPORT_GENERAL_LEDGER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the area's physical SQL carries the grant block on GL_LEDGERS (instance set GLLEDGERSSTD, matched by predicate text); GL_REPORT_GENERAL_LEDGER_DATA = the only named GL privilege of GL_LEDGERS granted to the BI server identity (rule grade)" },
+      { "area": "General Ledger - Average Daily Balances Real Time", "object": "GL_LEDGERS", "entity": "GL_LEDGERS", "privilege": "GL_REPORT_GENERAL_LEDGER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on GL_LEDGERS (GLLEDGERSSTD); GL_REPORT_GENERAL_LEDGER_DATA = the only named GL privilege of GL_LEDGERS in U (rule grade)" },
+      { "area": "General Ledger - Transactional Average Daily Balances Real Time", "object": "GL_LEDGERS", "entity": "GL_LEDGERS", "privilege": "GL_REPORT_GENERAL_LEDGER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on GL_LEDGERS (GLLEDGERSSTD); GL_REPORT_GENERAL_LEDGER_DATA = the only named GL privilege of GL_LEDGERS in U (rule grade)" },
+      { "area": "Subledger Accounting - Payables Summary Reconciliation Real Time", "object": "GL_LEDGERS", "entity": "GL_LEDGERS", "privilege": "GL_REPORT_GENERAL_LEDGER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on GL_LEDGERS (GLLEDGERSSTD); XLA holds no privilege on GL_LEDGERS - GL_REPORT_GENERAL_LEDGER_DATA is the only named privilege of the object in U (rule grade, any prefix)" },
+      { "area": "Subledger Accounting - Receivables Summary Reconciliation Real Time", "object": "GL_LEDGERS", "entity": "GL_LEDGERS", "privilege": "GL_REPORT_GENERAL_LEDGER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on GL_LEDGERS (GLLEDGERSSTD); XLA holds no privilege on GL_LEDGERS - GL_REPORT_GENERAL_LEDGER_DATA is the only named privilege of the object in U (rule grade, any prefix)" },
+
+      { "area": "Distributed Order Orchestration - Fulfillment Lines Real Time", "object": "FUN_ALL_BUSINESS_UNITS_V", "entity": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "DOO_MANAGE_ORCHESTRATION_ORDER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the grant block sits on FUN_ALL_BUSINESS_UNITS_V BU (instance set FUNALLBUSINESSUNITSVSTD, 128 of 144 occurrences on the BU entity); DOO_MANAGE_ORCHESTRATION_ORDER_DATA = the only DOO privilege of the BU view in U, 38 roles hold it (rule grade)" },
+      { "area": "Distributed Order Orchestration - Order Headers Real Time", "object": "FUN_ALL_BUSINESS_UNITS_V", "entity": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "DOO_MANAGE_ORCHESTRATION_ORDER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on FUN_ALL_BUSINESS_UNITS_V (FUNALLBUSINESSUNITSVSTD); DOO_MANAGE_ORCHESTRATION_ORDER_DATA = the only DOO privilege of the BU view in U (rule grade)" },
+      { "area": "Distributed Order Orchestration - Order Holds Real Time", "object": "FUN_ALL_BUSINESS_UNITS_V", "entity": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "DOO_MANAGE_ORCHESTRATION_ORDER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on FUN_ALL_BUSINESS_UNITS_V (FUNALLBUSINESSUNITSVSTD); DOO_MANAGE_ORCHESTRATION_ORDER_DATA = the only DOO privilege of the BU view in U (rule grade)" },
+      { "area": "Distributed Order Orchestration - Order Lines Real Time", "object": "FUN_ALL_BUSINESS_UNITS_V", "entity": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "DOO_MANAGE_ORCHESTRATION_ORDER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on FUN_ALL_BUSINESS_UNITS_V (FUNALLBUSINESSUNITSVSTD); DOO_MANAGE_ORCHESTRATION_ORDER_DATA = the only DOO privilege of the BU view in U (rule grade)" },
+      { "area": "Distributed Order Orchestration - Price Adjustments Real Time", "object": "FUN_ALL_BUSINESS_UNITS_V", "entity": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "DOO_MANAGE_ORCHESTRATION_ORDER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on FUN_ALL_BUSINESS_UNITS_V (FUNALLBUSINESSUNITSVSTD); DOO_MANAGE_ORCHESTRATION_ORDER_DATA = the only DOO privilege of the BU view in U (rule grade)" },
+      { "area": "Distributed Order Orchestration - Process Instances Real Time", "object": "FUN_ALL_BUSINESS_UNITS_V", "entity": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "DOO_MANAGE_ORCHESTRATION_ORDER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on FUN_ALL_BUSINESS_UNITS_V (FUNALLBUSINESSUNITSVSTD); DOO_MANAGE_ORCHESTRATION_ORDER_DATA = the only DOO privilege of the BU view in U (rule grade)" },
+      { "area": "Inventory - Inventory Transfer Order Real Time", "object": "FUN_ALL_BUSINESS_UNITS_V", "entity": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "DOO_MANAGE_ORCHESTRATION_ORDER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the only secured folders of the area are DOO's (transfer-order / fulfillment folders on DOO_FULFILL_LINES_ALL) and the block carries the DOO areas' function id on FUN_ALL_BUSINESS_UNITS_V (id identity) - applies to a table only when the BU view is its resolved object" },
+      { "area": "Inventory - Kanban Activity Real Time", "object": "FUN_ALL_BUSINESS_UNITS_V", "entity": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "DOO_MANAGE_ORCHESTRATION_ORDER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the only secured folders of the area are DOO's and the block carries the DOO areas' function id on FUN_ALL_BUSINESS_UNITS_V (id identity)" },
+      { "area": "Manufacturing - Work Order Performance Real Time", "object": "FUN_ALL_BUSINESS_UNITS_V", "entity": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "DOO_MANAGE_ORCHESTRATION_ORDER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the only secured folders of the area are DOO's (sales-order folders) and the block carries the DOO areas' function id on FUN_ALL_BUSINESS_UNITS_V (id identity)" },
+      { "area": "Manufacturing - Workstation Supervision Real Time", "object": "FUN_ALL_BUSINESS_UNITS_V", "entity": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "DOO_MANAGE_ORCHESTRATION_ORDER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the only secured folders of the area are DOO's and the block carries the DOO areas' function id on FUN_ALL_BUSINESS_UNITS_V (id identity)" },
+      { "area": "Shipping Real Time", "object": "FUN_ALL_BUSINESS_UNITS_V", "entity": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "DOO_MANAGE_ORCHESTRATION_ORDER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the only secured folder of the area is DOO's (Shipment Line Summary) and the block carries the DOO areas' function id on FUN_ALL_BUSINESS_UNITS_V (id identity)" },
+      { "area": "Supply Chain Financial Orchestration Real Time", "object": "FUN_ALL_BUSINESS_UNITS_V", "entity": "FUN_ALL_BUSINESS_UNITS_V", "privilege": "DOO_MANAGE_ORCHESTRATION_ORDER_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the only secured folders of the area are DOO's and the block carries the DOO areas' function id on FUN_ALL_BUSINESS_UNITS_V (id identity)" },
+
+      { "area": "Product Management - Change Order Real Time", "object": "EGP_SYSTEM_ITEMS_B", "entity": "EGP_SYSTEM_ITEMS_B", "privilege": "EGO_VIEW_ITEM_BASIC_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the grant block sits on the item entity EGP_SYSTEM_ITEMS_B (instance set EGPSYSTEMITEMSBEGO1), ONE function id on the item entity in all 13 item areas; EGO_VIEW_ITEM_BASIC_DATA chosen among the three EGO privileges of the object in U (proposal P3: its grant set is identical to read; STRUCTURE / PACK differ) - untraced" },
+      { "area": "Product Management - Change Order Approvals Real Time", "object": "EGP_SYSTEM_ITEMS_B", "entity": "EGP_SYSTEM_ITEMS_B", "privilege": "EGO_VIEW_ITEM_BASIC_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on EGP_SYSTEM_ITEMS_B (EGPSYSTEMITEMSBEGO1), one function id on the item entity in all 13 item areas; EGO_VIEW_ITEM_BASIC_DATA (proposal P3) - untraced" },
+      { "area": "Product Management - Item Catalog Category Hierarchy Real Time", "object": "EGP_SYSTEM_ITEMS_B", "entity": "EGP_SYSTEM_ITEMS_B", "privilege": "EGO_VIEW_ITEM_BASIC_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on EGP_SYSTEM_ITEMS_B (EGPSYSTEMITEMSBEGO1), one function id on the item entity in all 13 item areas; EGO_VIEW_ITEM_BASIC_DATA (proposal P3) - untraced" },
+      { "area": "Product Management - Item Revisions Real Time", "object": "EGP_SYSTEM_ITEMS_B", "entity": "EGP_SYSTEM_ITEMS_B", "privilege": "EGO_VIEW_ITEM_BASIC_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on EGP_SYSTEM_ITEMS_B (EGPSYSTEMITEMSBEGO1), one function id on the item entity in all 13 item areas; EGO_VIEW_ITEM_BASIC_DATA (proposal P3) - untraced" },
+      { "area": "Product Management - Item Supplier Associations Real Time", "object": "EGP_SYSTEM_ITEMS_B", "entity": "EGP_SYSTEM_ITEMS_B", "privilege": "EGO_VIEW_ITEM_BASIC_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on EGP_SYSTEM_ITEMS_B (EGPSYSTEMITEMSBEGO1), one function id on the item entity in all 13 item areas; EGO_VIEW_ITEM_BASIC_DATA (proposal P3) - untraced" },
+      { "area": "Product Management - Structures Real Time", "object": "EGP_SYSTEM_ITEMS_B", "entity": "EGP_SYSTEM_ITEMS_B", "privilege": "EGO_VIEW_ITEM_BASIC_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on EGP_SYSTEM_ITEMS_B (EGPSYSTEMITEMSBEGO1), one function id on the item entity in all 13 item areas incl. the structure areas; EGO_VIEW_ITEM_BASIC_DATA (proposal P3; EGO_VIEW_ITEM_STRUCTURE_DATA only for component facts is unproven) - untraced" },
+      { "area": "Product Management - Structures and Components Real Time", "object": "EGP_SYSTEM_ITEMS_B", "entity": "EGP_SYSTEM_ITEMS_B", "privilege": "EGO_VIEW_ITEM_BASIC_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on EGP_SYSTEM_ITEMS_B (EGPSYSTEMITEMSBEGO1), one function id on the item entity in all 13 item areas incl. the structure areas; EGO_VIEW_ITEM_BASIC_DATA (proposal P3) - untraced" },
+      { "area": "Product Management - Where Used Real Time", "object": "EGP_SYSTEM_ITEMS_B", "entity": "EGP_SYSTEM_ITEMS_B", "privilege": "EGO_VIEW_ITEM_BASIC_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on EGP_SYSTEM_ITEMS_B (EGPSYSTEMITEMSBEGO1), one function id on the item entity in all 13 item areas; EGO_VIEW_ITEM_BASIC_DATA (proposal P3) - untraced" },
+      { "area": "Manufacturing - Work Definitions Real Time", "object": "EGP_SYSTEM_ITEMS_B", "entity": "EGP_SYSTEM_ITEMS_B", "privilege": "EGO_VIEW_ITEM_BASIC_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the item entity is secured in this area too (as a dimension), the same function id as the 13 item areas on EGP_SYSTEM_ITEMS_B (EGPSYSTEMITEMSBEGO1); EGO_VIEW_ITEM_BASIC_DATA (proposal P3) - untraced" },
+      { "area": "Receivables - Customer Account Site Tax Profile Real Time", "object": "EGP_SYSTEM_ITEMS_B", "entity": "EGP_SYSTEM_ITEMS_B", "privilege": "EGO_VIEW_ITEM_BASIC_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the item entity is secured in this area (as a dimension), the same function id as the item areas on EGP_SYSTEM_ITEMS_B (EGPSYSTEMITEMSBEGO1); EGO_VIEW_ITEM_BASIC_DATA (proposal P3) - untraced" },
+      { "area": "Receivables - Customer Tax Profile Real Time", "object": "EGP_SYSTEM_ITEMS_B", "entity": "EGP_SYSTEM_ITEMS_B", "privilege": "EGO_VIEW_ITEM_BASIC_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the item entity is secured in this area (as a dimension), the same function id as the item areas on EGP_SYSTEM_ITEMS_B (EGPSYSTEMITEMSBEGO1); EGO_VIEW_ITEM_BASIC_DATA (proposal P3) - untraced" },
+      { "area": "custExt33f1cb05_ed40_4771_88b6_0aa4b769a070", "object": "EGP_SYSTEM_ITEMS_B", "entity": "EGP_SYSTEM_ITEMS_B", "privilege": "EGO_VIEW_ITEM_BASIC_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl (a custom subject area of the demo pod): grant block on EGP_SYSTEM_ITEMS_B (EGPSYSTEMITEMSBEGO1), the item areas' function id; EGO_VIEW_ITEM_BASIC_DATA (proposal P3) - untraced" },
+      { "area": "custExt3ba2e2a8_70ef_4325_87bd_9e22d61f8abf", "object": "EGP_SYSTEM_ITEMS_B", "entity": "EGP_SYSTEM_ITEMS_B", "privilege": "EGO_VIEW_ITEM_BASIC_DATA", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl (a custom subject area of the demo pod): grant block on EGP_SYSTEM_ITEMS_B (EGPSYSTEMITEMSBEGO1), the item areas' function id; EGO_VIEW_ITEM_BASIC_DATA (proposal P3) - untraced" },
+
+      { "area": "Sales - CRM Contact Note", "object": "ZMM_NOTES", "entity": "ZMM_NOTES", "privilege": "read", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the grant block sits on ZMM_NOTES (the ZMM_NOTES_* instance-set family, matched by predicate text), ONE function id for the four note areas (contact, customer, opportunity, compensation notes); read = the only privilege common to them in U, MKL / MOO are object-specific (proposal P4) - untraced; an explicit curated name, not the rule (the rule never picks a CRUD name)" },
+      { "area": "Sales - CRM Customer Note", "object": "ZMM_NOTES", "entity": "ZMM_NOTES", "privilege": "read", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on ZMM_NOTES (ZMM_NOTES_* sets), one function id for the four note areas; read (proposal P4) - untraced" },
+      { "area": "Sales - CRM Opportunity Note", "object": "ZMM_NOTES", "entity": "ZMM_NOTES", "privilege": "read", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: grant block on ZMM_NOTES (ZMM_NOTES_* sets), one function id for the four note areas; read (proposal P4) - untraced" },
+      { "area": "Compensation - Workforce Compensation Real Time", "object": "ZMM_NOTES", "entity": "ZMM_NOTES", "privilege": "read", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the only secured folders of the area are the Compensation Notes folders, the grant block sits on ZMM_NOTES (ZMM_NOTES_* sets) with the note areas' function id; read (proposal P4) - untraced" },
+
+      { "area": "Payroll - Payroll Flows Real Time", "object": "ESS_REQUEST_HISTORY", "privilege": "ESS_REQUEST_READ", "source": "inferred", "instances": ["*"],
+        "evidence": "demo-pod OTBI crawl: the grant block sits on ESS_REQUEST_HISTORY (instance set REQS_ALL_OF_ONE_APP, matched by predicate text); the payroll FBI duties hold the five ESS_REQUEST_* names on that one permission set (identical grant sets), ESS_REQUEST_READ is the natural name (proposal P7); not in U - untraced" }
+    ]
+  },
+
+  "referenceFamilies": {
+    "_doc": "Reference-data families (revised phase 3, user decision 1 of 2026-10-05 - the structural none rule of the END-USER plan, src/corpus/dataAccess.ts): a `none` table (no context column, not a security object with grants on the pod) is readable by an end user unless it has a declared (fkeys, as the child) OR mined (relationships, as the from side) relationship to SECURED data = a table with a context column (table_security) or a table the pod registers as a security object with grants; a member of these families stays readable even then (grade structural; its relationships are stated). Membership is decided per table from the release dictionary by the name pattern AND reference-shaped columns (p5_security.sql -> table_reference_family, one row per table with its evidence; the first family in this order wins): `nameRe` = the table-name pattern; `allColumns` = every one present; `anyColumns` = at least one present; `anyColumnSets` = at least one set wholly present; `anyColumnRe` = at least one column matches (calendar: a period / day date or a period set / type column, never the audit dates every table carries); `idColumnsRe` = every *_ID column matches it (a business foreign key disqualifies: a period table carrying PROJECT_ID / AWARD_ID is business data). `translation` = a _TL table carrying `allColumns` (LANGUAGE, SOURCE_LANG), or a _VL view whose _TL sibling does; its base = the _B table, else the stem; every *_ID column is a key column (pkeys) of the table, of its _TL sibling or of its base, or matches `idColumnsRe`; at plan time a translation counts as REFERENCE data only while its base is not secured on the pod and none of its relationships to secured data goes through its key columns (a translation of secured data - HR_ORGANIZATION_UNITS_F_TL, EGP_PHASES_VL - stays blocked). The opened / still-blocked counts per population are measured by scripts/pipeline/security_coverage_resolver.mts (README: the v2027_08 build); a child of secured data that is no family member stays blocked for end users (e.g. POZ_SUPPLIERS, CE_BANK_ACCOUNTS, HZ_LOCATIONS, GL_CODE_COMBINATIONS).",
+    "families": [
+      {"family": "lookup", "nameRe": "(^|_)(LOOKUP|LOOKUPS|LOOKUP_VALUES|LOOKUP_CODES|LOOKUP_TYPES|LKP|LKUP|LKP_VALUES)(_B|_TL|_VL|_V)?$", "allColumns": ["LOOKUP_TYPE", "LOOKUP_CODE"], "anyColumns": ["MEANING", "DESCRIPTION", "DISPLAYED_FIELD"]},
+      {"family": "calendar", "nameRe": "(^|_)(CAL|CALENDAR|CALENDARS|PERIOD|PERIODS|PERIOD_SETS|PERIOD_TYPES|TIME_PERIODS|DATE_PERIOD_MAP|CAL_DAY|CAL_WEEK|CAL_MONTH|CAL_QUARTER|CAL_YEAR)(_B|_TL|_VL|_V)?$", "anyColumnRe": "(START_DATE|END_DATE|REPORT_DATE|ACCOUNTING_DATE|CALENDAR_DATE|PERIOD_SET_NAME|PERIOD_TYPE)$", "idColumnsRe": "^(ENTERPRISE_ID|REQUEST_ID|PROGRAM_ID|PROGRAM_APPLICATION_ID|MODULE_ID|LEGISLATIVE_DATA_GROUP_ID|BUSINESS_GROUP_ID|SET_ID|SR_INSTANCE_ID|APPLICATION_ID|([A-Z0-9_]*_)?(CALENDAR|CAL|PERIOD|PERIOD_SET|PERIOD_TYPE|QTR|YEAR|TIME_PERIOD|TIME_DEFINITION)_ID)$"},
+      {"family": "currency", "nameRe": "(CURRENCIES|CURRENCY|DAILY_RATES|CONVERSION_RATES|CONVERSION_TYPES)(_B|_TL|_VL|_V)?$", "anyColumnSets": [["CURRENCY_CODE"], ["FROM_CURRENCY", "TO_CURRENCY"], ["CONVERSION_TYPE"]]},
+      {"family": "territory", "nameRe": "(TERRITORIES|TERRITORY|GEOGRAPHIES|GEOGRAPHY|GEOGRAPHY_TYPES|GEO_HIERARCHY_NODES|COUNTRIES)(_B|_TL|_VL|_V)?$", "anyColumns": ["TERRITORY_CODE", "COUNTRY_CODE", "GEOGRAPHY_ID", "GEOGRAPHY_TYPE", "GEOGRAPHY_CODE", "GEOGRAPHY_NAME", "TERRITORY_SHORT_NAME"]},
+      {"family": "translation", "translation": true, "nameRe": "_(TL|VL)$", "allColumns": ["LANGUAGE", "SOURCE_LANG"], "idColumnsRe": "^(ENTERPRISE_ID|BUSINESS_GROUP_ID|SET_ID|LEGISLATIVE_DATA_GROUP_ID|REQUEST_ID|PROGRAM_ID|PROGRAM_APPLICATION_ID|PROGRAM_LOGIN_ID|LOGIN_ID|MODULE_ID|SEED_DATA_SOURCE_ID|JOB_DEFINITION_ID)$"}
+    ]
+  },
+  "sensitive": {
+    "_doc": "Sensitive side tables (plan 2026-10-04 C6, decision 10): the table is read ONLY through its own registered FND_OBJECTS object and the privilege(s) named here, never through the duty map, U, the rule or a context column - the override beats every other route (the duty route would grant PER_REPORT_PERSON_DATA on national identifiers: a GLOBAL-person user would read every identifier). Two or more privileges = anyOf: their predicates are OR-ed inside ONE condition (the supplier PII side tables mirror the tables' own VPD policy: either privilege opens a row; (1=2) OR (1=2) stays closed). `maskedOnly` = the raw column of every MASKED_<col> twin the table carries is never selected (the twin is) - the job derives the twin list from the release dictionary and fails when there is none. Every object must be a shipped security object whose database object IS the table, every privilege registered on it in the seed export (a typo fails the build) and granted on the target instance at run time (else blocked). Shipped as sec_meta.sensitive_objects. Evidence: the Kornit exports (FND_OBJECTS + privileges 2026-10-01, the 2026-10-03 layer) + the demo-pod OTBI crawl (column-security reader 2026-10-04: OTBI slots (1=2) directly on PER_NATIONAL_IDENTIFIERS x6, CMP_SALARY x7, passport / visa / licence x4; bank numbers appear only as MASKED_* columns).",
+    "rows": [
+      { "table": "PER_NATIONAL_IDENTIFIERS", "object": "PER_NATIONAL_IDENTIFIERS", "privileges": ["PER_REPORT_PERSON_NATIONAL_IDENTIFIER_DATA"],
+        "evidence": "national identifiers sit in their own OTBI folders with their own slot; PER_REPORT_PERSON_NATIONAL_IDENTIFIER_DATA = the national-identifier report privilege of the object (granted to the BI server identity on Kornit TEST); the duty map would pick PER_REPORT_PERSON_DATA (33 duties) - wrong" },
+      { "table": "PER_PASSPORTS", "object": "PER_PASSPORTS", "privileges": ["PER_REPORT_PERSON_PASSPORT_DATA"],
+        "evidence": "same pattern as national identifiers: the passport report privilege of the object (granted to the BI server identity on Kornit TEST), not the documents-of-record duty privilege" },
+      { "table": "PER_VISAS_PERMITS_F", "object": "PER_VISAS_PERMITS_F", "privileges": ["PER_REPORT_PERSON_VISA_DATA"],
+        "evidence": "same pattern: the visa / permit report privilege of the object (granted to the BI server identity on Kornit TEST)" },
+      { "table": "PER_DRIVERS_LICENSES", "object": "PER_DRIVERS_LICENSES", "privileges": ["PER_REPORT_DRIVER_LICENSE_DATA"],
+        "evidence": "same pattern: the driver-licence report privilege of the object (granted to the BI server identity on Kornit TEST; Oracle names it without PERSON_)" },
+      { "table": "CMP_SALARY", "object": "CMP_SALARY", "privileges": ["CMP_REPORT_SALARY_DATA"],
+        "evidence": "salary sits in its own OTBI slot; CMP_REPORT_SALARY_DATA = the salary report privilege of the object (granted to the BI server identity and 4 analysis duties on Kornit TEST)" },
+      { "table": "POZ_SUPPLIERS_PII", "object": "POZ_SUPPLIERS_PII", "privileges": ["POZ_MAINTAIN_SUPPLIER_TAX_IDENTIFIERS_PII_DATA", "POZ_MAINTAIN_SUPPLIER_CORPORATE_TAX_IDENTIFIERS_DATA"],
+        "evidence": "supplier tax identifiers live in the PII side object (VPD on the table); the two tax-identifier privileges are its only named grants on Kornit TEST (SET grants, none to the BI server identity) - anyOf" },
+      { "table": "POZ_SUPPLIER_SITES_PII", "object": "POZ_SUPPLIER_SITES_PII", "privileges": ["POZ_MAINTAIN_SUPPLIER_TAX_IDENTIFIERS_PII_DATA", "POZ_MAINTAIN_SUPPLIER_CORPORATE_TAX_IDENTIFIERS_DATA"],
+        "evidence": "site-level tax identifiers: the same PII side-object pattern, the same two privileges - anyOf" },
+      { "table": "POZ_SUP_REG_PII", "object": "POZ_SUP_REG_PII", "privileges": ["POZ_MAINTAIN_SUPPLIER_TAX_IDENTIFIERS_PII_DATA", "POZ_MAINTAIN_SUPPLIER_CORPORATE_TAX_IDENTIFIERS_DATA"],
+        "evidence": "supplier-registration tax identifiers: the same PII side-object pattern, the same two privileges - anyOf" },
+      { "table": "POZ_SUPP_REQUESTS_PII", "object": "POZ_SUPP_REQUESTS_PII", "privileges": ["POZ_MAINTAIN_SUPPLIER_TAX_IDENTIFIERS_PII_DATA", "POZ_MAINTAIN_SUPPLIER_CORPORATE_TAX_IDENTIFIERS_DATA"],
+        "evidence": "supplier-request tax identifiers: the same PII side-object pattern, the same two privileges - anyOf" },
+      { "table": "IBY_EXT_BANK_ACCOUNTS", "object": "IBY_EXT_BANK_ACCOUNTS", "privileges": ["IBY_VIEW_PII_ATTRIBUTES_IN_PAYMENTS_DATA"], "maskedOnly": true,
+        "evidence": "external bank accounts: OTBI leaves the entity unslotted; secured by its own PII privilege (the only named grant of the object on Kornit TEST) and the account number / IBAN read only as their MASKED_* columns (REST behaviour, stricter than OTBI)" },
+      { "table": "IBY_ACCOUNT_OWNERS", "object": "IBY_ACCOUNT_OWNERS", "privileges": ["IBY_VIEW_PII_ATTRIBUTES_IN_PAYMENTS_DATA"],
+        "evidence": "bank-account owners: the same own PII privilege as the accounts (the only named grant of the object on Kornit TEST); the table carries no MASKED_* twin, so no masked-column rule" }
+    ]
+  }
+}

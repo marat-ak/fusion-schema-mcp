@@ -31,3 +31,18 @@ data/*.jsonl
 # python bytecode
 __pycache__/
 *.pyc
+
+# data-access security inputs + analysis outputs exported from customer pods (names, ids, condition
+# text, user names): LOCAL ONLY (plan 2026-10-04, decision 7). The coverage *.md reports stay
+# tracked and carry no condition text and no pod id (the OTBI trace proof = SHA-256 + length).
+data/security/instances/**
+# OTBI LOGLEVEL-7 captures and their extracted ids (scripts/pipeline/sec_trace.py; docs/trace-capture-guide.md) — a pod's own data
+data/security/traces/**
+data/security/_*.csv
+data/security/coverage/**
+!data/security/coverage/**/
+!data/security/coverage/**/*.md
+# Oracle-extracted inputs kept local: the seeded data-security policy extract (instance-set predicate
+# text read from a pod; p5_security.sh reads it at release-build time) and Oracle package source
+scripts/pipeline/oracle_datasec_policies.csv
+fnd_security.pkb

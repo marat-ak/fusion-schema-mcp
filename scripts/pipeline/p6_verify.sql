@@ -31,7 +31,7 @@ UNION ALL SELECT 'columns',       (SELECT count(*) FROM {{V}}.columns),       14
 UNION ALL SELECT 'pkeys',         (SELECT count(*) FROM {{V}}.pkeys),         41407
 UNION ALL SELECT 'fkeys',         (SELECT count(*) FROM {{V}}.fkeys),         18565
 UNION ALL SELECT 'indexes',       (SELECT count(*) FROM {{V}}.indexes),       130442
-UNION ALL SELECT 'relationships', (SELECT count(*) FROM {{V}}.relationships), 28055;
+UNION ALL SELECT 'relationships', (SELECT count(*) FROM {{V}}.relationships), 39571;  -- 30,203 mined (parse with correlated / inline-view / semi-join edges, 2026-09-30; 18,687 before) + 9,368 declared
 
 \if :has_base
 \echo '--- schema side CONTENT equality with v2026_09 (counts alone hid a real defect) ---'
@@ -268,6 +268,246 @@ FROM   {{V}}.report_queries q
 JOIN   work.embeddings e ON e.owner_kind='unit' AND e.owner_id = substr(q.id, 5) AND e.slot=0;
 \endif
 
+\echo '=== 6b. OTBI presentation catalog + unit_titles (ddl_version 4) ==='
+SELECT (SELECT count(*) FROM {{V}}.otbi_subject_area) AS subject_areas,
+       (SELECT count(*) FROM {{V}}.otbi_folder)       AS folders,
+       (SELECT count(*) FROM {{V}}.otbi_folder WHERE kind = 'fact') AS fact_folders,
+       (SELECT count(*) FROM {{V}}.otbi_column)       AS columns,
+       (SELECT count(*) FROM {{V}}.otbi_column WHERE description IS NOT NULL) AS columns_described,
+       (SELECT count(*) FROM {{V}}.otbi_column WHERE kind = 'measure') AS measures,
+       (SELECT count(*) FROM {{V}}.otbi_vec)          AS otbi_vectors,
+       (SELECT count(*) FROM {{V}}.unit_titles)       AS unit_titles;
+\echo '--- OTBI dangling — every one must be ZERO ---'
+SELECT 'otbi_column -> otbi_folder' AS ref, count(*) AS dangling
+FROM   {{V}}.otbi_column c WHERE NOT EXISTS (SELECT 1 FROM {{V}}.otbi_folder f WHERE f.subject_area = c.subject_area AND f.name = c.folder)
+UNION ALL SELECT 'otbi_folder -> otbi_subject_area', count(*)
+FROM   {{V}}.otbi_folder f WHERE NOT EXISTS (SELECT 1 FROM {{V}}.otbi_subject_area s WHERE s.name = f.subject_area)
+UNION ALL SELECT 'otbi_column.text_hash -> otbi_vec', count(*)
+FROM   {{V}}.otbi_column c WHERE NOT EXISTS (SELECT 1 FROM {{V}}.otbi_vec v WHERE v.text_hash = c.text_hash)
+UNION ALL SELECT 'otbi_folder.text_hash -> otbi_vec', count(*)
+FROM   {{V}}.otbi_folder f WHERE NOT EXISTS (SELECT 1 FROM {{V}}.otbi_vec v WHERE v.text_hash = f.text_hash)
+UNION ALL SELECT 'otbi_folder.unit_id -> unit_titles/report_queries', count(*)
+FROM   {{V}}.otbi_folder f WHERE f.unit_id IS NOT NULL
+  AND  NOT EXISTS (SELECT 1 FROM {{V}}.unit_titles u JOIN {{V}}.report_queries q ON q.id = u.id WHERE u.title = f.subject_area || '.' || f.name)
+UNION ALL SELECT 'unit_titles.id -> report_queries.id', count(*)
+FROM   {{V}}.unit_titles u WHERE NOT EXISTS (SELECT 1 FROM {{V}}.report_queries q WHERE q.id = u.id);
+\echo '--- ddl_version 9: the VO hop (otbi_vo), the exposure index (otbi_column_ref), area -> duty codes (otbi_area_duty) ---'
+SELECT (SELECT count(*) FROM {{V}}.otbi_vo)          AS vos,
+       (SELECT count(DISTINCT subject_area) FROM {{V}}.otbi_vo) AS vo_areas,
+       (SELECT count(*) FROM {{V}}.otbi_column_ref)  AS column_refs,
+       (SELECT count(DISTINCT table_name) FROM {{V}}.otbi_column_ref) AS exposed_tables,
+       (SELECT count(*) FROM {{V}}.otbi_column_ref WHERE via_expression = 1) AS refs_via_expression,
+       (SELECT count(*) FROM {{V}}.otbi_area_duty)   AS area_duty_pairs,
+       (SELECT count(DISTINCT subject_area) FROM {{V}}.otbi_area_duty WHERE matched_by = 'name')  AS areas_by_name,
+       (SELECT count(DISTINCT subject_area) FROM {{V}}.otbi_area_duty WHERE matched_by = 'alias') AS areas_by_alias,
+       (SELECT count(*) FROM jsonb_object_keys((SELECT v::jsonb FROM {{V}}.otbi_meta WHERE k = 'area_duty_unmapped'))) AS areas_unmapped,
+       (SELECT count(*) FROM {{V}}.otbi_area_job)    AS area_job_pairs,
+       (SELECT count(DISTINCT subject_area) FROM {{V}}.otbi_area_job) AS areas_with_jobs,
+       (SELECT count(DISTINCT job_code) FROM {{V}}.otbi_area_job) AS job_codes;
+\echo '--- GATE: the exposure index is exactly the exploded db_refs; every area is mapped XOR listed unmapped; no admin-class code; the stamps exist — the release FAILS on any line ---'
+DO $$
+DECLARE bad_otbi text;
+BEGIN
+  SELECT string_agg(m, '; ') INTO bad_otbi FROM (
+    SELECT 'otbi_column_ref holds ' || r.n || ' rows, the exploded otbi_column.db_refs ' || x.n AS m
+    FROM  (SELECT count(*) n FROM {{V}}.otbi_column_ref) r,
+          (SELECT count(*) n FROM (SELECT DISTINCT c.subject_area, c.folder, c.name, e.t, e.c
+                                   FROM {{V}}.otbi_column c
+                                   CROSS JOIN LATERAL jsonb_to_recordset(CASE WHEN jsonb_typeof(c.db_refs::jsonb) = 'array' THEN c.db_refs::jsonb ELSE '[]'::jsonb END) AS e(t text, c text)
+                                   WHERE e.t IS NOT NULL AND e.c IS NOT NULL) d) x
+    WHERE  r.n <> x.n
+    UNION ALL SELECT 'otbi_column_ref -> otbi_column: ' || count(*) || ' row(s)' FROM {{V}}.otbi_column_ref r
+              WHERE NOT EXISTS (SELECT 1 FROM {{V}}.otbi_column c WHERE c.subject_area = r.subject_area AND c.folder = r.folder AND c.name = r.column_name)
+              HAVING count(*) > 0
+    UNION ALL SELECT 'otbi_column_ref.folder_kind differs from otbi_folder.kind: ' || count(*) || ' row(s)' FROM {{V}}.otbi_column_ref r
+              JOIN {{V}}.otbi_folder f ON f.subject_area = r.subject_area AND f.name = r.folder WHERE f.kind IS DISTINCT FROM r.folder_kind
+              HAVING count(*) > 0
+    UNION ALL SELECT 'otbi_vo -> otbi_folder: ' || count(*) || ' row(s)' FROM {{V}}.otbi_vo v
+              WHERE NOT EXISTS (SELECT 1 FROM {{V}}.otbi_folder f WHERE f.subject_area = v.subject_area AND f.name = v.folder)
+              HAVING count(*) > 0
+    UNION ALL SELECT 'otbi_area_duty -> otbi_subject_area: ' || d.subject_area FROM {{V}}.otbi_area_duty d
+              WHERE NOT EXISTS (SELECT 1 FROM {{V}}.otbi_subject_area s WHERE s.name = d.subject_area)
+    UNION ALL SELECT 'otbi_area_duty.matched_by ' || coalesce(matched_by, 'NULL') || ' is not name | alias' FROM {{V}}.otbi_area_duty
+              WHERE matched_by IS NULL OR matched_by NOT IN ('name', 'alias')
+    UNION ALL SELECT 'an area mapped by name AND by alias: ' || subject_area FROM {{V}}.otbi_area_duty GROUP BY subject_area HAVING count(DISTINCT matched_by) > 1
+    UNION ALL SELECT 'admin-class role shipped as an area holder: ' || subject_area || ' / ' || duty_code FROM {{V}}.otbi_area_duty
+              WHERE duty_code ~* '^(ORA_)?BI_?(ADMINISTRATOR|AUTHOR|CONSUMER)'
+    UNION ALL SELECT 'a duty code that is no identifier: ' || subject_area || ' / ' || duty_code FROM {{V}}.otbi_area_duty
+              WHERE duty_code !~ '^[A-Z][A-Z0-9_$#]*$'
+    UNION ALL SELECT 'area ' || s.name || ' is neither mapped to a duty code nor listed in otbi_meta.area_duty_unmapped' FROM {{V}}.otbi_subject_area s
+              WHERE NOT EXISTS (SELECT 1 FROM {{V}}.otbi_area_duty d WHERE d.subject_area = s.name)
+                AND NOT ((SELECT v::jsonb FROM {{V}}.otbi_meta WHERE k = 'area_duty_unmapped') ? s.name)
+    UNION ALL SELECT 'area ' || k || ' is listed unmapped but carries duty codes (or is no shipped area)'
+              FROM jsonb_object_keys((SELECT v::jsonb FROM {{V}}.otbi_meta WHERE k = 'area_duty_unmapped')) k
+              WHERE EXISTS (SELECT 1 FROM {{V}}.otbi_area_duty d WHERE d.subject_area = k)
+                 OR NOT EXISTS (SELECT 1 FROM {{V}}.otbi_subject_area s WHERE s.name = k)
+    -- ddl_version 10: area -> guide JOB role codes (the job-role consensus input)
+    UNION ALL SELECT 'otbi_area_job -> otbi_subject_area: ' || j.subject_area FROM {{V}}.otbi_area_job j
+              WHERE NOT EXISTS (SELECT 1 FROM {{V}}.otbi_subject_area s WHERE s.name = j.subject_area)
+    UNION ALL SELECT 'otbi_area_job.matched_by ' || coalesce(matched_by, 'NULL') || ' is not duty | page | duty,page' FROM {{V}}.otbi_area_job
+              WHERE matched_by IS NULL OR matched_by NOT IN ('duty', 'page', 'duty,page')
+    UNION ALL SELECT 'a job code that is no identifier, or an admin-class role: ' || subject_area || ' / ' || job_code FROM {{V}}.otbi_area_job
+              WHERE job_code !~ '^[A-Z][A-Z0-9_$#]*$' OR job_code ~* '^(ORA_)?BI_?(ADMINISTRATOR|AUTHOR|CONSUMER)'
+    UNION ALL SELECT 'otbi_area_job is empty — the job-role consensus would find nothing' WHERE NOT EXISTS (SELECT 1 FROM {{V}}.otbi_area_job)
+    UNION ALL SELECT 'missing otbi_meta stamp ' || k FROM unnest(ARRAY['version', 'guide_release', 'area_duty_guides', 'area_duty_unmapped', 'area_duty_stats', 'area_job_stats']) k
+              WHERE NOT EXISTS (SELECT 1 FROM {{V}}.otbi_meta m WHERE m.k = k)
+  ) x;
+  IF bad_otbi IS NOT NULL THEN RAISE EXCEPTION 'p6 gate FAILED: OTBI lineage / area-duty facts of {{V}}: %', bad_otbi; END IF;
+END $$;
+\echo '--- unit_titles: every shipped corpus row is reachable by at least its own title ---'
+SELECT source, count(*) AS titles, count(DISTINCT id) AS statements FROM {{V}}.unit_titles GROUP BY 1 ORDER BY 1;
+\echo '--- the three verification subject areas: lineage folders with / without a corpus unit (listQueriesForSubjectArea coverage) ---'
+SELECT f.subject_area, count(*) FILTER (WHERE f.in_lineage = 1) AS lineage_folders,
+       count(*) FILTER (WHERE f.in_lineage = 1 AND f.unit_id IS NOT NULL) AS with_unit,
+       string_agg(f.name, ' | ' ORDER BY f.name) FILTER (WHERE f.in_lineage = 1 AND f.unit_id IS NULL) AS lineage_folders_without_unit
+FROM   {{V}}.otbi_folder f
+WHERE  f.subject_area IN ('General Ledger - Balances Real Time', 'Payables Invoices - Transactions Real Time', 'Workforce Management - Worker Assignment Real Time')
+GROUP  BY 1 ORDER BY 1;
+
+\echo '=== 6c. data-access security facts (ddl_version 5; table_disallowed 6; names-only sec_area_privilege 7; scoped, never nameless curated rows 8; (area, entity) keys + no pod export copies 9; audited primary + sensitive objects + context evidence refs in sec_meta; reference families + traced context columns 10) ==='
+SELECT (SELECT count(*) FROM {{V}}.table_security WHERE confidence <> 'ambiguous')                    AS context_rows,
+       (SELECT count(DISTINCT table_name) FROM {{V}}.table_security WHERE confidence <> 'ambiguous') AS objects,
+       (SELECT count(DISTINCT table_name || '.' || column_name) FROM {{V}}.table_security WHERE confidence = 'ambiguous') AS ambiguous_columns,
+       (SELECT count(*) FROM {{V}}.table_disallowed) AS disallowed_objects,
+       (SELECT count(*) FROM {{V}}.sec_area_privilege) AS area_rows,
+       (SELECT count(*) FROM {{V}}.sec_area_privilege WHERE entity_table IS NOT NULL) AS area_rows_with_entity,
+       (SELECT count(*) FROM {{V}}.sec_area_privilege WHERE instance_scope <> '*') AS area_rows_instance_scoped,
+       (SELECT count(*) FROM {{V}}.sec_meta)     AS sec_meta_keys;
+\echo '--- GATE: a curated area row without an object / privilege NAME or without an instance scope — the release FAILS on any (no privilege-less call exists) ---'
+SELECT area_or_product, ordinal, obj_name, privilege, source, instance_scope
+FROM   {{V}}.sec_area_privilege WHERE coalesce(obj_name, '') = '' OR coalesce(privilege, '') = '' OR coalesce(instance_scope, '') = '' ORDER BY 1, 2;
+DO $$
+DECLARE nameless int;
+BEGIN
+  SELECT count(*) INTO nameless FROM {{V}}.sec_area_privilege WHERE coalesce(obj_name, '') = '' OR coalesce(privilege, '') = '' OR coalesce(instance_scope, '') = '';
+  IF nameless > 0 THEN
+    RAISE EXCEPTION 'p6 gate FAILED: % curated area row(s) in {{V}} without an object / privilege name or an instance scope (listed above) — name the pair in p5_security_rules.json areaPrivileges (or drop the row) and build a new label', nameless;
+  END IF;
+END $$;
+\echo '--- GATE: an ambiguous row = an unresolved context column on a USED object — the release FAILS on any ---'
+SELECT table_name, column_name, string_agg(context, ',' ORDER BY context) AS candidates, left(min(reason), 120) AS reason
+FROM   {{V}}.table_security WHERE confidence = 'ambiguous' GROUP BY 1, 2 ORDER BY 1, 2;
+DO $$
+DECLARE n int;
+BEGIN
+  SELECT count(DISTINCT table_name || '.' || column_name) INTO n FROM {{V}}.table_security WHERE confidence = 'ambiguous';
+  IF n > 0 THEN
+    RAISE EXCEPTION 'p6 gate FAILED: % ambiguous data-access column(s) on USED objects in {{V}} (listed above) — resolve each (a rule or a curated override in p5_security_rules.json) and build a new label', n;
+  END IF;
+END $$;
+\if :has_work
+\echo '--- GATE: a disallowed object is used by no corpus statement (work.r_tables) ---'
+DO $$
+DECLARE bad text;
+BEGIN
+  SELECT string_agg(DISTINCT d.table_name, ', ') INTO bad
+  FROM   {{V}}.table_disallowed d JOIN work.r_tables r ON r.table_name = d.table_name AND NOT r.is_cte;
+  IF bad IS NOT NULL THEN RAISE EXCEPTION 'p6 gate FAILED: disallowed object(s) read by corpus statements: %', bad; END IF;
+END $$;
+\endif
+\echo '--- disallowed objects ---'
+SELECT table_name, left(reason, 140) AS reason FROM {{V}}.table_disallowed ORDER BY 1;
+\echo '--- security dangling / shape — every one must be ZERO ---'
+SELECT 'table_security -> columns' AS ref, count(*) AS bad
+FROM   {{V}}.table_security s WHERE NOT EXISTS (SELECT 1 FROM {{V}}.columns c WHERE c.table_name = s.table_name AND c.name = s.column_name)
+UNION ALL SELECT 'objects with a resolved row but no primary', count(*)
+FROM  (SELECT table_name FROM {{V}}.table_security WHERE confidence <> 'ambiguous' GROUP BY 1 HAVING sum(is_primary) <> 1) x
+UNION ALL SELECT 'table_security row without a reference object / column', count(*)
+FROM   {{V}}.table_security s WHERE s.ref_object IS NULL OR s.ref_column IS NULL
+UNION ALL SELECT 'area row whose (area, entity) key names no dictionary table', count(*)
+FROM   {{V}}.sec_area_privilege a WHERE a.entity_table IS NOT NULL AND NOT EXISTS (SELECT 1 FROM {{V}}.tables t WHERE t.name = a.entity_table)
+UNION ALL SELECT 'area row whose source (= the grade of its conditions) is not trace | inferred', count(*)
+FROM   {{V}}.sec_area_privilege a WHERE a.source NOT IN ('trace', 'inferred')
+UNION ALL SELECT 'a pod id in a shipped security table (digits-only name)', count(*)
+FROM  (SELECT obj_name AS n FROM {{V}}.sec_area_privilege
+       UNION ALL SELECT privilege FROM {{V}}.sec_area_privilege) x WHERE x.n ~ '^[0-9]+$'
+UNION ALL SELECT 'missing stamp keys', count(*)
+FROM   unnest(ARRAY['version','context_order','context_evidence_refs','hcm_prefixes','privilege_prefix_aliases','primary_audit','sensitive_objects','stats']) k
+WHERE  NOT EXISTS (SELECT 1 FROM {{V}}.sec_meta m WHERE m.k = k);
+\echo '--- ddl_version 10: the reference families (table_reference_family) + the traced context columns (sec_area_privilege.context_column) ---'
+SELECT family, count(*) AS tables, count(base_table) AS with_base FROM {{V}}.table_reference_family GROUP BY 1 ORDER BY 1;
+SELECT area_or_product, obj_name, privilege, source, entity_table, context_column FROM {{V}}.sec_area_privilege WHERE context_column IS NOT NULL ORDER BY 1, 2;
+\echo '--- GATE: every family member a dictionary table with an evidence text, the five families present, a translation base real, a context column TABLE.COLUMN of the dictionary — the release FAILS on any line ---'
+DO $$
+DECLARE bad_ref text;
+BEGIN
+  SELECT string_agg(m, '; ') INTO bad_ref FROM (
+    SELECT 'table_reference_family.family ' || coalesce(family, 'NULL') || ' is not lookup | translation | calendar | currency | territory' AS m
+    FROM   {{V}}.table_reference_family WHERE family IS NULL OR family NOT IN ('lookup', 'translation', 'calendar', 'currency', 'territory')
+    UNION ALL SELECT 'table_reference_family -> tables: ' || count(*) || ' row(s)' FROM {{V}}.table_reference_family r
+              WHERE NOT EXISTS (SELECT 1 FROM {{V}}.tables t WHERE t.name = r.table_name) HAVING count(*) > 0
+    UNION ALL SELECT 'table_reference_family row without an evidence text: ' || table_name FROM {{V}}.table_reference_family WHERE coalesce(btrim(evidence), '') = ''
+    UNION ALL SELECT 'reference family ' || f || ' is empty' FROM unnest(ARRAY['lookup', 'translation', 'calendar', 'currency', 'territory']) f
+              WHERE NOT EXISTS (SELECT 1 FROM {{V}}.table_reference_family r WHERE r.family = f)
+    UNION ALL SELECT 'a base_table on a non-translation row, or a base that is no dictionary table: ' || r.table_name FROM {{V}}.table_reference_family r
+              WHERE r.base_table IS NOT NULL AND (r.family <> 'translation' OR NOT EXISTS (SELECT 1 FROM {{V}}.tables t WHERE t.name = r.base_table))
+    UNION ALL SELECT 'sec_area_privilege.context_column ' || a.context_column || ' (' || a.area_or_product || ') is not TABLE.COLUMN of the dictionary'
+              FROM {{V}}.sec_area_privilege a WHERE a.context_column IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM {{V}}.columns c WHERE c.table_name = split_part(a.context_column, '.', 1) AND c.name = split_part(a.context_column, '.', 2))
+    UNION ALL SELECT 'curated area rows of ' || area_or_product || ' disagree on ' || obj_name || ' (one privilege per area and object)' FROM {{V}}.sec_area_privilege
+              GROUP BY area_or_product, obj_name, instance_scope HAVING count(DISTINCT privilege) > 1
+  ) x;
+  IF bad_ref IS NOT NULL THEN RAISE EXCEPTION 'p6 gate FAILED: reference families / context columns of {{V}}: %', bad_ref; END IF;
+END $$;
+\echo '--- GATE: the audited primary contexts (sec_meta.primary_audit), the context evidence objects (sec_meta.context_evidence_refs) and the sensitive objects (sec_meta.sensitive_objects) — the release FAILS on any line ---'
+DO $$
+DECLARE bad_meta text;
+BEGIN
+  SELECT string_agg(m, '; ') INTO bad_meta FROM (
+    -- an audit: >= 1 context of the context order, source trace | crawl, an evidence text
+    SELECT 'primary_audit.' || a.key || ' is malformed' AS m
+    FROM   {{V}}.sec_meta s, jsonb_each(s.v::jsonb) a
+    WHERE  s.k = 'primary_audit'
+      AND (jsonb_typeof(a.value->'contexts') IS DISTINCT FROM 'array' OR jsonb_array_length(a.value->'contexts') = 0
+           OR coalesce(a.value->>'source', '') NOT IN ('trace', 'crawl') OR coalesce(btrim(a.value->>'evidence'), '') = '')
+    UNION ALL
+    SELECT 'context_evidence_refs.' || e.key || ' is not one of sec_meta.context_order, or lists no object'
+    FROM   {{V}}.sec_meta s, jsonb_each(s.v::jsonb) e
+    WHERE  s.k = 'context_evidence_refs'
+      AND (NOT ((SELECT v::jsonb FROM {{V}}.sec_meta WHERE k = 'context_order') ? e.key)
+           OR jsonb_typeof(e.value) IS DISTINCT FROM 'array' OR jsonb_array_length(e.value) = 0)
+    UNION ALL
+    SELECT 'primary_audit.' || a.key || ' names context ' || c.v || ', not one of sec_meta.context_order'
+    FROM   {{V}}.sec_meta s, jsonb_each(s.v::jsonb) a, jsonb_array_elements_text(a.value->'contexts') AS c(v)
+    WHERE  s.k = 'primary_audit' AND jsonb_typeof(a.value->'contexts') = 'array'
+      AND NOT ((SELECT v::jsonb FROM {{V}}.sec_meta WHERE k = 'context_order') ? c.v)
+    UNION ALL
+    -- a sensitive object: a dictionary table read through its OWN object (the table itself), privilege names
+    -- that are identifiers (whether a pod registers / grants them is the customer layer's verdict at plan time),
+    -- masked twins real columns
+    SELECT 'sensitive_objects.' || o.key || ': object ' || coalesce(o.value->>'object', '?') || ' is not the table itself, or the table is not in the dictionary'
+    FROM   {{V}}.sec_meta s, jsonb_each(s.v::jsonb) o
+    WHERE  s.k = 'sensitive_objects'
+      AND (o.value->>'object' IS DISTINCT FROM o.key OR NOT EXISTS (SELECT 1 FROM {{V}}.tables t WHERE t.name = o.key))
+    UNION ALL
+    SELECT 'sensitive_objects.' || o.key || ': privilege ' || p.v || ' is not a privilege name'
+    FROM   {{V}}.sec_meta s, jsonb_each(s.v::jsonb) o, jsonb_array_elements_text(o.value->'privileges') AS p(v)
+    WHERE  s.k = 'sensitive_objects' AND p.v !~ '^[A-Za-z][A-Za-z0-9_$#]*$'
+    UNION ALL
+    SELECT 'sensitive_objects.' || o.key || ' has no privilege'
+    FROM   {{V}}.sec_meta s, jsonb_each(s.v::jsonb) o
+    WHERE  s.k = 'sensitive_objects' AND (jsonb_typeof(o.value->'privileges') IS DISTINCT FROM 'array' OR jsonb_array_length(o.value->'privileges') = 0)
+    UNION ALL
+    SELECT 'sensitive_objects.' || o.key || ': masked column ' || coalesce(mk->>'column', '?') || ' / ' || coalesce(mk->>'use', '?') || ' not in the dictionary'
+    FROM   {{V}}.sec_meta s, jsonb_each(s.v::jsonb) o, jsonb_array_elements(o.value->'masked') mk
+    WHERE  s.k = 'sensitive_objects'
+      AND (NOT EXISTS (SELECT 1 FROM {{V}}.columns c WHERE c.table_name = o.key AND c.name = mk->>'column')
+           OR NOT EXISTS (SELECT 1 FROM {{V}}.columns c WHERE c.table_name = o.key AND c.name = mk->>'use'))
+  ) x;
+  IF bad_meta IS NOT NULL THEN RAISE EXCEPTION 'p6 gate FAILED: data-access sec_meta facts of {{V}}: %', bad_meta; END IF;
+END $$;
+\echo '--- multi-context tables per name prefix: secured on the primary context only where the prefix is audited (the rest are BLOCKED by the table-keyed plan) ---'
+SELECT split_part(m.table_name, '_', 1) AS prefix, count(*) AS multi_context_tables,
+       ((SELECT v::jsonb FROM {{V}}.sec_meta WHERE k = 'primary_audit') ? split_part(m.table_name, '_', 1)) AS audited
+FROM  (SELECT table_name FROM {{V}}.table_security WHERE confidence <> 'ambiguous' GROUP BY 1 HAVING count(*) > 1) m
+GROUP  BY 1 ORDER BY 2 DESC, 1 LIMIT 25;
+\echo '--- the spec fixture objects (2026-09-29 §3 / 2026-10-02 §7 smoke): expected contexts ---'
+SELECT table_name, string_agg(column_name || ':' || context || '->' || ref_object || CASE WHEN is_primary = 1 THEN '*' ELSE '' END
+                              || ':' || confidence, ', ' ORDER BY is_primary DESC, column_name, context) AS rows
+FROM   {{V}}.table_security s
+WHERE  s.table_name IN ('AP_INVOICES_ALL', 'GL_JE_HEADERS', 'FA_BOOKS', 'INV_ONHAND_QUANTITIES_DETAIL', 'PO_HEADERS_ALL', 'PER_DEPARTMENTS', 'PER_ALL_PEOPLE_F')
+GROUP  BY 1 ORDER BY 1;
+
 \echo '=== 7. version stamps written by the BUILD (nothing may be built at boot) ==='
 SELECT 'catalog_meta' AS t, key AS k, value AS v FROM {{V}}.catalog_meta
 UNION ALL SELECT 'grain_meta',  k, v FROM {{V}}.grain_meta
@@ -276,6 +516,8 @@ UNION ALL SELECT 'pred_meta',   k, v FROM {{V}}.pred_meta
 UNION ALL SELECT 'layout_meta', k, v FROM {{V}}.layout_meta
 UNION ALL SELECT 'facts_meta',  k, v FROM {{V}}.facts_meta
 UNION ALL SELECT 'plsql_meta',  k, v FROM {{V}}.plsql_meta
+UNION ALL SELECT 'otbi_meta',   k, v FROM {{V}}.otbi_meta
+UNION ALL SELECT 'sec_meta',    k, left(v, 120) FROM {{V}}.sec_meta
 ORDER BY 1, 2;
 
 \echo '--- registry stamps must match the code constants that gate a boot rebuild ---'
@@ -298,11 +540,18 @@ WITH want(t) AS (VALUES
   ('table_grain'),('grain_meta'),('table_usages'),('usage_meta'),('table_predicates'),('pred_meta'),
   ('table_join_columns'),('layout_patterns'),('layout_patterns_vec'),('layout_meta'),
   ('plsql_packages'),('plsql_api'),('plsql_api_tables'),('plsql_meta'),
+  ('otbi_subject_area'),('otbi_folder'),('otbi_column'),('otbi_vec'),('otbi_meta'),('unit_titles'),
+  ('otbi_vo'),('otbi_column_ref'),('otbi_area_duty'),('otbi_area_job'),
+  ('table_security'),('table_disallowed'),('sec_area_privilege'),('sec_meta'),('table_reference_family'),
   ('flexfields'),('adf_extensions'),('enrich'),('col_vec'),('table_rules'),('facts_meta'))
 SELECT w.t AS required_table,
        EXISTS (SELECT 1 FROM information_schema.tables i
                WHERE i.table_schema='{{V}}' AND i.table_name=w.t) AS present
 FROM   want w ORDER BY 2, 1;
+
+\echo '--- retired tables (ddl_version 9: the pod export copies) — must be absent ---'
+SELECT r AS retired_table, EXISTS (SELECT 1 FROM information_schema.tables i WHERE i.table_schema = '{{V}}' AND i.table_name = r) AS present
+FROM   unnest(ARRAY['sec_object', 'sec_privilege']) r;
 
 \echo '=== 9. indexes on the release schema ==='
 SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname='{{V}}' ORDER BY 1, 2;

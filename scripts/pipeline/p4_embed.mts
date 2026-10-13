@@ -22,7 +22,9 @@
  *     not SQL, so the order cannot drift with the database collation).
  *
  * Layout patterns use loadLayoutPatterns()'s own text shape: `${name}. ${description}`
- * then one per intent.
+ * then one per intent. OTBI presentation texts (work.otbi_text, p3_otbi.sql) are owner_kind
+ * 'otbi', owner_id = md5(text), slot 0 — one vector per DISTINCT text, shared by every
+ * subject area that carries the same column.
  *
  * INCREMENTAL BY text_hash (2026-09-21; it was a full re-embed before). `text_hash` is
  * md5 of the EXACT text that produced a vector, so currency is decidable per slot: a
@@ -171,6 +173,39 @@ if (goneIds.length) {
   gone = r.count;
 }
 log(`units done: ${embeddable.length} owners — ${changedOwners} changed (${vectors} vectors embedded), ${unchanged} unchanged, ${trimmed} stale slots deleted, ${goneIds.length} owners gone (${gone} rows deleted)`);
+
+// ------------------------------------------------- OTBI presentation texts (owner_kind 'otbi')
+// work.otbi_text (p3_otbi.sql) = ONE row per distinct entity text, keyed by md5(text); the owner id
+// IS that hash, slot 0 only. Incremental exactly like the units: a stored row whose text_hash and
+// model match is left alone, texts that stopped existing are deleted. Sharded on the hash.
+const otbiPresent = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'work' AND table_name = 'otbi_text'`;
+if (!otbiPresent[0].n) throw new Error("work.otbi_text is missing — run scripts/pipeline/p3_otbi.sh before p4 (the OTBI catalog is part of every release since ddl_version 4)");
+const otbiTexts = await sql<{ text_hash: string; text: string }[]>`
+  SELECT text_hash, text FROM work.otbi_text
+  WHERE  mod(('x' || substr(text_hash, 1, 7))::bit(28)::int, ${SHARDS}) = ${SHARD}
+  ORDER  BY text_hash`;
+const haveOtbi = new Map<string, string>();
+for (const r of await sql<{ owner_id: string; text_hash: string; model: string }[]>`
+  SELECT owner_id, text_hash, model FROM work.embeddings
+  WHERE  owner_kind = 'otbi' AND slot = 0
+    AND  mod(('x' || substr(owner_id, 1, 7))::bit(28)::int, ${SHARDS}) = ${SHARD}`) {
+  if (r.model === MODEL) haveOtbi.set(r.owner_id, r.text_hash);
+}
+let otbiDone = 0, otbiVectors = 0, otbiUnchanged = 0;
+for (let i = 0; i < otbiTexts.length; i += BATCH) {
+  const owners: { kind: string; id: string; items: Item[] }[] = [];
+  for (const t of otbiTexts.slice(i, i + BATCH)) {
+    if (haveOtbi.get(t.text_hash) === md5(t.text)) { otbiUnchanged++; continue; }
+    owners.push({ kind: "otbi", id: t.text_hash, items: [{ slot: 0, text: t.text }] });
+  }
+  if (owners.length) otbiVectors += await embedOwners(owners);
+  otbiDone += Math.min(BATCH, otbiTexts.length - i);
+  if ((i / BATCH) % 25 === 0) log(`otbi ${otbiDone}/${otbiTexts.length} embedded=${otbiVectors} unchanged=${otbiUnchanged}`);
+}
+const liveOtbi = new Set(otbiTexts.map((t) => t.text_hash));
+const goneOtbi = [...haveOtbi.keys()].filter((id) => !liveOtbi.has(id));
+if (goneOtbi.length) await sql`DELETE FROM work.embeddings WHERE owner_kind = 'otbi' AND owner_id = ANY(${sql.array(goneOtbi)}::text[])`;
+log(`otbi done: ${otbiTexts.length} texts — ${otbiVectors} embedded, ${otbiUnchanged} unchanged, ${goneOtbi.length} gone`);
 
 // ------------------------------------------------------- layout patterns (shard 0 only)
 // The curated corpus is an INPUT to assembly, not a runtime load: 46 human-authored,

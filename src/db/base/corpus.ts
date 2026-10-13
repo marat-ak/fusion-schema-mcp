@@ -47,12 +47,18 @@ export class BaseCorpus implements CorpusApi {
     return (rows[0]?.c ?? 0) > 0;
   }
 
+  /** A title names a row through `unit_titles` (every L2 unit title of the release → its statement's
+   *  row) or through the row's own `title` (a runtime-ingested row has no unit_titles entry). */
+  private titled(): string {
+    return `(rq.title = ? OR rq.id IN (SELECT u.id FROM ${this.p.t("unit_titles")} u WHERE u.title = ?))`;
+  }
+
   // A .xdm data model has SEVERAL datasets stored as several rows sharing one title; the MAIN
   // query is the largest, so return the biggest-SQL row first.
   async byTitle(title: string): Promise<T.CorpusRow | null> {
     const rows = await this.p.q<T.CorpusRow>(
-      `SELECT ${LOOKUP_COLS} FROM ${this.rq()} WHERE title = ?
-       ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC LIMIT 1`, [title]);
+      `SELECT ${LOOKUP_COLS} FROM ${this.rq()} rq WHERE ${this.titled()}
+       ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC LIMIT 1`, [title, title]);
     return rows[0] ?? null;
   }
 
@@ -64,18 +70,43 @@ export class BaseCorpus implements CorpusApi {
   async siblings(title: string): Promise<T.SiblingRow[]> {
     return this.p.q<T.SiblingRow>(
       `SELECT id, LENGTH(COALESCE(clean_sql, original_sql)) AS "sqlChars", description
-       FROM ${this.rq()} WHERE title = ?
-       ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC, id${this.p.coll()}`, [title]);
+       FROM ${this.rq()} rq WHERE ${this.titled()}
+       ORDER BY LENGTH(COALESCE(clean_sql, original_sql)) DESC, id${this.p.coll()}`, [title, title]);
   }
 
+  /** Every unit title matching the pattern (its own row title or a unit_titles alias), one row per
+   *  (matched title, corpus row); `canonicalTitle` is the corpus row's title. */
   async byTitlePrefix(pattern: string, limit: number): Promise<T.CorpusRowLite[]> {
     return this.p.q<T.CorpusRowLite>(
-      `SELECT id, source, title, description FROM ${this.rq()} WHERE title LIKE ? ORDER BY title${this.p.coll()} LIMIT ?`, [pattern, limit]);
+      `SELECT id, source, title, "canonicalTitle", description FROM (
+         SELECT rq.id, rq.source, rq.title AS title, rq.title AS "canonicalTitle", rq.description FROM ${this.rq()} rq WHERE rq.title LIKE ?
+         UNION
+         SELECT rq.id, rq.source, u.title, rq.title, rq.description
+         FROM ${this.p.t("unit_titles")} u JOIN ${this.rq()} rq ON rq.id = u.id WHERE u.title LIKE ?) x
+       ORDER BY title${this.p.coll()}, id${this.p.coll()} LIMIT ?`, [pattern, pattern, limit]);
   }
 
   async nearTitles(pattern: string): Promise<string[]> {
-    const rows = await this.p.q<{ title: string }>(`SELECT title FROM ${this.rq()} WHERE title LIKE ? ORDER BY title${this.p.coll()} LIMIT 8`, [pattern]);
+    const rows = await this.p.q<{ title: string }>(
+      `SELECT title FROM (SELECT title FROM ${this.rq()} WHERE title LIKE ?
+                          UNION SELECT title FROM ${this.p.t("unit_titles")} WHERE title LIKE ?) x
+       ORDER BY title${this.p.coll()} LIMIT 8`, [pattern, pattern]);
     return rows.map((r) => r.title);
+  }
+
+  async replaceUnitTitles(rows: T.UnitTitleRow[]): Promise<number> {
+    await this.p.tx(async () => {
+      await this.p.run(`DELETE FROM ${this.p.t("unit_titles")}`);
+      for (const r of rows) {
+        await this.p.run(`INSERT INTO ${this.p.t("unit_titles")} (title, id, source) VALUES (?, ?, ?)`, [r.title, r.id, r.source]);
+      }
+    });
+    return rows.length;
+  }
+
+  async unitTitleCount(): Promise<number> {
+    const rows = await this.p.q<{ c: number }>(`SELECT COUNT(*) AS c FROM ${this.p.t("unit_titles")}`);
+    return Number(rows[0]?.c ?? 0);
   }
 
   async count(): Promise<number> {

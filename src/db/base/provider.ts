@@ -3,17 +3,21 @@
  * Group classes (BaseMeta, BaseSchema, ...) hold the portable default SQL of EVERY statement as an
  * overridable method; a provider swaps in a subclass for the groups whose statements diverge.
  */
-import type { CatalogProvider, MetaApi, SchemaApi, CorpusApi, RegistriesApi, PlsqlApi, FlexApi, LayoutApi, RulesApi, EnrichApi, ColCacheApi } from "../provider.js";
+import type { CatalogProvider, MetaApi, SchemaApi, CorpusApi, RegistriesApi, PlsqlApi, OtbiApi, SecurityApi, FlexApi, LayoutApi, RulesApi, EnrichApi, ColCacheApi } from "../provider.js";
 
 export type TableName =
   | "tables" | "columns" | "pkeys" | "fkeys" | "indexes" | "relationships" | "tables_fts" | "meta"
   | "report_queries" | "report_queries_vec" | "report_queries_vec_multi"
   | "table_grain" | "grain_meta" | "table_usages" | "usage_meta" | "table_predicates" | "pred_meta" | "table_join_columns"
   | "plsql_packages" | "plsql_api" | "plsql_api_tables" | "plsql_meta"
+  | "otbi_subject_area" | "otbi_folder" | "otbi_column" | "otbi_vec" | "otbi_meta" | "unit_titles"
+  | "otbi_vo" | "otbi_column_ref" | "otbi_area_duty" | "otbi_area_job" | "table_reference_family"
+  | "table_security" | "table_disallowed" | "sec_area_privilege" | "sec_meta"
   | "layout_patterns" | "layout_patterns_vec" | "layout_meta"
   | "flexfields" | "adf_extensions"
   | "enrich_usage" | "batch_jobs" | "batch_items" | "gjob_jobs" | "gjob_items" | "gjob_control"
-  | "enrich" | "col_vec" | "table_rules" | "facts_meta";
+  | "enrich" | "col_vec" | "table_rules" | "facts_meta"
+  | "sec_instance" | "sec_instance_object" | "sec_instance_privilege" | "sec_instance_u" | "sec_instance_duty" | "sec_instance_duty_alias" | "sec_instance_role_grant";
 
 export interface RunResult { changes: number; lastInsertRowid: number }
 
@@ -23,6 +27,8 @@ export abstract class BaseProvider implements CatalogProvider {
   abstract corpus: CorpusApi;
   abstract registries: RegistriesApi;
   abstract plsql: PlsqlApi;
+  abstract otbi: OtbiApi;
+  abstract security: SecurityApi;
   abstract flex: FlexApi;
   abstract layout: LayoutApi;
   abstract rules: RulesApi;

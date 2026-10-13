@@ -203,6 +203,17 @@ FROM   work.embeddings v
 JOIN   {{V}}.report_queries rq ON rq.id = 'sql:' || v.owner_id
 WHERE  v.owner_kind = 'unit';
 
+-- unit_titles (ddl_version 4): EVERY L2 unit title of the release → the corpus row carrying its
+-- statement. This is what byTitle / byTitlePrefix / siblings resolve through: the 50-per-row
+-- `reports` cap left 42,598 of 85,739 otbi `<SA>.<Folder>` titles unreachable, and the jsonb
+-- alias scan that patched byTitle is gone. Only shipped statements (the corpus above); `reports`
+-- keeps the bip `.xdm` paths as reference rows.
+INSERT INTO {{V}}.unit_titles (title, id, source)
+SELECT DISTINCT u.title, 'sql:' || u.sql_hash, u.source
+FROM   work.sql_unit u
+JOIN   corpus c USING (sql_hash)
+WHERE  u.title IS NOT NULL AND u.title <> '';
+
 -- the enrich store: the vendor's delivered enrichment, one row per corpus row, the
 -- same columns as the corpus row (v2026_09 shipped only the 6,389 poller-staged rows).
 INSERT INTO {{V}}.enrich
@@ -539,6 +550,7 @@ SELECT setval(pg_get_serial_sequence('{{V}}.table_rules', 'id'), 1, false);
 
 ANALYZE {{V}}.report_queries;
 ANALYZE {{V}}.report_queries_vec_multi;
+ANALYZE {{V}}.unit_titles;
 ANALYZE {{V}}.tables;
 ANALYZE {{V}}.columns;
 ANALYZE {{V}}.table_usages;

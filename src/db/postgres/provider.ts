@@ -26,6 +26,7 @@ import { BaseProvider, type RunResult, type TableName } from "../base/provider.j
 import { BaseColCache } from "../base/colCache.js";
 import { BaseRegistries } from "../base/registries.js";
 import { BasePlsql } from "../base/plsql.js";
+import { BaseSecurity } from "../base/security.js";
 import { PgMeta } from "./meta.js";
 import { PgSchema } from "./schema.js";
 import { PgCorpus } from "./corpus.js";
@@ -33,6 +34,7 @@ import { PgLayout } from "./layout.js";
 import { PgFlex } from "./flex.js";
 import { PgRules } from "./rules.js";
 import { PgEnrich } from "./enrich.js";
+import { PgOtbi } from "./otbi.js";
 import { applyLibraryMigrations } from "./migrations.js";
 import { CUSTOMER_SCHEMA, META_SCHEMA, physical, readSchema, writeSchemas } from "./schemas.js";
 
@@ -40,6 +42,9 @@ export interface PostgresConfig {
   provider: "postgres";
   /** REQUIRED, no default: postgresql://fusion:<pw>@stack-db:5432/fusion */
   databaseUrl: string;
+  /** Apply the library's own migrations (./ddl.ts) BEFORE the boot verification — the upgrade job /
+   *  loader path only (src/securityLayer.ts); the serving container never passes it (§0: it builds nothing). */
+  migrate?: boolean;
 }
 
 /** int8 (`rid`, COUNT(*), the token counters) and numeric arrive as strings by default, while the
@@ -77,6 +82,8 @@ export class PostgresProvider extends BaseProvider {
   corpus: PgCorpus = new PgCorpus(this);
   registries: BaseRegistries = new BaseRegistries(this);
   plsql: BasePlsql = new BasePlsql(this);
+  otbi: PgOtbi = new PgOtbi(this);
+  security: BaseSecurity = new BaseSecurity(this);
   flex: PgFlex = new PgFlex(this);
   layout: PgLayout = new PgLayout(this);
   rules: PgRules = new PgRules(this);
@@ -93,6 +100,10 @@ export class PostgresProvider extends BaseProvider {
       if (!ext?.nspname) throw new Error("the `vector` extension is not installed in this database");
       p.vectorSchema = ext.nspname as string;
       p.version = await readActiveVersion(boot);
+      if (cfg.migrate) {
+        const applied = await applyLibraryMigrations(boot);
+        console.error(applied.length ? `[db] library migrations applied: ${applied.map((x) => `v${x}`).join(", ")}` : "[db] library migrations already applied");
+      }
     } finally {
       await boot.end({ timeout: 5 });
     }

@@ -1,0 +1,439 @@
+{
+  "_doc": "Curated rename aliases catalog area -> TBI guide area, built by scripts/pipeline/p3_tbi_aliases.py from the guide crawl (area_duty.jsonl) and the catalog's area names; read by p5_otbi.sql (otbi_area_duty.matched_by = 'alias'). Evidence per row: name (tail-equal | tail-similar >= 0.90 and mutual best, after the family prefix / repeated family word / 'Real Time' / plural / 'Omni Channel' normalization) and duty (the guide area lists >= 1 duty; several name candidates are accepted only with an IDENTICAL duty set). Unmatched areas have no duty list and are denied by the subject-area gate.",
+  "guideRelease": "26C,26D,FA Latest",
+  "catalogUnmatched": 131,
+  "guideUnmatched": 30,
+  "aliases": [
+    {
+      "catalog": "CRM - CRM Omni Channel Events Real Time",
+      "guide": "CRM/Help Desk - Omnichannel Events Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 0.895,
+        "nameRatio": 0.819,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_HR_HELP_DESK_ADMIN_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_HR_HELP_DESK_AGENT_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_HR_HELP_DESK_MANAGER_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_INTERNAL_HELP_DESK_ADMINISTRATOR_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_INTERNAL_HELP_DESK_AGENT_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_INTERNAL_HELP_DESK_MANAGER_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_CHANNEL_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_CHANNEL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_ORG_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_EXECUTIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_MANAGERIAL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_MANAGERIAL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "CRM/Help Desk - Omni Channel Queue Resource Availability Real Time",
+      "guide": "CRM/Help Desk - Omnichannel Queue Resource Availability Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.992,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_HR_HELP_DESK_ADMIN_NG_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_HR_HELP_DESK_ADMIN_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_HR_HELP_DESK_AGENT_NG_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_HR_HELP_DESK_AGENT_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_HR_HELP_DESK_MANAGER_NG_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_HR_HELP_DESK_MANAGER_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_INTERNAL_HELP_DESK_ADMINISTRATOR_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_INTERNAL_HELP_DESK_AGENT_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_INTERNAL_HELP_DESK_MANAGER_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_CHANNEL_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_CHANNEL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_ORG_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_EXECUTIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_MANAGERIAL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_MANAGERIAL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Data Security - Incidents Real Time",
+      "guide": "Cybersecurity - Incidents Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.857,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_ENVIRONMENT_HEALTH_AND_SAFETY_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Distributed Order Orchestration - Order Headers Real Time",
+      "guide": "Order Management - Order Headers Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.687,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_ORDER_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Distributed Order Orchestration - Order Holds Real Time",
+      "guide": "Order Management - Order Holds Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.674,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_ORDER_HOLDS_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_ORDER_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Distributed Order Orchestration - Order Lines Real Time",
+      "guide": "Order Management - Order Lines Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.674,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_ORDER_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Distributed Order Orchestration - Price Adjustments Real Time",
+      "guide": "Order Management - Price Adjustments Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.71,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_ORDER_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Distributed Order Orchestration - Process Instances Real Time",
+      "guide": "Order Management - Process Instances Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.71,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_ORCHESTRATION_PROCESS_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_ORDER_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Fiscal Document Capture Transactions Real Time",
+      "guide": "Costing - Fiscal Document Capture Transactions Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.902,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_FDC_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Fiscal Document Holds Real Time",
+      "guide": "Costing - Fiscal Document Holds Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.861,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_FDC_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Fiscal Document Item Deliveries Real Time",
+      "guide": "Costing - Fiscal Document Item Deliveries Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.891,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_FDC_ITEM_DELIVERIES_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Interfaced Fiscal Document Real Time",
+      "guide": "Costing - Interfaced Fiscal Document Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.878,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_FDC_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Public Sector Cloud - Case Inspections",
+      "guide": "Public Sector Cloud - Case Inspections Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.884,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_PSC_AGENCY_CODE_CASE_INSPECTIONS_INQUIRY_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Public Sector Cloud - Contractor License Real Time",
+      "guide": "Public Sector Cloud - Contractor License",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.889,
+        "candidates": 1,
+        "dutyCodes": [
+          "ORA_PSC_AGENCY_CONTRACTOR_LICENSE_INQUIRY_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Public Sector Cloud - Deposit Account Real Time",
+      "guide": "Public Sector Cloud - Deposit Accounts",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.871,
+        "candidates": 1,
+        "dutyCodes": [
+          "ORA_PSC_AGENCY_TRUST_ACCOUNT_INQUIRY_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Sales - CRM Activity Contact",
+      "guide": "CRM - CRM Activity Contact Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.719,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_MARKETING_LEAD_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_CHANNEL_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_CHANNEL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_ORG_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_CAMPAIGN_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_EXECUTIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_MANAGERIAL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_MANAGERIAL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Sales - CRM Activity Objective",
+      "guide": "CRM - CRM Activity Objective Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.735,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_PARTNER_CHANNEL_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_CHANNEL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_ORG_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_EXECUTIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_MANAGERIAL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_MANAGERIAL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Sales - CRM Activity Resource",
+      "guide": "CRM - CRM Activity Resource Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.727,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_MARKETING_LEAD_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_CHANNEL_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_CHANNEL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_ORG_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_CAMPAIGN_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_EXECUTIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_MANAGERIAL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_MANAGERIAL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Sales - CRM All Contacts Contact Point",
+      "guide": "Sales - CRM All Contact Contact Point",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 1.0,
+        "nameRatio": 0.987,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_PARTNER_CHANNEL_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_CHANNEL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_ORG_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_EXECUTIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_MANAGERIAL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Service - CRM Case Management Real Time",
+      "guide": "CRM/Help Desk - Case Management Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 0.882,
+        "nameRatio": 0.725,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_CASE_MANAGER_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_CASE_WORKER_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_HR_HELP_DESK_ADMIN_NG_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_INTERNAL_HELP_DESK_ADMINISTRATOR_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Service - CRM Inbound Messages Real Time",
+      "guide": "CRM/Help Desk - Inbound Messages Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 0.882,
+        "nameRatio": 0.732,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_HR_HELP_DESK_ADMIN_NG_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_HR_HELP_DESK_ADMIN_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_HR_HELP_DESK_MANAGER_NG_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_HR_HELP_DESK_MANAGER_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_INTERNAL_HELP_DESK_ADMINISTRATOR_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_INTERNAL_HELP_DESK_MANAGER_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_CHANNEL_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_CHANNEL_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_PARTNER_ORG_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SALES_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_ADMINISTRATIVE_TRANSACTION_ANALYSIS_DUTY",
+          "FBI_SERVICE_MANAGERIAL_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Supplier - Supplier Profile Change Request Real Time",
+      "guide": "Supplier - Profile Change Request Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 0.83,
+        "nameRatio": 0.905,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_SUPPLIER_MASTER_DATA_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    },
+    {
+      "catalog": "Supplier Registration - Real Time",
+      "guide": "Supplier Registration - Supplier Registration Real Time",
+      "evidence": {
+        "name": "tail-equal",
+        "tailRatio": 0.0,
+        "nameRatio": 0.75,
+        "candidates": 1,
+        "dutyCodes": [
+          "FBI_SUPPLIER_MASTER_DATA_TRANSACTION_ANALYSIS_DUTY"
+        ]
+      }
+    }
+  ],
+  "rejected": [
+    {
+      "guide": "CRM - CRM Activity Real Time",
+      "best_catalog": "Sales - CRM Sales Activity",
+      "tailRatio": 0.828,
+      "reason": "no catalog area passes the name rule"
+    },
+    {
+      "guide": "Help Desk - HR Help Desk Request Milestones Real Time",
+      "best_catalog": "Help Desk - HR Service Request Milestones Real Time",
+      "tailRatio": 0.759,
+      "reason": "no catalog area passes the name rule"
+    },
+    {
+      "guide": "Help Desk - HR Service Request Action Plan Actions Real Time",
+      "best_catalog": "Help Desk - HR Help Desk Request Action Plan Actions Real Time",
+      "tailRatio": 0.842,
+      "reason": "no catalog area passes the name rule"
+    },
+    {
+      "guide": "Help Desk - Internal Service Request Action Plan Actions Real Time",
+      "best_catalog": "Help Desk - Internal Help Desk Request Action Plan Actions Real Time",
+      "tailRatio": 0.864,
+      "reason": "no catalog area passes the name rule"
+    },
+    {
+      "guide": "Public Sector Cloud - Code Enforcement Case Real Time",
+      "best_catalog": "Public Sector Cloud - Code Case",
+      "tailRatio": 0.6,
+      "reason": "no catalog area passes the name rule"
+    },
+    {
+      "guide": "Sales - CRM Business Plan",
+      "best_catalog": "Sales - CRM Partner Business Plan",
+      "tailRatio": 0.8,
+      "reason": "no catalog area passes the name rule"
+    },
+    {
+      "guide": "Workforce Management - Vacancy Real Time",
+      "best_catalog": "Loyalty - Point Balances Real Time",
+      "tailRatio": 0.4,
+      "reason": "no catalog area passes the name rule"
+    }
+  ]
+}

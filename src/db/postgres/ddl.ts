@@ -8,6 +8,15 @@
  *                            dual-write keeps the customer's staged rows across an upgrade)
  *   customer.enrich_usage    LLM cost ledger
  *   customer.batch_jobs/_items, gjob_jobs/_items/_control   enrichment job control
+ *   customer.sec_instance + sec_instance_object/_privilege/_u/_duty   (v2) the per-instance
+ *                            data-access security layer: the pod's FND_OBJECTS registrations, its
+ *                            granted (object, privilege) names, U = the pairs granted to the BI
+ *                            server identity, the FBI/analysis-duty pairs — NAMES only, one layer
+ *                            per pod host with its export stamp, loaded by src/securityLayer.ts
+ *                            (an admin action), refreshed independently of any catalog release;
+ *                            (v3) the grant-set signature on every granted pair + sec_instance_duty_alias
+ *                            (customer duty copies → their seeded twins); (v4) sec_instance_role_grant (the
+ *                            seeded job roles' (object, privilege) names — the job-role consensus)
  *
  * Forward-only and versioned in `meta.library_migrations`, applied under a transaction advisory
  * lock (engine idiom, `gnimsys-agent-core/src/db/migrations.ts`). The vendor schema is NEVER
@@ -91,6 +100,94 @@ CREATE TABLE IF NOT EXISTS ${s}.gjob_control (
   batch_size integer
 );`;
 
+/** The per-instance data-access security layer (same shape as DDL_FACTS in ../sqlite/ddl.ts). */
+const SEC_LAYER = (s: string) => `
+CREATE TABLE IF NOT EXISTS ${s}.sec_instance (
+  instance  text PRIMARY KEY,            -- the pod host exactly as runSql reports \`instance\`
+  stamp     text NOT NULL,               -- the export stamp the loader was given (e.g. 2026-10-03)
+  loaded_at text NOT NULL,
+  grantee   text NOT NULL,               -- the BI server identity whose grants form U
+  counts    text NOT NULL                -- JSON {objects, privileges, u, duties}
+);
+CREATE TABLE IF NOT EXISTS ${s}.sec_instance_object (
+  instance             text NOT NULL,
+  obj_name             text NOT NULL,    -- FND_OBJECTS.OBJ_NAME (what the API takes)
+  database_object_name text NOT NULL,    -- the FROM object of the isolated form
+  pk1_column text, pk2_column text, pk3_column text, pk4_column text, pk5_column text,
+  PRIMARY KEY (instance, obj_name)
+);
+CREATE INDEX IF NOT EXISTS ix_sec_instance_object_db ON ${s}.sec_instance_object (instance, database_object_name);
+CREATE TABLE IF NOT EXISTS ${s}.sec_instance_privilege (
+  instance  text NOT NULL,
+  obj_name  text NOT NULL,
+  privilege text NOT NULL,               -- every (object, privilege) with an active ALLOW grant, whoever the grantee
+  PRIMARY KEY (instance, obj_name, privilege)
+);
+CREATE TABLE IF NOT EXISTS ${s}.sec_instance_u (
+  instance      text NOT NULL,
+  obj_name      text NOT NULL,
+  privilege     text NOT NULL,
+  instance_type text NOT NULL,           -- GLOBAL | SET | INSTANCE
+  grant_sig     text NOT NULL,           -- signature of the pair's whole grant set (grantee, type, set NAME): equal = equal predicate for every user
+  n_grants      integer NOT NULL,
+  PRIMARY KEY (instance, obj_name, privilege, instance_type)
+);
+CREATE TABLE IF NOT EXISTS ${s}.sec_instance_duty (
+  instance  text NOT NULL,
+  duty_role text NOT NULL,               -- the FBI / analysis duty role name (FND_GRANTS.ROLE_NAME)
+  obj_name  text NOT NULL,
+  privilege text NOT NULL,
+  grant_sig text NOT NULL,
+  n_grants  integer NOT NULL,
+  PRIMARY KEY (instance, duty_role, obj_name, privilege)
+);
+CREATE INDEX IF NOT EXISTS ix_sec_instance_duty_obj ON ${s}.sec_instance_duty (instance, obj_name);`;
+
+/** v3: the grant-set signature on EVERY granted pair (pool 2 of the privilege choice forms equivalence
+ *  classes over all of a pod's grants, like U) + the customer duty copies → their seeded twins. A layer
+ *  loaded before v3 carries no signature on its granted pairs, so every loaded layer is EMPTIED here (one
+ *  shape, NOT NULL — no half-signed layer is ever served): reload each pod with the v3 export
+ *  (scripts/pipeline/README.md "The customer security layer"); until then the plan says the layer is not loaded. */
+const SEC_LAYER_V3 = (s: string) => `
+DELETE FROM ${s}.sec_instance_duty;
+DELETE FROM ${s}.sec_instance_u;
+DELETE FROM ${s}.sec_instance_privilege;
+DELETE FROM ${s}.sec_instance_object;
+DELETE FROM ${s}.sec_instance;
+ALTER TABLE ${s}.sec_instance_privilege
+  ADD COLUMN grant_sig text NOT NULL,      -- the same signature as sec_instance_u.grant_sig, over the pair's whole grant set
+  ADD COLUMN n_grants  integer NOT NULL;
+CREATE TABLE ${s}.sec_instance_duty_alias (
+  instance    text NOT NULL,
+  duty_role   text NOT NULL,               -- the customer copy (FND_GRANTS.ROLE_NAME), e.g. <prefix>_FBI_…_DUTY_HCM_NEW
+  seeded_role text NOT NULL,               -- the seeded duty it copies, e.g. ORA_FBI_…_DUTY_HCM
+  PRIMARY KEY (instance, duty_role)
+);`;
+
+/** v4: the role grants (revised phase 3, job-role consensus): every (role, object, privilege) the pod's seeded job /
+ *  abstract / discretionary roles hold, names only — the area's guide job roles' privileges on an object decide the
+ *  consensus privilege. A layer loaded before v4 carries no role grants, so every loaded layer is EMPTIED here (no
+ *  layer without them is ever served — the consensus would silently find nothing): reload each pod with the v4 export
+ *  (scripts/pipeline/README.md "The customer security layer"). */
+const SEC_LAYER_V4 = (s: string) => `
+DELETE FROM ${s}.sec_instance_duty_alias;
+DELETE FROM ${s}.sec_instance_duty;
+DELETE FROM ${s}.sec_instance_u;
+DELETE FROM ${s}.sec_instance_privilege;
+DELETE FROM ${s}.sec_instance_object;
+DELETE FROM ${s}.sec_instance;
+CREATE TABLE ${s}.sec_instance_role_grant (
+  instance  text NOT NULL,
+  role_name text NOT NULL,                 -- FND_GRANTS.ROLE_NAME (a seeded job / abstract / discretionary role)
+  obj_name  text NOT NULL,                 -- FND_OBJECTS.OBJ_NAME
+  privilege text NOT NULL,                 -- FND_FORM_FUNCTIONS.FUNCTION_NAME (generic read / update / delete / insert not exported)
+  PRIMARY KEY (instance, role_name, obj_name, privilege)
+);
+CREATE INDEX IF NOT EXISTS ix_sec_instance_role_grant_obj ON ${s}.sec_instance_role_grant (instance, obj_name);`;
+
 export const LIBRARY_MIGRATIONS: ReadonlyArray<{ version: number; sql: (customer: string) => string }> = [
   { version: 1, sql: (c) => `${ENRICH(c)}\n${JOBS(c)}` },
+  { version: 2, sql: (c) => SEC_LAYER(c) },
+  { version: 3, sql: (c) => SEC_LAYER_V3(c) },
+  { version: 4, sql: (c) => SEC_LAYER_V4(c) },
 ];

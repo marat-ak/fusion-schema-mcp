@@ -468,25 +468,31 @@ because the two corpora differ in membership (23,746 rows there, 23,471 embeddab
 | `p2_qwen.sh`     | load the ten primary JSONL into `work.qwen_record` (`p2_qwen_load.py`) | 7 s |
 | `p2_promote.sql` | map ids → `sql_hash`, resolve collisions, promote 23 columns, corrections table | 11 s |
 | `p3_facts.sql`   | the `work.f_*` fact tables (DDL) | 2 s |
-| `p3_parse.sh`    | the REAL pinned sqlglot parse (`p3_parse.py`) over all 26,204 statements | ~2 min |
+| `p3_parse.sh`    | the REAL pinned sqlglot parse (`p3_parse.py`) over all 26,204 statements. Since 2026-09-30 a column resolves through the enclosing scopes (correlated subqueries), through inline views / CTEs to the physical column (every UNION branch), and `col IN (SELECT c …)` / a correlated equality inside `EXISTS` are `SEMI` join edges (f_joins 97,976 → 140,736; mined relationships 18,687 → 30,203). Unit tests: `test/test_sqlglot_extract.py` (python:3.12-slim + the pin) | ~2.5 min |
 | `p3_post.sql`    | fact indexes, exclusions from real `parse_quality` | 4 s |
 | `p3_reconcile.sql` | test every model claim, then `work.r_tables` — the reconciled fact set | 10 s |
 | `p2_recheck.sh`  | after an enrichment run: `load` (journal → record → promote → reconcile → report → own), `export` (grounding moved), `run` (enrich) — see *Recheck* | load 40 s |
 | `p3_rel.sql`     | `work.relationships` derived from `f_joins` + `meta_fkeys` | 6 s |
 | `p3_calls.sh`    | PL/SQL call facts (`p3_calls.sql` DDL → `p3_calls.py extract` → `work.f_calls`), classified + rolled up by `p3_calls_post.sql` into `work.plsql_api` / `plsql_api_tables` / `plsql_packages` (dictionary PACKAGE objects ∪ called packages), exported to `data/plsql_api_usage.{json,csv,md}` | 45 s |
+| `p3_otbi.sh`     | `OTBI_SRC=<distro dir> p3_otbi.sh [stage\|derive\|report\|all]` — the OTBI presentation catalog: `stage` (`p3_otbi_load.py`: lineage workbooks + SOAP crawl + probes → `work.otbi_lineage` / `otbi_crawl_*` / `otbi_probe*`, incl. the physical-SQL alias resolver), `derive` (`p3_otbi.sql` → `work.otbi_subject_area` / `otbi_folder` / `otbi_column` / `otbi_text`, the `ship` scope rule), `report` (`p3_otbi_report.sql` → `data/otbi_gap_list.md` + `data/otbi_reconciliation.md`). See *The OTBI presentation catalog* below | stage 6 min, derive 12 min |
 | `p4_vectors.sql` | the `work.embeddings` table | 1 s |
-| `p4_run.sh`      | incremental re-embed by `text_hash`, sharded (`p4_embed.mts` per shard): embeds changed slots only, deletes stale slots / gone owners; full on an empty table | 27 min full / ~2 min incremental, 12 shards |
+| `p4_run.sh`      | incremental re-embed by `text_hash`, sharded (`p4_embed.mts` per shard): embeds changed slots only, deletes stale slots / gone owners; full on an empty table. Since ddl_version 4 it also embeds `work.otbi_text` (owner_kind `otbi`, one vector per distinct presentation text) and REQUIRES `p3_otbi.sh` to have run | 27 min full / ~2 min incremental, 12 shards |
 | `p4_knn.mts`     | KNN probe of `work.embeddings` (+ `v2026_09` alongside) — p4's own gate, since p6 needs p5 | 40 s |
 | `run_sql.sh`     | runner for the release `.sql` steps: `bash run_sql.sh <file.sql> <ver> [psql args]` substitutes `{{V}}`, stages the file in `stack-db`, runs it with `ON_ERROR_STOP` (`DB=` selects the database, default `fusion_dev`) | — |
 | `p5_ddl.sh`      | `p5_ddl.sh <ver>` (label REQUIRED, `v<YYYY_MM>`): create `v<ver>` from the PRODUCT's `scripts/pg-import/ddl.sql`, stamp `work.build_meta.ddl_version` from its header | 2 s |
 | `p5_fill.sql`    | populate the release tables from `work` (described statements, `sql:` ids, parse-derived fact columns, `r_tables` registries); `catalog_meta.ddl_version` = `work.build_meta.ddl_version` | 72 s |
 | `p5_plsql.sh`    | `p5_plsql.sh <ver>`: `v<ver>.plsql_packages` / `plsql_api` / `plsql_api_tables` / `plsql_meta` (ddl_version 3) from `work.plsql_*` — one transaction, DELETE + INSERT, a step of the chain for the release being BUILT (samples restricted to shipped ids, api_tables to real objects) | 2 s |
+| `p5_otbi.sh`     | `p5_otbi.sh <ver> <tbi release>` (both REQUIRED): `v<ver>.otbi_subject_area` / `otbi_folder` / `otbi_column` / `otbi_vec` / `otbi_meta` (ddl_version 4) from `work.otbi_*` + `work.embeddings` (`otbi` owners), shipped scope only (`work.otbi_folder.ship`); `grain_note` from the release's own `table_grain`; since ddl_version 9 also `otbi_vo` (the VO hop, from `work.otbi_lineage`), `otbi_column_ref` (the exposure index = every shipped column's `db_refs` exploded), `otbi_column.vo_refs` and `otbi_area_duty` (subject area → duty CODE from Oracle's TBI guides, `data/otbi/tbi_guides/<tbi release>/area_duty.jsonl`, matched by the normalized name or a curated rename alias of `otbi_area_aliases.json`; admin-class roles excluded; every unmatched area listed in `otbi_meta.area_duty_unmapped`) — after `p5_fill.sql` (which also fills `unit_titles`), before `p5_index.sql` | 1 min |
+| `p5_security.sh` | `p5_security.sh <ver>`: `v<ver>.table_security` / `table_disallowed` / `sec_area_privilege` / `table_reference_family` / `sec_meta` (ddl_version 10) — the data-access security facts, NAMES ONLY (spec 2026-10-02 §7: no predicate text, no pod id; the condition is generated on the target pod by `FND_DATA_SECURITY.GET_SECURITY_PREDICATE`): every context column of every object → its reference object (exclusions → exact names → suffixes → the `ORGANIZATION_ID` chain: FK → [vote] → prefix → [vote] → sibling → [vote] → HCM view lineage → own id space → non-org partners, where [vote] = a fixpoint in which a resolved pass-through view column decides, else the corpus join partners' COLUMN contexts vote by statements, a tie going to the own prefix family → curated overrides `add` / `set` / `none`; an unresolved column on a USED object = `ambiguous` rows, which FAIL the p6 gate; on an object no corpus source uses = a `table_disallowed` row), Oracle precedent + join evidence from `work`, the curated area → (object, privilege) rows that OVERRIDE the resolver's rule (`sec_area_privilege`, rules `areaPrivileges`: every row names its pair and its instance scope — one shipped row per host of `instances`, `'*'` = every pod; the nameless `pending` rows are gone since v2027_05, the 35 demo-pod areas ship as `inferred`; ddl_version 9: `entity` = the (area, entity) key, the dictionary table the row's evidence binds the grant block to, `voDef` the VO when known; ddl_version 10: `column` = the TABLE.COLUMN a trace names → `context_column`, written by `sec_trace.py`), the reference families (`table_reference_family`, ddl_version 10, rules `referenceFamilies`: lookup / calendar / currency / territory / translation by name pattern AND reference-shaped columns, one row per table with its evidence — the end-user structural none rule reads them), the resolver's module filter (`sec_meta.privilege_prefix_aliases`, rules `privilegePrefixAliases.map`), the audited primary contexts (`sec_meta.primary_audit`, rules `primaryByPrefix.<prefix>.audit` — only these prefixes' multi-context tables are secured by the table-keyed plan; AP → BU from the Kornit OTBI trace, GL → LEDGER and DOO → BU from the demo crawl's grant blocks that name the entity they bind to, graded `crawl`), each context's evidence objects (`sec_meta.context_evidence_refs` — the area-keyed plan reads a VO's physical objects against them), the sensitive objects (`sec_meta.sensitive_objects`, rules `sensitive.rows`: national identifiers / passports / visas / licences / salary / supplier PII / bank accounts through their own pair(s), the masked twins derived from the dictionary) and `sec_meta` (stamps, context order, HCM prefixes, stats). Nothing of any customer pod is read (ddl_version 9: the pod export copies `sec_object` / `sec_privilege` are gone) — what differs per POD (registrations, grants, U, duties) lives ONLY in the customer layer, see *The customer security layer* below. Curated input = `p5_security_rules.json` (spliced verbatim; a rule / area-map change is a new label) + Oracle's own policies `oracle_datasec_policies.csv` (a LOCAL, gitignored input; the top source: `oracle_policy` columns + the module family of an application; see "Oracle's data-security policies" below; a new extract is a new label). After `p5_fill.sql`, before `p5_index.sql`. Tests: `test/securityJob.test.ts` runs this job on a synthetic dictionary + the SYNTHETIC policy fixture `test/fixtures/datasec-policies.csv` (postgres) | 1.5 min |
 | `p5_index.sql`   | pgvector HNSW index on every searched embedding column | 40 s |
 | `p6_verify.sql`  | the release gate: counts, content equality, dangling, stamps. Sections that read `work` / `v2026_09` are guarded (`\if`) so the same file runs in the served database after p9 | 2 min |
 | `p6_knn.mts`     | exact-KNN spot check through the serving statement (`VER=<ver>` required; `v2026_09` is the baseline it is read against) | 30 s |
+| `p6_otbi.mts`    | the OTBI gate THROUGH THE PRODUCT CODE (postgres provider + catalog.ts + otbiStore.ts): points the BUILD database's `meta.active_version` at `VER`, then listQueriesForSubjectArea coverage of the three verification subject areas, checkOtbiSql over the 33 real BI EE dataset SQLs (`test/fixtures/otbi-biee.json`), searchOtbi / describeOtbiFolder probes | 1 min |
 | `p7_own.sql`     | `ALTER ... OWNER TO :owner` (default `fusion_dev`; `fusion` after a restore) — the last act of every build | 1 s |
 | `p8_verify.sql`  | VERIFICATION ONLY against `v2026_09`; writes nothing | 20 s |
 | `p9_release.sh`  | `p9_release.sh <ver> <target-db> <owner>` — the release move: dump `v<ver>` from `fusion_dev`, restore ALONGSIDE the served version (never drops the previous one), `p7_own.sql` with the target's role, `meta.seeds` from the release's OWN stamps (`catalog_meta.ddl_version` / `embedding_version`, gated against the `ddl.sql` header), `meta.active_version` switched LAST, `p6_verify.sql` in the target, the served-version line. Re-run = no-op with a message; a leftover schema = refused | ~3 min |
+| `sec_layer_load.sh` | NOT a chain step — `sec_layer_load.sh <pod host> <stamp> <dir> <grantee>`: loads ONE pod's data-access security layer (its FND_OBJECTS registrations + key columns, every granted (object, privilege) with its grant-set signature, U = the pairs granted to the BI server identity, the FBI / analysis-duty pairs, the customer duty copies → their seeded twins, v4: the seeded job roles' grants — names only) into the SERVED database's `customer.sec_instance_*` through the product's own loader (`src/securityLayer.ts`, library migrations v2 + v3 + v4 applied first — v3 and v4 each empty every loaded layer, reload each pod); keyed by the pod host, one layer per host with its export stamp, a re-import replaces it. See *The customer security layer* | 20 s |
+| `sec_trace.py` | NOT a chain step — the names-only OTBI trace loader: `extract` a LOGLEVEL-7 Session Monitor capture → resolve its ids through runSql → `load` the (object, privilege, entity, column) rows into `p5_security_rules.json` (source trace). See *The OTBI trace loader* + `docs/trace-capture-guide.md` | 1 s |
 
 ```bash
 wsl -d CloudBeaver -u root -e bash -lc \
@@ -503,6 +509,8 @@ P=/mnt/c/.../scripts/pipeline; V=v2026_11          # the label: v<YYYY_MM>, the 
 wsl -d CloudBeaver -u root -e bash -lc "bash $P/p5_ddl.sh $V"                                   # DDL + work.build_meta.ddl_version
 wsl -d CloudBeaver -u root -e bash -lc "bash $P/run_sql.sh p5_fill.sql $V"
 wsl -d CloudBeaver -u root -e bash -lc "bash $P/p5_plsql.sh $V"
+wsl -d CloudBeaver -u root -e bash -lc "bash $P/p5_otbi.sh $V 26d"                              # the OTBI catalog + (ddl_version 9) VO hop, exposure index, area -> duty codes of the TBI guides 26d
+wsl -d CloudBeaver -u root -e bash -lc "bash $P/p5_security.sh $V"                              # ddl_version 9: data-access facts, names only (p5_security_rules.json + the local Oracle policy extract)
 wsl -d CloudBeaver -u root -e bash -lc "bash $P/run_sql.sh p5_index.sql $V"
 wsl -d CloudBeaver -u root -e bash -lc "bash $P/run_sql.sh p6_verify.sql $V"
 wsl -d CloudBeaver -u root -e bash -lc "docker run --rm --network oservices_default -v /tmp/pipeline-p6:/app/scripts/pipeline \
@@ -665,6 +673,314 @@ compose); it must be on the `oservices_default` network. With that, `DATA_DIR` a
 fallback: `CATALOG_DB` is required and the sqlite provider stays a coexisting, selectable
 provider (`src/db/index.ts`), which is the product's design and a decision for the user, not
 legacy this pass removed.
+
+## The OTBI presentation catalog — `p3_otbi.*`, `p5_otbi.*`, `p6_otbi.mts` (ddl_version 4, 2026-09-28)
+
+The grounding for the business persona's logical SQL (`docs/superpowers/specs/2026-09-28-business-
+persona-logical-sql-design.md` §4.1–4.3; the KB article is `knowledgebase/articles/otbi-logical-sql.md`).
+Three inputs, staged ONCE on the distro fs (`OTBI_SRC`, no default): the six release-13 (26B) lineage
+workbooks, the demo pod's SOAP crawl (`subject_areas.json`, 664 subject areas / 87,451 folders /
+2,092,580 columns with `dataType`) and the per-folder probes (`presentation_tables.jsonl`, 86,875
+folders: status, the logical column list, the crawler's lineage, the physical SQL).
+
+- **`p3_otbi_load.py`** stages them verbatim (the workbook's literal quotes around dash-folders are the
+  one normalisation) and resolves every probe's OBIS alias chain: the outermost `cN` is
+  `logicalColumns[N-1]`; `Dx.cM` references are followed through the `SAWITHk` CTEs, the join groups
+  (`(((A D1 left outer join B D2 On …) …)` — parentheses that are NOT subqueries are stripped) and the
+  ADF derived tables down to `TABLE.COLUMN`; the first aggregate met is the column's `aggregation`, a
+  non-trivial expression its `expression`. 741,245 lineage rows (328,734 distinct columns); 949,451
+  probe columns; 86,875 probes (86,358 ok, 758 ok-without-SQL, 517 failed, 755 alias mismatches).
+  It resolves where the crawler's own lineage collides (`C61309499` = `HCM_LOOKUPS.MEANING` in every
+  lookup subquery): lineage-vs-probe refs agree or nest on 250,882 of 256,566 columns that both cover,
+  probe-vs-crawl disagree on 49,721 of 792,961.
+- **`p3_otbi.sql`** derives `work.otbi_subject_area` (665) / `otbi_folder` (87,509) / `otbi_column`
+  (2,093,707), descriptions from existing data only (`desc_source` table_remark / view_remark /
+  expression_remarks; `gap_cause` otherwise), the `ship` scope (§1b: not a nested `A > B > C` path,
+  not a `custExt<uuid>` subject area, not a crawl-only `… Extension` / `… Custom Attributes` folder —
+  the workbooks under-document vendor folders without DB mapping, so crawl-only flat folders inside
+  workbook subject areas DO ship: 7,108 of them, 5,999 with a corpus unit) and `work.otbi_text` —
+  one row per distinct shipped text, md5-keyed: **99,340** (71,349 column texts for 493,995 shipped
+  columns: a column text carries no subject area / folder, so one vector serves every location).
+- **`p3_otbi_report.sql`** → `data/otbi_gap_list.md` (shipped scope: 132,332 of 493,995 columns
+  without description, by cause; a dedupe estimate of 17–19k distinct items for an LLM pass) and
+  `data/otbi_reconciliation.md` (lineage-only / crawl-only / corpus-only, the ship-scope table, the
+  three-source DB-ref agreement, probe coverage, the three verification subject areas).
+- **`p4_run.sh`** embeds `work.otbi_text` (owner_kind `otbi`, owner_id = text_hash, slot 0, incremental).
+- **`p5_fill.sql`** fills `unit_titles` (every L2 unit title → its statement's row; spec §4.2);
+  **`p5_otbi.sh <ver>`** projects the shipped scope + `otbi_vec` + `grain_note` (from the release's own
+  `table_grain`); **`p5_index.sql`** adds the HNSW index on `otbi_vec`; **`p6_verify.sql` §6b** counts
+  and dangling checks; **`p6_otbi.mts`** = the gate through the product code (below).
+
+**ddl_version 9 (v2027_07, plan 2026-10-04 phase 2)** — the lineage the area-keyed data-access plan reads:
+`otbi_vo` (subject area, folder, vo_path, vo_def → the VO's physical `db_objects` + mapped `vo_attrs`, from
+`work.otbi_lineage`; 74,094 rows), `otbi_column.vo_refs` (the VO(s) a column is read through),
+`otbi_column_ref` (the exposure index: one row per (presentation column, distinct physical table.column) of
+`db_refs`, with the folder kind, the sources and `via_expression`; 643,341 rows — `foldersOfTable` reads it,
+p6 gates it equal to the exploded `db_refs`) and `otbi_area_duty` (subject area → duty role CODE from Oracle's
+Transactional BI guides: `p3_tbi_guides.py` crawls them into `data/otbi/tbi_guides/<release>/`
+(`docs/tbi-guides-crawl.md`), `p3_tbi_aliases.py` writes the curated renames `otbi_area_aliases.json` — a catalog
+area whose name matches no guide page, paired with ONE guide area by a mutual-best normalized-name similarity
+≥ 0.90 AND an identical duty set among the competing candidates, the evidence recorded per alias; 23 accepted,
+7 rejected (denied in end-user mode)). `p5_otbi.sh <ver> 26d`: 1,447 pairs, 511 areas by name + 23 by alias,
+108 unmapped (`otbi_meta.area_duty_unmapped`: custom subject areas, guide pages without roles, areas in no
+guide); admin-class roles (`BI_ADMINISTRATOR` / `BI_AUTHOR` / `BI_CONSUMER` shapes) are never area holders.
+
+Shipped in `v2026_12`: 642 subject areas, 27,349 folders (1,778 fact), 493,995 columns (361,663
+described = 73.2 %; 9,998 measures with aggregation; 99.9 % with dataType), 99,340 vectors, and
+`unit_titles` = 107,855 rows (otbi 85,715 titles → 11,279 statements, catalog 9,833, bip 6,234);
+`in_corpus` / `unit_id` are set only where the folder's statement is in the release (12 shipped
+folders have a unit without enrichment and therefore no served statement). p6 gates: every
+shipped entity has its vector, 0 dangling; `p6_otbi.mts` — every lineage folder with a unit is
+listed for the three verification subject areas (GL Balances 8/16 have a unit, AP Invoices 93/95,
+Worker Assignment 64/64), 26 of 31 catalogued BI EE datasets lint clean and 5 fail only on named
+pod-specific content (4 extension-folder datasets, 2 flex columns), 2 select from a `custExt` area. NOT shipped and reported: 58,904 nested extension paths
+(513,981 columns), 1,143 Extension / Custom Attributes folders (1,083,874 columns), 23 `custExt`
+subject areas (113 folders) — the demo pod's configuration, the standing of flexfields/adf_extensions;
+a ruling to confirm, not a fact.
+
+## Oracle's data-security policies — `oracle_datasec_policies.csv` (p5_security input, 2026-09-30)
+
+**Provenance.** Oracle's seeded data-security policies whose predicate uses URDA, extracted read-only
+from a Fusion pod on 2026-09-30 (seeded metadata — the same on every pod of a release; the pod
+release was not recorded with the extract). The file carries instance-set PREDICATE text read from a
+customer pod, so it is a LOCAL input: gitignored, never in the image (the job test runs on the synthetic
+`test/fixtures/datasec-policies.csv`), and only the names its parse yields reach a release. Extracted with:
+`SELECT o.database_object_name, o.obj_name, ois.instance_set_name, DBMS_LOB.SUBSTR(ois.predicate,1000,1)
+FROM fnd_objects o JOIN fnd_object_instance_sets ois ON ois.object_id = o.object_id
+WHERE UPPER(ois.predicate) LIKE '%FUN_USER_ROLE_DATA_ASGNMNTS%'` — 150 instance sets on 60 objects,
+predicates cut at 1,000 characters (7 are). Kept verbatim (header `TABLE_NAME,OBJ_NAME,INSTANCE_SET_NAME,
+PREDICATE`, multi-line quoted predicates); `p5_security.sh` stages it in `stack-db` and the job's
+`\copy` reads it. A new extract = a new release label.
+
+**What the job does with it** (`p5_security.sql` §2b / §4b / chain stage 0, rules `oraclePolicy` +
+`moduleFamilies`): every predicate is parsed (a paren/quote-aware scan, no guessing) into its
+top-level `<col> IN (SELECT …)` lists. Shape `direct` = the object's column filtered by
+`SELECT <URDA context column> FROM FUN_USER_ROLE_DATA_ASGNMNTS` → that column's context is Oracle's
+(confidence `oracle_policy`, evidence = its instance sets, named with the OBJ_NAME in the reason),
+replacing every rule / chain / curated candidate of the column; several contexts on one column (one
+set per module, `INV_ORG_PARAMETERS`) → the standard set (`STD`) decides, the others are named;
+no standard set → a reported `conflict` (`XLA_TRANSACTION_ENTITIES.SECURITY_ID_INT_1`). Shapes
+`derived` (a mapping object between URDA and the column), `exists` (another object), `datasec`
+(`DATASEC_CONTEXT_TYPE_CODE`: legal entity, budget level, award org hierarchy), `non_context`
+(`COLLABORATION_DOC_ID`) and `unparsed` never become facts — they are reported in `sec_meta`
+(`policy_sets` per set with its reason, `policy_columns` per column, `policy_source`). The **module
+family** of an application (`module_families`) comes from the org-family sets' codes (the set name
+after the compacted OBJ_NAME): a code that is a catalog application gives it that set's context
+(WIE → MFG_ORG; MNT, ENQ, INV, DOS, RCV → INV_ORG), a set of another code on an object's own
+`ORGANIZATION_ID` gives the object's application its context (CSE → INV_ORG via CSEASSETSBMNT77);
+`judgment` entries (WIS → MFG_ORG, QA → INV_ORG) carry their reason and fail the build if the
+policies also speak for that application. It decides the generic `ORGANIZATION_ID` of an object
+without its own policy right after the declared FK, ahead of the votes / lineage / prefix. (The
+OTBI-mined `FND_GRANTS` triples — demo-pod ids — are gone since 2026-10-02, spec §7: the privilege
+NAME per object comes from `p5_security_rules.json` `areaPrivileges`; the pod export `data/security/`
+and its `sec_object` / `sec_privilege` copies are gone since ddl_version 9 — what a pod registers and grants is
+its customer layer; see "Data-access security facts" in the KB article.)
+
+## The customer security layer — `sec_layer_load.sh` (`customer.sec_instance_*`, library migrations v2 2026-10-03 + v3 2026-10-05 + v4 2026-10-05)
+
+The resolver (`src/corpus/dataAccess.ts`: the tool `getDataAccessPredicate({instance, tables})` and the
+`dataSecurity` pushed by getTable / getColumns / validateColumns / validateTable when called with
+`instance`) chooses, per table of a query, the (object, privilege) pair whose condition the pod generates
+— and what that choice depends on differs per pod: which security objects THIS pod registers (with their
+key columns), which (object, privilege) pairs carry a grant on it, U = the pairs granted to the BI server
+identity `FUSION_APPS_OBIA_BIEE_APPID` (the OTBI-visible security points; privilege = U ∩ object, generic
+read/update/delete/insert excluded, filtered by the secured table's module prefix through
+`privilegePrefixAliases`), every granted pair with its grant-set signature (pool 2 of the privilege choice),
+the FBI / analysis-duty pairs (the HCM route) and the customer copies of those duties. Customer objects,
+customer duty copies and grant changes make these per-instance, so they are NOT in the immutable release:
+they live in the served database's `customer` schema — `sec_instance` (one row per pod host: `stamp`,
+`loaded_at`, `grantee`, `counts`), `sec_instance_object`, `sec_instance_privilege` (+ `grant_sig`,
+`n_grants` since v3), `sec_instance_u`, `sec_instance_duty`, `sec_instance_duty_alias` (v3) (`src/db/postgres/ddl.ts`
+migrations v2 + v3; sqlite: `factsdb`, `src/db/sqlite/ddl.ts`) —
+keyed by the pod host EXACTLY as `runSql` reports `instance`, one layer per host with its export stamp
+(`layerStamp` in every plan); a re-import replaces the host's rows in ONE transaction and records the new
+stamp. The instance is a REQUIRED input of every call that involves the layer — no default instance, no
+"one layer loaded ⇒ that one"; an unknown host is a loud error naming the loaded ones. NAMES ONLY: no
+predicate text, no instance-set text, no id; `grant_sig` is `SUM(DISTINCT ORA_HASH(grantee || type ||
+instance-set NAME))` over a pair's whole grant set — equal signatures = the same predicate for every user,
+which is how the resolver treats privileges with identical grant sets as equivalent (`equivalentTo`). The
+same signature is exported on the privileges, u and duties pages, and the loader refuses pages that
+disagree (= exported at different moments). **v3 (2026-10-05)** added the signature to every granted pair
+and the alias page; the migration EMPTIES every layer loaded before it (a layer without signatures is never
+served) — reload each pod with the v3 export; until then the plan says the layer is not loaded. **v4 (2026-10-05,
+revised phase 3)** added `sec_instance_role_grant` = every (role, object, privilege) NAME the pod's seeded job /
+abstract / discretionary roles hold (the job-role consensus: the job roles Oracle's TBI guides name for a subject area
+vote on the privilege of an object — `otbi_area_job` in the release); the migration EMPTIES every layer loaded before it
+(a layer without the role grants would make the consensus silently find nothing) — reload each pod with the v4 export.
+Customer copies of the job roles are NOT exported: on Kornit TEST the 32 name-matched copies hold identical (23) or
+subset (9) grant sets of their seeded twins on the key objects, never more — the seeded roles' consensus bounds them.
+
+**Export** — read-only, on the pod, through `runSql` (one query at a time, ≥ 5 s apart, pages small
+enough to stay inline: the reply must carry every row — `rows.length == rowCount`, no `rowsInline`). Save
+each reply VERBATIM (the whole JSON, `instance` included) as `<dir>/<kind>-<n>.json`, `n` = 1..N in page
+order; `<dir>` = `data/security/instances/<pod host>/<stamp>/` (customer data of one pod — kept out of git like
+the `data/security/*.csv` export; NOTE `.gitignore`'s `data/*.json` does not cover this nested path).
+
+```sql
+-- objects-<n>.json: FND_OBJECTS — the API name, the FROM object of the isolated form, the key columns (pages of 600)
+SELECT obj_name, database_object_name, pk1_column_name, pk2_column_name, pk3_column_name, pk4_column_name, pk5_column_name
+FROM fnd_objects ORDER BY obj_name
+OFFSET 0 ROWS FETCH NEXT 600 ROWS ONLY;                        -- then OFFSET 600, 1200, … until a short page
+
+-- privileges-<n>.json: every (object, privilege) with an active ALLOW grant, whoever the grantee, with the signature of
+-- its WHOLE grant set — the `sig` CTE of the u / duties pages over ALL grantees (v3; pages of 1,500 with maxRows 1501:
+-- the two signature columns push a 2,500-row page past runSql's 256 KB inline limit)
+WITH act AS (
+  SELECT g.object_id, g.menu_id, g.grantee_key, g.instance_type, g.instance_set_id FROM fnd_grants g
+  WHERE g.grant_type = 'ALLOW' AND g.start_date <= SYSDATE AND (g.end_date IS NULL OR g.end_date >= SYSDATE)),
+pairs AS (
+  SELECT a.object_id, cmf.function_id, a.grantee_key, a.instance_type, a.instance_set_id
+  FROM act a JOIN fnd_compiled_menu_functions cmf ON cmf.menu_id = a.menu_id),
+sig AS (
+  SELECT p.object_id, p.function_id,
+         SUM(DISTINCT ORA_HASH(p.grantee_key || ':' || p.instance_type || ':' || NVL(s.instance_set_name, '-'))) AS grant_sig,
+         COUNT(DISTINCT p.grantee_key || ':' || p.instance_type || ':' || NVL(s.instance_set_name, '-')) AS n_grants
+  FROM pairs p LEFT JOIN fnd_object_instance_sets s ON s.instance_set_id = p.instance_set_id
+  GROUP BY p.object_id, p.function_id)
+SELECT o.obj_name, ff.function_name AS privilege, sig.grant_sig, sig.n_grants
+FROM sig JOIN fnd_objects o ON o.object_id = sig.object_id JOIN fnd_form_functions ff ON ff.function_id = sig.function_id
+ORDER BY 1, 2 OFFSET 0 ROWS FETCH NEXT 1500 ROWS ONLY;          -- then OFFSET 1500, 3000, …
+
+-- u-<n>.json: U — the pairs granted to the BI server identity, with the grant-set signature (one page on Kornit: 328 rows)
+WITH act AS (
+  SELECT g.object_id, g.menu_id, g.role_name, g.grantee_key, g.instance_type, g.instance_set_id FROM fnd_grants g
+  WHERE g.grant_type = 'ALLOW' AND g.start_date <= SYSDATE AND (g.end_date IS NULL OR g.end_date >= SYSDATE)),
+pairs AS (
+  SELECT a.object_id, cmf.function_id, a.role_name, a.grantee_key, a.instance_type, a.instance_set_id
+  FROM act a JOIN fnd_compiled_menu_functions cmf ON cmf.menu_id = a.menu_id),
+u AS (SELECT DISTINCT object_id, function_id, instance_type FROM pairs WHERE role_name = 'FUSION_APPS_OBIA_BIEE_APPID'),
+sig AS (
+  SELECT p.object_id, p.function_id,
+         SUM(DISTINCT ORA_HASH(p.grantee_key || ':' || p.instance_type || ':' || NVL(s.instance_set_name, '-'))) AS grant_sig,
+         COUNT(DISTINCT p.grantee_key || ':' || p.instance_type || ':' || NVL(s.instance_set_name, '-')) AS n_grants
+  FROM pairs p LEFT JOIN fnd_object_instance_sets s ON s.instance_set_id = p.instance_set_id
+  WHERE (p.object_id, p.function_id) IN (SELECT object_id, function_id FROM u)
+  GROUP BY p.object_id, p.function_id)
+SELECT o.obj_name, ff.function_name AS privilege, u.instance_type, sig.grant_sig, sig.n_grants
+FROM u JOIN fnd_objects o ON o.object_id = u.object_id JOIN fnd_form_functions ff ON ff.function_id = u.function_id
+JOIN sig ON sig.object_id = u.object_id AND sig.function_id = u.function_id
+ORDER BY 1, 2, 3;                                               -- page it the same way (OFFSET/FETCH) past 2,500 rows
+
+-- duties-<n>.json: the FBI / analysis-duty pairs with the same signature (pages of 1,000)
+WITH act AS (
+  SELECT g.object_id, g.menu_id, g.role_name, g.grantee_key, g.instance_type, g.instance_set_id FROM fnd_grants g
+  WHERE g.grant_type = 'ALLOW' AND g.start_date <= SYSDATE AND (g.end_date IS NULL OR g.end_date >= SYSDATE)),
+pairs AS (
+  SELECT a.object_id, cmf.function_id, a.role_name, a.grantee_key, a.instance_type, a.instance_set_id
+  FROM act a JOIN fnd_compiled_menu_functions cmf ON cmf.menu_id = a.menu_id),
+d AS (SELECT DISTINCT role_name AS duty_role, object_id, function_id FROM pairs
+      WHERE role_name LIKE '%FBI%' OR role_name LIKE '%ANALYSIS_DUTY%'),
+sig AS (
+  SELECT p.object_id, p.function_id,
+         SUM(DISTINCT ORA_HASH(p.grantee_key || ':' || p.instance_type || ':' || NVL(s.instance_set_name, '-'))) AS grant_sig,
+         COUNT(DISTINCT p.grantee_key || ':' || p.instance_type || ':' || NVL(s.instance_set_name, '-')) AS n_grants
+  FROM pairs p LEFT JOIN fnd_object_instance_sets s ON s.instance_set_id = p.instance_set_id
+  WHERE (p.object_id, p.function_id) IN (SELECT object_id, function_id FROM d)
+  GROUP BY p.object_id, p.function_id)
+SELECT d.duty_role, o.obj_name, ff.function_name AS privilege, sig.grant_sig, sig.n_grants
+FROM d JOIN fnd_objects o ON o.object_id = d.object_id JOIN fnd_form_functions ff ON ff.function_id = d.function_id
+JOIN sig ON sig.object_id = d.object_id AND sig.function_id = d.function_id
+ORDER BY 1, 2, 3 OFFSET 0 ROWS FETCH NEXT 1000 ROWS ONLY;       -- then OFFSET 1000, …
+
+-- aliases-<n>.json: the customer copies of those duties -> the seeded duty each copies (v3; one page; an empty result is
+-- still a page). Name rule: a non-ORA_ role holding `FBI_` copies 'ORA_' || its name from `FBI_` on, trailing `_NEW`s cut,
+-- kept only when that seeded role holds grants itself (e.g. <prefix>_FBI_PERSON_…_DUTY_HCM_NEW -> ORA_FBI_PERSON_…_DUTY_HCM).
+-- A copy named otherwise is not aliased (it still serves the duty map with its own grants).
+WITH d AS (
+  SELECT DISTINCT g.role_name FROM fnd_grants g
+  WHERE g.grant_type = 'ALLOW' AND g.start_date <= SYSDATE AND (g.end_date IS NULL OR g.end_date >= SYSDATE)
+    AND (g.role_name LIKE '%FBI%' OR g.role_name LIKE '%ANALYSIS_DUTY%')),
+c AS (
+  SELECT role_name AS duty_role,
+         'ORA_' || REGEXP_REPLACE(SUBSTR(role_name, INSTR(role_name, 'FBI_')), '(_NEW)+$', '') AS seeded_role
+  FROM d WHERE role_name NOT LIKE 'ORA\_%' ESCAPE '\' AND INSTR(role_name, 'FBI_') > 0)
+SELECT c.duty_role, c.seeded_role FROM c WHERE c.seeded_role IN (SELECT role_name FROM d) ORDER BY 1;
+
+-- role_grants-<n>.json (v4): every (role, object, privilege) NAME of the seeded job / abstract / discretionary roles, generic
+-- read / update / delete / insert left out (pages of 1,100 with maxRows 1101 — about 190 KB inline; Kornit TEST: 9 pages,
+-- 9,767 rows, 291 roles, 579 objects; the seeded `%_DUTY_OBI` reporting duties the guides list as job codes hold no data grant there)
+SELECT DISTINCT g.role_name AS role_name, o.obj_name AS obj_name, ff.function_name AS privilege
+FROM fnd_grants g
+JOIN fnd_objects o ON o.object_id = g.object_id
+JOIN fnd_compiled_menu_functions cmf ON cmf.menu_id = g.menu_id
+JOIN fnd_form_functions ff ON ff.function_id = cmf.function_id
+WHERE g.grant_type = 'ALLOW' AND g.start_date <= SYSDATE AND (g.end_date IS NULL OR g.end_date >= SYSDATE)
+  AND g.role_name LIKE 'ORA\_%' ESCAPE '\'
+  AND (g.role_name LIKE '%\_JOB' ESCAPE '\' OR g.role_name LIKE '%\_ABSTRACT' ESCAPE '\' OR g.role_name LIKE '%\_DISCRETIONARY' ESCAPE '\')
+  AND LOWER(ff.function_name) NOT IN ('read', 'update', 'delete', 'insert')
+ORDER BY 1, 2, 3 OFFSET 0 ROWS FETCH NEXT 1100 ROWS ONLY;      -- then OFFSET 1100, 2200, … until a short page
+```
+
+**Load** — the product's own loader (`src/securityLayer.ts`, `npm run sec-layer`) in the service image,
+against the service's OWN catalog configuration (`CATALOG_DB` + `DATABASE_URL` read from the running
+`fusion-schema-mcp` container — never typed, never a new variable); it applies the library migrations
+first (the layer tables are migrations v2 + v3 + v4), checks every page (exported from THAT host, complete
+inline, no overlapping pages, every U / duty pair among the granted pairs WITH the same signature, every
+granted pair on a registered object, every alias linking two duties of the duty pages, every role grant a
+granted pair) and replaces the host's layer in one transaction:
+
+```bash
+wsl -d CloudBeaver -u root -e bash -lc "bash $P/sec_layer_load.sh <pod host> <stamp> <dir> FUSION_APPS_OBIA_BIEE_APPID"
+```
+
+All four arguments are REQUIRED (`<grantee>` = the role the `u` pages were exported for, recorded with
+the layer). The serving container reads the layer on its next request — no restart (a library-version bump
+needs the loader run BEFORE the new image serves: `meta.verify()` refuses a database without the expected
+migration). Refresh after a Fusion quarterly update or a security change (a new stamp, same command).
+Kornit TEST, 2026-10-03 (stamp `2026-10-03`, v2): 1,028 objects, 7,051 granted pairs, U 328 rows (140
+objects / 326 pairs), 1,641 duty pairs. Kornit TEST, 2026-10-05 (stamp `2026-10-05`, v3, release v2027_06):
+1,028 objects, 7,051 granted pairs in 4,974 (object, grant set) classes, U 328 rows (140 objects), 1,641 duty
+pairs (71 duties), 16 duty aliases (the `XXKD_FBI_…_NEW` copies); a re-run reloads to the same counts.
+Kornit TEST, 2026-10-05 (stamp `2026-10-05-v4`, v4, release v2027_08): the same objects / privileges / U / duties /
+aliases pages + 9 `role_grants` pages = 9,767 role grants of 291 seeded job / abstract / discretionary roles on 579
+objects (every one a granted pair); loaded in 1 s after migration v4.
+
+What the resolver does with it — the full rules are the header of `src/corpus/dataAccess.ts` (the one source;
+phase 1 = the TABLE-keyed developer plan, phase 2 = the (subject area, VO entity) keying + the end-user plan,
+revised phase 3 = the job-role consensus, the strictest of candidates, the known area privilege, the structural none
+rule, filter-only columns, the no-area policy). In short: route = a sensitive side table through its own object and
+privilege(s) → the table itself when the instance registers it with a grant in U or the duty map (`direct`) → ONE
+context column through its reference object (`reference`; table keying: the release's primary, multi-context only
+under an audited prefix; area keying: the context the area binds, the column a trace names) → pool 2 (`direct`).
+Privilege, first that applies: curated row (area keying: keyed to the condition's entity, else any row of the area on
+the object) → sensitive → HCM duty map (area keying: the area's duties) → U ∩ product prefixes, one grant-set class
+(`rule`) → the job-role consensus of the area (`consensus`, area keying, non-HCM, from `customer.sec_instance_role_grant`)
+→ END-USER only: the strictest of candidates (`strictest`, the area's own-module tables, every class AND-ed in the one
+condition) → pool 2 (`granted`, developer only). Anything else = `blocked` with the candidates. The END-USER plan
+reads a `none` table by the structural rule (`structural`: no declared / mined relationship to secured data, or a
+reference-family member) and never a business table no subject area reads (`readInstead`). Coverage through the
+resolver: `security_coverage_resolver.sh <pod host>` (developer + end-user views per (table, area), the
+consensus-vs-rule disagreements, the decision-4 check).
+
+## The OTBI trace loader — `sec_trace.py` (names only, revised phase 3, 2026-10-05)
+
+NOT a chain step: it turns ONE OTBI LOGLEVEL-7 capture (a Session Monitor export, HTML or MHTML) into curated
+`areaPrivileges` rows of `p5_security_rules.json` (source `trace`); a release built afterwards carries them
+(`sec_area_privilege`, the row's `column` → `context_column`). Predicate text is never stored or printed — the
+evidence is the capture's file name, the number of grant blocks and their SHA-256 + length; the ids live only in the
+gitignored drop folder. Which analyses to capture and how: `docs/trace-capture-guide.md`.
+
+```bash
+T=/mnt/c/.../fusion-schema-mcp
+wsl -d CloudBeaver -u root -e bash -lc "cd $T && python3 scripts/pipeline/sec_trace.py extract 'data/security/traces/<capture>.mhtml' --out data/security/traces/<capture>"
+#   -> <capture>/blocks.json (per grant block: object / function / instance-set ids, the entity alias + its FROM table + key,
+#      the TABLE.COLUMNs the statement joins to that key, block hashes) + <capture>/resolve.sql (ONE read-only statement)
+#   run resolve.sql through pod-mcp runSql on the pod the capture came from; save the reply VERBATIM as <capture>/resolve.json
+wsl -d CloudBeaver -u root -e bash -lc "cd $T && python3 scripts/pipeline/sec_trace.py load data/security/traces/<capture> --area '<subject area>' --instances <pod host> --dry-run"
+wsl -d CloudBeaver -u root -e bash -lc "cd $T && python3 scripts/pipeline/sec_trace.py load data/security/traces/<capture> --area '<subject area>' --instances <pod host>"
+```
+
+One row per (object, privilege) of the capture: `{area, object, privilege, source: "trace", instances, entity?,
+column?, evidence}` — `entity` when the blocks name exactly one FROM table for their alias, `column` when exactly one
+TABLE.COLUMN joins its key (else the row stays area-level and the note says why). The upsert keeps every other byte
+of the rules file: a row of the same (area, object) is REPLACED (an inferred row, or a trace row with the same
+privilege); a trace row of that (area, object) naming ANOTHER privilege refuses the load (two traces disagree — decide
+by hand). `--area` and `--instances` are required (a pod host exactly as runSql reports `instance`, or `*` when the
+pair is Oracle-seeded and the reviewer accepts it for every pod). Tests: `test/test_sec_trace.py` (synthetic capture,
+`python3 test/test_sec_trace.py` in the distro). Acceptance 2026-10-05: both Kornit TEST captures
+(`data/security/coverage/Session Monitor.html` and `.mhtml`, different runs) reproduce the AP row —
+`FUN_ALL_BUSINESS_UNITS_V` / `AP_REPORT_PAYABLES_DATA`, entity `FUN_BU_PERF_V` (alias `BusinessUnit`, key `BU_ID`),
+joined by `AP_INVOICES_ALL.ORG_ID`; loaded into the `Payables` row (rules 8).
 
 ## Experiments — `x*` scripts, NOT part of the build
 

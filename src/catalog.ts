@@ -7,6 +7,7 @@ import { getTableGrain } from "./corpus/grainRegistry.js";
 import { getTableUsages } from "./corpus/usageGraph.js";
 import { getTableRules } from "./corpus/tableRules.js";
 import { getTablePredicates } from "./corpus/predicateMiner.js";
+import { dataSecurityFor } from "./corpus/dataAccess.js";
 import { normName, suggestNames } from "./util.js";
 
 // In-memory table-name list for fuzzy did-you-mean (~30k strings, cheap): the provider's snapshot,
@@ -42,7 +43,7 @@ export async function searchTables(query: string, limit = 20) {
   }));
 }
 
-export async function getTable(name: string) {
+export async function getTable(name: string, instance?: string) {
   const n = normName(name);
   const t = await db().schema.getTable(n);
   if (!t) return null;
@@ -57,11 +58,11 @@ export async function getTable(name: string) {
     viewText: t.view_text,
     primaryKey: pk,
     columnCount: cc,
-    ...(await mostlyUsedStats(n)),
+    ...(await mostlyUsedStats(n, instance)),
   };
 }
 
-export async function getColumns(table: string, opts?: { like?: string; limit?: number }) {
+export async function getColumns(table: string, opts?: { like?: string; limit?: number; instance?: string }) {
   const n = normName(table);
   if (!nameSet().has(n)) return { tableExists: false, columns: [] as any[] };
   const pk = new Set(await db().schema.primaryKey(n));
@@ -77,7 +78,10 @@ export async function getColumns(table: string, opts?: { like?: string; limit?: 
   const shown = rows.length;
   const truncated = rows.length > cap;
   if (truncated) rows = rows.slice(0, cap);
-  const cols = rows.map((r) => ({
+  // OTBI exposure per column (facts only, ddl_version 9 otbi_column_ref): how many subject areas expose it —
+  // an end user reads only what a subject area exposes (getSecuredQueryPlan's column whitelist)
+  const exposed = new Map((await db().otbi.exposedIn(n)).map((e) => [e.db_column, e.areas]));
+  const cols: any[] = rows.map((r) => ({
     name: r.name,
     dataType: r.data_type,
     size: r.size,
@@ -85,8 +89,14 @@ export async function getColumns(table: string, opts?: { like?: string; limit?: 
     remarks: r.remarks ? String(r.remarks).replace(/\s+/g, " ").trim().slice(0, 140) : null,
     ordinal: r.ordinal,
     isPrimaryKey: pk.has(r.name),
+    ...(exposed.get(r.name) ? { exposedIn: exposed.get(r.name) } : {}),
   }));
-  const res: any = { tableExists: true, totalColumns: total, returned: cols.length, columns: cols, ...(await mostlyUsedStats(n)) };
+  const res: any = { tableExists: true, totalColumns: total, returned: cols.length, columns: cols, ...(await mostlyUsedStats(n, opts?.instance)) };
+  // sensitive facts per column: a raw column never to select carries the masked twin to read instead
+  for (const m of (res.dataSecurity?.masked ?? []) as { column: string; use: string }[]) {
+    const c = cols.find((x) => x.name === m.column);
+    if (c) c.readInstead = m.use;
+  }
   if (truncated) {
     res.note = `Showing ${cols.length} of ${shown}${opts?.like ? ` matching '${opts.like}'` : ""} (table has ${total} columns). ` +
       `Refine with getColumns(table, {like:'...'}), searchColumns for a concept, or validateColumns(table, [...]).`;
@@ -141,7 +151,7 @@ export async function searchColumns(table: string, query: string, limit = 20) {
   return { tableExists: true, totalColumns: rows.length, query, columns };
 }
 
-export async function validateTable(name: string) {
+export async function validateTable(name: string, instance?: string) {
   const n = normName(name);
   if (nameSet().has(n)) {
     const t = (await db().schema.getTable(n))!;
@@ -151,7 +161,7 @@ export async function validateTable(name: string) {
     return {
       exists: true,
       table: { name: t.name, type: t.type, module: t.module, remarks: t.remarks },
-      ...(await mostlyUsedStats(t.name)),
+      ...(await mostlyUsedStats(t.name, instance)),
       ...(usages.length ? { topUsages: usages } : {}),
       suggestions: [] as string[],
     };
@@ -194,7 +204,7 @@ export async function grainFor(name: string): Promise<any> {
  *  at import — no skip-lists, counts per canonical query) and which of its columns participate in JOIN
  *  conditions (mostlyUsedJoinFilters, column-participation share — the model picks the paired field).
  *  The agent contract: apply each hint, ask the user, or say why not — never silently ignore. */
-export async function mostlyUsedStats(name: string) {
+export async function mostlyUsedStats(name: string, instance?: string) {
   const n = normName(name);
   const out: any = {};
   const f = await db().registries.topPredicates(n, 8);
@@ -206,6 +216,13 @@ export async function mostlyUsedStats(name: string) {
   // Bounded (5, >= 2 statements); the full list + sample calls come from findPlsqlApi({table}).
   const a = (await db().plsql.forTable(n, 5)).filter((r) => r.table_statements >= 2);
   if (a.length) out.mostlyUsedApis = a.map((r) => ({ api: `${r.package_name}.${r.function_name}`, statements: r.table_statements, share: r.share }));
+  // Data-access security (spec §7 names-only, resolver src/corpus/dataAccess.ts): the context columns
+  // with their reference objects (every one applies), `disallowed`, `hcm`, and — with `instance` (the
+  // pod host, REQUIRED for a verdict; unknown = a loud error) — the verdict on that pod: secured
+  // (the (object, privilege) conditions) | blocked (reason + candidates) | none (reference data).
+  // Absent when the object is unknown or the catalog carries no facts — never reported as `none`.
+  const ds = await dataSecurityFor(n, instance);
+  if (ds) out.dataSecurity = ds;
   return out;
 }
 
@@ -263,7 +280,7 @@ export async function tableUsages(name: string, opts: { limit?: number; brief?: 
   try { return await getTableUsages(name, opts); } catch { return { table: normName(name), usageCount: 0, usages: [] }; }
 }
 
-export async function validateColumns(table: string, columns: string[]) {
+export async function validateColumns(table: string, columns: string[], instance?: string) {
   const n = normName(table);
   const tableExists = nameSet().has(n);
   if (!tableExists) {
@@ -295,7 +312,7 @@ export async function validateColumns(table: string, columns: string[]) {
     table: n,
     tableExists: true,
     results,
-    ...(await mostlyUsedStats(n)),
+    ...(await mostlyUsedStats(n, instance)),
   };
 }
 
@@ -579,18 +596,22 @@ export async function findSimilarQueries(
 
 /** Exact query by TITLE or by ID. Title -> the MAIN (largest) dataset of that .xdm + a `datasets`
  *  list of sibling datasets (fetch each by id). Id -> that exact row, at FULL size (this is how the
- *  caller pulls the SQL that findSimilarQueries omitted for being large — it returns the match's id). */
+ *  caller pulls the SQL that findSimilarQueries omitted for being large — it returns the match's id).
+ *  A title resolves through `unit_titles` (every L2 unit title → its statement), so an OTBI
+ *  `<SA>.<Folder>` whose physical SQL is shared with other folders still resolves: the reply carries
+ *  the `requestedTitle` and the row's canonical `title` (the primary unit's). */
 export async function getReportQuery(arg: string) {
-  const isId = /^sql:/.test(arg); // every corpus id is sql:<hash> (v2026_10); view:/otbi: are reference paths in `reports`
+  const isId = /^sql:/.test(arg); // every corpus id is sql:<hash> (v2026_10); the old view:/otbi: ids are unit_titles / `reports` references
   const r = isId ? await db().corpus.byId(arg) : await db().corpus.byTitle(arg);
   if (!r) {
     const suggestions = isId ? [] : await db().corpus.nearTitles(`%${arg}%`);
     return { found: false, suggestions };
   }
   // when a title has multiple datasets, expose the others so nothing stays hidden
-  const sibs = isId ? [] : (await db().corpus.siblings(r.title)).filter((x) => x.id !== r.id);
+  const sibs = isId ? [] : (await db().corpus.siblings(arg)).filter((x) => x.id !== r.id);
   return {
     found: true, id: r.id, source: r.source, title: r.title,
+    ...(isId || arg === r.title ? {} : { requestedTitle: arg }),
     originalSql: r.original_sql, cleanSql: r.clean_sql, description: r.description,
     tablesUsed: JSON.parse(r.tables_used ?? "[]"),
     joins: JSON.parse(r.joins ?? "[]"),
@@ -604,9 +625,11 @@ export async function getReportQuery(arg: string) {
   };
 }
 
-/** All report queries under a subject area (OTBI). Matches "<area>.*" then falls back to "<area>%". */
+/** All report queries under a subject area (OTBI). Matches "<area>.*" then falls back to "<area>%".
+ *  Every unit title is reachable (unit_titles), so a folder whose SQL is shared with another folder
+ *  is listed under its OWN title, with `canonicalTitle` = the corpus row's title. */
 export async function listQueriesForSubjectArea(area: string, limit = 100) {
   let rows = await db().corpus.byTitlePrefix(`${area}.%`, limit);
   if (rows.length === 0) rows = await db().corpus.byTitlePrefix(`${area}%`, limit);
-  return rows.map((r) => ({ id: r.id, source: r.source, title: r.title, description: r.description }));
+  return rows.map((r) => ({ id: r.id, source: r.source, title: r.title, canonicalTitle: r.canonicalTitle, description: r.description }));
 }

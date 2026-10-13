@@ -25,6 +25,11 @@ COPY test ./test
 COPY scripts/no-sql-outside-db.sh ./scripts/no-sql-outside-db.sh
 # the landed Postgres DDL — the contract suite seeds its throwaway database from it
 COPY scripts/pg-import/ddl.sql ./scripts/pg-import/ddl.sql
+# the data-access facts job + its curated rules + the release gate — test/securityJob.test.ts runs the job (on the
+# SYNTHETIC policy extract test/fixtures/datasec-policies.csv) and p6_verify.sql's gates itself, test/dataAccess.test.ts
+# builds sec_meta from the same rules (build stage only). No customer pod data enters the image: Oracle's policy
+# extract read from a pod is a local, gitignored pipeline input, and the pod data-security export is gone (ddl_version 9).
+COPY scripts/pipeline/p5_security.sql scripts/pipeline/p5_security_rules.json scripts/pipeline/p6_verify.sql ./scripts/pipeline/
 RUN npm run build
 # non-TS corpus assets ride along into dist (tsc copies only .ts): layout-pattern JSONL + fixtures.
 # shard-* dirs are curation provenance (experiments, render-check PNGs) — merged into the main

@@ -18,6 +18,7 @@ import { load as loadVec } from "sqlite-vec";
 import { BaseProvider, type RunResult, type TableName } from "../base/provider.js";
 import { BaseRegistries } from "../base/registries.js";
 import { BasePlsql } from "../base/plsql.js";
+import { BaseSecurity } from "../base/security.js";
 import { BaseRules } from "../base/rules.js";
 import { BaseColCache } from "../base/colCache.js";
 import { SqliteMeta } from "./meta.js";
@@ -26,6 +27,7 @@ import { SqliteCorpus } from "./corpus.js";
 import { SqliteLayout } from "./layout.js";
 import { SqliteFlex } from "./flex.js";
 import { SqliteEnrich } from "./enrich.js";
+import { SqliteOtbi } from "./otbi.js";
 import { sqlQuote, type SqliteFiles } from "./paths.js";
 
 export interface SqliteConfig {
@@ -44,10 +46,15 @@ const DB_OF: Record<TableName, string> = {
   table_grain: "main", grain_meta: "main", table_usages: "main", usage_meta: "main",
   table_predicates: "main", pred_meta: "main", table_join_columns: "main",
   plsql_packages: "main", plsql_api: "main", plsql_api_tables: "main", plsql_meta: "main",
+  otbi_subject_area: "main", otbi_folder: "main", otbi_column: "main", otbi_vec: "main", otbi_meta: "main", unit_titles: "main",
+  otbi_vo: "main", otbi_column_ref: "main", otbi_area_duty: "main", otbi_area_job: "main", table_reference_family: "main",
+  table_security: "main", table_disallowed: "main", sec_area_privilege: "main", sec_meta: "main",
   layout_patterns: "main", layout_patterns_vec: "main", layout_meta: "main",
   flexfields: "main", adf_extensions: "main",
   enrich_usage: "main", batch_jobs: "main", batch_items: "main", gjob_jobs: "main", gjob_items: "main", gjob_control: "main",
   enrich: "enrichdb", col_vec: "cachedb", table_rules: "factsdb", facts_meta: "factsdb",
+  sec_instance: "factsdb", sec_instance_object: "factsdb", sec_instance_privilege: "factsdb", sec_instance_u: "factsdb", sec_instance_duty: "factsdb",
+  sec_instance_duty_alias: "factsdb", sec_instance_role_grant: "factsdb",
 };
 
 export class SqliteProvider extends BaseProvider {
@@ -63,6 +70,8 @@ export class SqliteProvider extends BaseProvider {
   corpus: SqliteCorpus = new SqliteCorpus(this);
   registries: BaseRegistries = new BaseRegistries(this);
   plsql: BasePlsql = new BasePlsql(this);
+  otbi: SqliteOtbi = new SqliteOtbi(this);
+  security: BaseSecurity = new BaseSecurity(this);
   flex: SqliteFlex = new SqliteFlex(this);
   layout: SqliteLayout = new SqliteLayout(this);
   rules: BaseRules = new BaseRules(this);

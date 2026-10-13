@@ -39,6 +39,12 @@ export class BaseRegistries implements RegistriesApi {
       [table, limit]);
   }
 
+  async predicateColumns(table: string): Promise<string[]> {
+    const rows = await this.p.q<{ column_name: string }>(
+      `SELECT column_name FROM (SELECT DISTINCT column_name FROM ${this.p.t("table_predicates")} WHERE table_name = ?) x ORDER BY column_name${this.p.coll()}`, [table]);
+    return rows.map((r) => r.column_name);
+  }
+
   async version(kind: T.RegistryKind): Promise<string | null> {
     const rows = await this.p.q<{ v: string }>(`SELECT v FROM ${this.p.t(META_OF[kind])} WHERE k='version'`);
     return rows[0]?.v ?? null;
