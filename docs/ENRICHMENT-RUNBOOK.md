@@ -63,17 +63,17 @@ compose is fine — the BATCH endpoints use the API key directly regardless of p
 Queue / progress at any time: `GET /ingest/reenrich/status?sources=bip-report,view`
 → `{total, done, pending}` (`done` = mechanics NOT NULL).
 
-## Subscription path (agent provider) — guards
+## Subscription path (agent provider)
 
-If running through the subscription instead of an API key, the usage guards keep you from locking
-yourself out of interactive Claude:
+If running through the subscription instead of an API key, nothing reads the remaining
+subscription usage — a run can spend the whole window and lock you out of interactive Claude:
 
-- `GET fusion-agent /api/internal/limits` → `{fiveHour, sevenDay}` utilization % (needs the
-  interactive login credential mounted ro — `CLAUDE_CREDENTIALS_FILE`; the container's inference
-  token lacks the `user:profile` scope).
-- `POST /ingest/reenrich` refuses at `ENRICH_USAGE_STOP` (5h, default 90%) or `ENRICH_WEEKLY_STOP`
-  (7d, default 70%), returning `{skipped:"usage-guard"}`. A driver loop backs off and resumes when
-  the window reopens.
+- Each model call retries HTTP 429 / 5xx / network errors up to 3 times with exponential backoff
+  (1s, 2s, 4s; `enrichAdapters.ts`). fusion-agent's `/api/internal/llm` reports any SDK failure as
+  HTTP 502 (never 429). A row whose retries run out is counted `failed` and stays in the queue
+  (`mechanics IS NULL`) for the next run. Nothing stops a run when failures repeat.
+- Size each run with `limit` and watch `failed` / `errors` in the response; stop the driver loop
+  when `failed` climbs.
 - Driver durability: run the drain loop as a **background subagent**, NOT a host `wsl.exe bash -c
   '… &'` — those die when wsl.exe returns.
 

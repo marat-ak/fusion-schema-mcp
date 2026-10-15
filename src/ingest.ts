@@ -373,38 +373,11 @@ export function createIngestRouter(): express.Router {
   // single oversized SQL is its own batch) — one call analyzes several SQLs, cutting subprocess
   // spawns AND request count (rate-limit headroom). Batches run through a concurrency pool.
   // Per-call token usage is recorded (enrich_usage) for cost analysis. Resumable by design: the
-  // queue is `mechanics IS NULL`, so crashes / usage-window pauses lose nothing.
+  // queue is `mechanics IS NULL`, so crashes / failed rows lose nothing (they are retried next run).
   //   POST /ingest/reenrich?sources=bip-report,view&limit=300&model=claude-opus-5&batchItems=6&batchChars=14000
   //   GET  /ingest/reenrich/status?sources=…    GET /ingest/reenrich/cost?sources=…
-  // Subscription-usage guard: refuse to burn the window past ENRICH_USAGE_STOP % (default 90) so
-  // bulk enrichment never locks the owner out of interactive Claude use. Reads the remaining-usage
-  // endpoint on fusion-agent; unreachable/unconfigured => no guard (fail-open, the 429 backoff
-  // still protects).
-  async function usageGuard(): Promise<{ blocked: boolean; utilization?: number; weekly?: number; reason?: string }> {
-    const stopAt = Number(process.env.ENRICH_USAGE_STOP ?? 90);        // five-hour window
-    const weeklyStop = Number(process.env.ENRICH_WEEKLY_STOP ?? 70);   // seven-day window
-    if (!(stopAt > 0) && !(weeklyStop > 0)) return { blocked: false };
-    try {
-      const base = (process.env.ENRICH_URL ?? "http://fusion-agent:8980/api/internal/llm").replace(/\/api\/internal\/llm.*$/, "");
-      const r = await fetch(`${base}/api/internal/limits`, { headers: { authorization: `Bearer ${process.env.INGEST_TOKEN ?? ""}` } });
-      if (!r.ok) return { blocked: false };
-      const j: any = await r.json();
-      const u = Number(j?.fiveHour?.utilizationPct ?? 0);
-      const w = Number(j?.sevenDay?.utilizationPct ?? 0);
-      if (stopAt > 0 && u >= stopAt) return { blocked: true, utilization: u, weekly: w, reason: "five-hour" };
-      if (weeklyStop > 0 && w >= weeklyStop) return { blocked: true, utilization: u, weekly: w, reason: "seven-day" };
-      return { blocked: false, utilization: u, weekly: w };
-    } catch { return { blocked: false }; }
-  }
-
   router.post("/ingest/reenrich", requireAuth, async (req, res) => {
     try {
-      const guard = await usageGuard();
-      if (guard.blocked) {
-        const sources0 = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
-        res.json({ ok: true, skipped: "usage-guard", guardReason: guard.reason, fiveHourUtilizationPct: guard.utilization, sevenDayUtilizationPct: guard.weekly, processed: 0, failed: 0, ...(await reenrichCounts(sources0)) });
-        return;
-      }
       const sources = String(req.query.sources ?? "bip-report,view").split(",").map((s) => s.trim()).filter(Boolean);
       const limit = Math.max(1, Number(req.query.limit) || 100);
       const modelOverride = typeof req.query.model === "string" && req.query.model.trim() ? req.query.model.trim() : undefined;
