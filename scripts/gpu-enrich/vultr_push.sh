@@ -2,7 +2,7 @@
 # Pack the enrichment run dir (current DBs w/ persisted views + outputs + scripts) -> tar.gz -> Vultr -> unpack.
 # Runs in the CloudBeaver distro. Doesn't touch the live Vultr stack (lands in deploy's ~/enrich-run).
 set -e
-K=/root/.ssh/fusion_deploy
+K=/mnt/e/Marat/Vultr/deploy_user.key   # prod deploy key lives on the Windows host (E:/Marat/Vultr)
 R=/root/enrich-run
 A=/root/enrich-run.tar.gz
 HOST=deploy@136.244.90.237
